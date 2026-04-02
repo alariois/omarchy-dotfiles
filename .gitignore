@@ -1,0 +1,30 @@
+# Ignore everything by default
+*
+
+# Allow .gitignore and README
+!.gitignore
+!README.md
+
+# Allow config directories (still need to explicitly add individual files)
+!.config/
+!.config/hypr/
+!.config/hypr/**
+!.config/tmux/
+!.config/tmux/**
+!.config/waybar/
+!.config/waybar/**
+!.config/omarchy/
+!.config/omarchy/**
+!.config/mako/
+!.config/mako/**
+!.config/ghostty/
+!.config/ghostty/**
+!.config/starship.toml
+
+# Allow bashrc
+!.bashrc
+
+# Ignore secrets and caches that might end up in config dirs
+**/*.secret
+**/*.key
+**/*.pem
