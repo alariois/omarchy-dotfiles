@@ -26,6 +26,8 @@
 !.config/mako/**
 !.config/ghostty/
 !.config/ghostty/**
+!.config/nvim/
+!.config/nvim/**
 !.config/starship.toml
 
 # Exclude stock omarchy files (restored by omarchy-theme-set / omarchy-refresh)
