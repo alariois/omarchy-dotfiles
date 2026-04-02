@@ -8,6 +8,10 @@
 # Allow bashrc
 !.bashrc
 
+# Allow setup scripts
+!setup/
+!setup/**
+
 # Allow config directories
 !.config/
 !.config/hypr/
