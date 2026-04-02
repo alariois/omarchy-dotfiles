@@ -5,7 +5,10 @@
 !.gitignore
 !README.md
 
-# Allow config directories (still need to explicitly add individual files)
+# Allow bashrc
+!.bashrc
+
+# Allow config directories
 !.config/
 !.config/hypr/
 !.config/hypr/**
@@ -21,10 +24,17 @@
 !.config/ghostty/**
 !.config/starship.toml
 
-# Allow bashrc
-!.bashrc
+# Exclude stock omarchy files (restored by omarchy-theme-set / omarchy-refresh)
+.config/hypr/shaders/
+.config/omarchy/current/
+.config/omarchy/branding/
+.config/omarchy/hooks/*.sample
+.config/omarchy/themed/*.sample
+.config/omarchy/extensions/
 
-# Ignore secrets and caches that might end up in config dirs
+# Ignore secrets, caches, and binaries
 **/*.secret
 **/*.key
 **/*.pem
+**/*.jpg
+**/*.png
