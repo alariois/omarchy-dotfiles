@@ -155,26 +155,38 @@ typedef struct {
     int  found;
 } TmuxClient;
 
-/* Find the tmux client running inside the active Hyprland window */
+/*
+ * Find the tmux client in the focused terminal window.
+ *
+ * Multi-window terminals (e.g. Ghostty) share a single PID across all
+ * windows, so PID ancestry alone can't distinguish them.  Instead we
+ * rely on tmux's focus tracking (requires `set -g focus-events on`):
+ * only the client whose terminal window currently has Wayland keyboard
+ * focus carries the "focused" flag.  We additionally verify that the
+ * client is a descendant of win_pid to avoid cross-terminal-app matches.
+ */
 static TmuxClient find_tmux_client(long win_pid)
 {
     TmuxClient tc = { .found = 0 };
     FILE *fp = popen(
-        "tmux list-clients -F '#{client_pid} #{pane_id} #{window_id}' 2>/dev/null",
+        "tmux list-clients "
+        "-F '#{client_flags} #{client_pid} #{pane_id} #{window_id}' 2>/dev/null",
         "r");
     if (!fp) return tc;
 
     char line[256];
     while (fgets(line, sizeof(line), fp)) {
+        if (!strstr(line, "focused"))
+            continue;
+
+        char flags[64], pid[32], wid[32];
         long cpid;
-        char pid[32], wid[32];
-        if (sscanf(line, "%ld %31s %31s", &cpid, pid, wid) == 3) {
-            if (is_ancestor_of(win_pid, cpid)) {
-                strncpy(tc.pane_id, pid, sizeof(tc.pane_id) - 1);
-                strncpy(tc.window_id, wid, sizeof(tc.window_id) - 1);
-                tc.found = 1;
-                break;
-            }
+        if (sscanf(line, "%63s %ld %31s %31s", flags, &cpid, pid, wid) == 4
+            && is_ancestor_of(win_pid, cpid)) {
+            strncpy(tc.pane_id, pid, sizeof(tc.pane_id) - 1);
+            strncpy(tc.window_id, wid, sizeof(tc.window_id) - 1);
+            tc.found = 1;
+            break;
         }
     }
     pclose(fp);
