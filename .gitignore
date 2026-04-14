@@ -30,6 +30,13 @@
 !.config/nvim/**
 !.config/starship.toml
 
+# Allow hypr-nav source
+!.local/
+!.local/src/
+!.local/src/hypr-nav/
+!.local/src/hypr-nav/**
+.local/src/hypr-nav/hypr-nav
+
 # Exclude stock omarchy files (restored by omarchy-theme-set / omarchy-refresh)
 .config/hypr/shaders/
 .config/omarchy/current/
