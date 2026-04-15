@@ -8,6 +8,9 @@
 # Allow bashrc
 !.bashrc
 
+# Allow XCompose
+!.XCompose
+
 # Allow setup scripts
 !setup/
 !setup/**

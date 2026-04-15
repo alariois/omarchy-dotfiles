@@ -1,0 +1,23 @@
+# Run omarchy-restart-xcompose to apply changes
+
+# Include fast emoji access
+include "%H/.local/share/omarchy/default/xcompose"
+
+# Identification
+<Multi_key> <space> <n> : "Alari"
+<Multi_key> <space> <e> : "alari.ois.as@gmail.com"
+<Multi_key> <space> <s> : "alari@superhands.ee"
+<Multi_key> <space> <r> : "git@github.com:superhandsrepo/"
+<Multi_key> <space> <i> : "38901285256"
+<Multi_key> <space> <0> : "192.168.0."
+<Multi_key> <space> <1> : "192.168.1."
+
+# Estonian letters by US-keyboard position
+<Multi_key> <semicolon>    : "ö"
+<Multi_key> <colon>        : "Ö"
+<Multi_key> <apostrophe>   : "ä"
+<Multi_key> <quotedbl>     : "Ä"
+<Multi_key> <bracketleft>  : "õ"
+<Multi_key> <braceleft>    : "Õ"
+<Multi_key> <bracketright> : "ü"
+<Multi_key> <braceright>   : "Ü"
