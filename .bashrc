@@ -15,3 +15,7 @@ source ~/.local/share/omarchy/default/bash/rc
 set -o vi
 
 alias dot='git --git-dir=$HOME/.dotfiles --work-tree=$HOME'
+
+source /usr/share/nvm/init-nvm.sh
+
+alias nv="NVIM_APPNAME='nvim-chad' nvim"

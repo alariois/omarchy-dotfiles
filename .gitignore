@@ -31,6 +31,8 @@
 !.config/ghostty/**
 !.config/nvim/
 !.config/nvim/**
+!.config/nvim-chad/
+!.config/nvim-chad/**
 !.config/starship.toml
 
 # Allow hypr-nav source
