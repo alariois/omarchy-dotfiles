@@ -9,7 +9,7 @@
  * When called from vim (--from-vim):
  *   - Tries tmux pane navigation, falls back to Hyprland movefocus
  *
- * Usage: hypr-nav <l|d|u|r> [--from-vim]
+ * Usage: hypr-nav <l|d|u|r> [--from-vim] [--verbose]
  */
 
 #include <ctype.h>
@@ -20,7 +20,13 @@
 
 #define BUF_SZ 512
 
-/* ── Utilities ──────────────────────────────────────────────────────── */
+/* ── Debug ─────────────────────────────────────────────────────────── */
+
+static int verbose = 0;
+
+#define dbg(...) do { if (verbose) fprintf(stderr, "[hypr-nav] " __VA_ARGS__); } while(0)
+
+/* ── Utilities ─────────────────────────────────────────────────────── */
 
 static int cmd_out(const char *cmd, char *buf, size_t sz)
 {
@@ -37,8 +43,10 @@ static int cmd_out(const char *cmd, char *buf, size_t sz)
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
+/* ── Process tree ──────────────────────────────────────────────────── */
+
 /* Read PPID from /proc/<pid>/stat (no fork, fast) */
-static long get_ppid(long pid)
+static long get_ppid_proc(long pid)
 {
     char path[64];
     snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
@@ -55,6 +63,16 @@ static long get_ppid(long pid)
     return ppid;
 }
 
+/* Function pointer for get_ppid — swappable for testing */
+typedef long (*ppid_fn_t)(long pid);
+
+#ifndef TESTING
+static
+#endif
+ppid_fn_t ppid_fn = get_ppid_proc;
+
+static long get_ppid(long pid) { return ppid_fn(pid); }
+
 static int is_ancestor_of(long ancestor, long pid)
 {
     long p = pid;
@@ -67,7 +85,7 @@ static int is_ancestor_of(long ancestor, long pid)
     return 0;
 }
 
-/* ── Direction mapping ──────────────────────────────────────────────── */
+/* ── Direction mapping ─────────────────────────────────────────────── */
 
 typedef struct {
     char key;           /* l, d, u, r           */
@@ -89,12 +107,40 @@ static const Dir *dir_lookup(char c)
     return NULL;
 }
 
-/* ── Hyprland ───────────────────────────────────────────────────────── */
+/* ── Hyprland ──────────────────────────────────────────────────────── */
 
 typedef struct {
     long pid;
     char class[128];
 } WinInfo;
+
+/* Parse hyprctl activewindow JSON into WinInfo (pure function, no I/O) */
+static int parse_active_window(const char *json, WinInfo *w)
+{
+    w->pid = 0;
+    w->class[0] = '\0';
+
+    if (!json || !*json) return -1;
+
+    /* Extract "pid": NUMBER */
+    const char *p = strstr(json, "\"pid\"");
+    if (p && (p = strchr(p, ':')))
+        w->pid = atol(p + 1);
+
+    /* Extract "class": "STRING" — match first "class" key */
+    p = strstr(json, "\"class\"");
+    if (p && (p = strchr(p, ':')) && (p = strchr(p, '"'))) {
+        p++;
+        const char *end = strchr(p, '"');
+        if (end) {
+            size_t len = (size_t)(end - p);
+            if (len >= sizeof(w->class)) len = sizeof(w->class) - 1;
+            memcpy(w->class, p, len);
+            w->class[len] = '\0';
+        }
+    }
+    return 0;
+}
 
 static WinInfo get_active_window(void)
 {
@@ -105,24 +151,7 @@ static WinInfo get_active_window(void)
     size_t n = fread(json, 1, sizeof(json) - 1, fp);
     pclose(fp);
     json[n] = '\0';
-
-    /* Extract "pid": NUMBER */
-    char *p = strstr(json, "\"pid\"");
-    if (p && (p = strchr(p, ':')))
-        w.pid = atol(p + 1);
-
-    /* Extract "class": "STRING" */
-    p = strstr(json, "\"class\"");
-    if (p && (p = strchr(p, ':')) && (p = strchr(p, '"'))) {
-        p++;
-        char *end = strchr(p, '"');
-        if (end) {
-            size_t len = end - p;
-            if (len >= sizeof(w.class)) len = sizeof(w.class) - 1;
-            memcpy(w.class, p, len);
-            w.class[len] = '\0';
-        }
-    }
+    parse_active_window(json, &w);
     return w;
 }
 
@@ -142,18 +171,41 @@ static int is_terminal(const char *class)
 
 static void hypr_move(char d)
 {
+    dbg("fallback: hyprctl dispatch movefocus %c\n", d);
     char cmd[64];
     snprintf(cmd, sizeof(cmd), "hyprctl dispatch movefocus %c", d);
     system(cmd);
 }
 
-/* ── tmux ───────────────────────────────────────────────────────────── */
+/* ── tmux ──────────────────────────────────────────────────────────── */
 
 typedef struct {
     char pane_id[32];   /* e.g. %5  */
     char window_id[32]; /* e.g. @3  */
     int  found;
 } TmuxClient;
+
+/*
+ * Parse a single line from `tmux list-clients -F '#{client_flags} ...'`
+ * Returns 1 if the line has the "focused" flag and all fields parsed, 0 otherwise.
+ */
+static int parse_tmux_client_line(const char *line, char *pane_id, size_t pane_sz,
+                                  char *window_id, size_t win_sz, long *cpid)
+{
+    if (!strstr(line, "focused"))
+        return 0;
+
+    char flags[64];
+    char pid_buf[32], wid_buf[32];
+    if (sscanf(line, "%63s %ld %31s %31s", flags, cpid, pid_buf, wid_buf) != 4)
+        return 0;
+
+    strncpy(pane_id, pid_buf, pane_sz - 1);
+    pane_id[pane_sz - 1] = '\0';
+    strncpy(window_id, wid_buf, win_sz - 1);
+    window_id[win_sz - 1] = '\0';
+    return 1;
+}
 
 /*
  * Find the tmux client in the focused terminal window.
@@ -176,20 +228,22 @@ static TmuxClient find_tmux_client(long win_pid)
 
     char line[256];
     while (fgets(line, sizeof(line), fp)) {
-        if (!strstr(line, "focused"))
-            continue;
-
-        char flags[64], pid[32], wid[32];
         long cpid;
-        if (sscanf(line, "%63s %ld %31s %31s", flags, &cpid, pid, wid) == 4
+        char pane_id[32], window_id[32];
+
+        if (parse_tmux_client_line(line, pane_id, sizeof(pane_id),
+                                   window_id, sizeof(window_id), &cpid)
             && is_ancestor_of(win_pid, cpid)) {
-            strncpy(tc.pane_id, pid, sizeof(tc.pane_id) - 1);
-            strncpy(tc.window_id, wid, sizeof(tc.window_id) - 1);
+            strncpy(tc.pane_id, pane_id, sizeof(tc.pane_id) - 1);
+            strncpy(tc.window_id, window_id, sizeof(tc.window_id) - 1);
             tc.found = 1;
+            dbg("tmux client found: pane=%s window=%s cpid=%ld\n",
+                tc.pane_id, tc.window_id, cpid);
             break;
         }
     }
     pclose(fp);
+    if (!tc.found) dbg("no tmux client found for win_pid=%ld\n", win_pid);
     return tc;
 }
 
@@ -200,7 +254,9 @@ static int is_vim_in_pane(const char *pane_id)
              "tmux display-message -t '%s' -p '#{pane_current_command}'", pane_id);
     if (cmd_out(cmd, buf, sizeof(buf)) != 0) return 0;
     for (char *p = buf; *p; p++) *p = tolower(*p);
-    return strstr(buf, "vim") != NULL || strstr(buf, "view") != NULL;
+    int result = strstr(buf, "vim") != NULL || strstr(buf, "view") != NULL;
+    dbg("pane %s command='%s' is_vim=%d\n", pane_id, buf, result);
+    return result;
 }
 
 typedef struct { int x, y; char id[32]; } PanePos;
@@ -223,6 +279,19 @@ static PanePos get_pane_pos(const char *target)
 }
 
 /*
+ * Check if a pane move was in the expected direction (not a wrap-around).
+ * Pure function, no I/O.
+ */
+static int is_valid_move(const char *flag, int bx, int by, int ax, int ay)
+{
+    if (strcmp(flag, "-L") == 0) return ax < bx;
+    if (strcmp(flag, "-R") == 0) return ax > bx;
+    if (strcmp(flag, "-U") == 0) return ay < by;
+    if (strcmp(flag, "-D") == 0) return ay > by;
+    return 0;
+}
+
+/*
  * Try to move to an adjacent tmux pane.
  * Returns 1 if we moved in the correct direction, 0 if at edge.
  * Detects and undoes wrap-around (tmux select-pane wraps by default).
@@ -240,6 +309,8 @@ static int tmux_nav(const char *pane_id, const char *window_id, const char *flag
 
     /* Get current pane position (use explicit pane target or default) */
     PanePos before = get_pane_pos(pane_id);
+    dbg("tmux_nav: before pane=%s pos=(%d,%d) flag=%s\n",
+        before.id, before.x, before.y, flag);
 
     /* Attempt the move */
     if (pane_id)
@@ -250,25 +321,23 @@ static int tmux_nav(const char *pane_id, const char *window_id, const char *flag
 
     /* Query the now-active pane via window ID (works even from a subprocess) */
     PanePos after = get_pane_pos(window_id);
+    dbg("tmux_nav: after pane=%s pos=(%d,%d)\n", after.id, after.x, after.y);
 
     /* Same pane — single pane or no neighbor in that direction */
-    if (strcmp(before.id, after.id) == 0)
+    if (strcmp(before.id, after.id) == 0) {
+        dbg("tmux_nav: same pane, at edge\n");
         return 0;
+    }
 
     /* Verify we actually moved in the expected direction, not wrapped */
-    int ok = 0;
-    if (strcmp(flag, "-L") == 0)      ok = (after.x < before.x);
-    else if (strcmp(flag, "-R") == 0) ok = (after.x > before.x);
-    else if (strcmp(flag, "-U") == 0) ok = (after.y < before.y);
-    else if (strcmp(flag, "-D") == 0) ok = (after.y > before.y);
-
-    if (!ok) {
-        /* Wrapped around — undo by selecting the original pane */
+    if (!is_valid_move(flag, before.x, before.y, after.x, after.y)) {
+        dbg("tmux_nav: wrapped around, undoing\n");
         snprintf(cmd, sizeof(cmd), "tmux select-pane -t '%s'", before.id);
         system(cmd);
         return 0;
     }
 
+    dbg("tmux_nav: moved to pane %s\n", after.id);
     return 1;
 }
 
@@ -279,16 +348,27 @@ static void tmux_send(const char *pane_id, const char *keys)
         snprintf(cmd, sizeof(cmd), "tmux send-keys -t '%s' '%s'", pane_id, keys);
     else
         snprintf(cmd, sizeof(cmd), "tmux send-keys '%s'", keys);
+    dbg("sending keys '%s' to pane %s\n", keys, pane_id ? pane_id : "(default)");
     system(cmd);
 }
 
-/* ── Main ───────────────────────────────────────────────────────────── */
+/* ── Main ──────────────────────────────────────────────────────────── */
 
+#ifdef TESTING
+int hypr_nav_main(int argc, char *argv[])
+#else
 int main(int argc, char *argv[])
+#endif
 {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <l|d|u|r> [--from-vim]\n", argv[0]);
+        fprintf(stderr, "Usage: %s <l|d|u|r> [--from-vim] [--verbose]\n", argv[0]);
         return 1;
+    }
+
+    /* Check for --verbose anywhere in args */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "--debug") == 0)
+            verbose = 1;
     }
 
     const Dir *d = dir_lookup(argv[1][0]);
@@ -297,10 +377,18 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    int from_vim = argc >= 3 && strcmp(argv[2], "--from-vim") == 0;
+    int from_vim = 0;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--from-vim") == 0)
+            from_vim = 1;
+    }
+
+    dbg("direction=%c tflag=%s vkey=%s from_vim=%d\n",
+        d->key, d->tflag, d->vkey, from_vim);
 
     if (from_vim) {
         /* Vim already at its edge – try tmux pane, then Hyprland */
+        dbg("from-vim: trying tmux nav\n");
         if (!tmux_nav(NULL, NULL, d->tflag))
             hypr_move(d->key);
         return 0;
@@ -308,22 +396,28 @@ int main(int argc, char *argv[])
 
     /* Called from Hyprland */
     WinInfo win = get_active_window();
+    dbg("active window: pid=%ld class='%s'\n", win.pid, win.class);
+
     if (win.pid <= 0 || !is_terminal(win.class)) {
+        dbg("not a terminal, direct movefocus\n");
         hypr_move(d->key);
         return 0;
     }
 
     TmuxClient tc = find_tmux_client(win.pid);
     if (!tc.found) {
+        dbg("no tmux client, direct movefocus\n");
         hypr_move(d->key);
         return 0;
     }
 
     if (is_vim_in_pane(tc.pane_id)) {
         /* Let vim handle it – vim calls back with --from-vim at its edge */
+        dbg("vim detected, sending %s to vim\n", d->vkey);
         tmux_send(tc.pane_id, d->vkey);
     } else {
         /* Navigate tmux, fall back to Hyprland */
+        dbg("no vim, trying tmux nav\n");
         if (!tmux_nav(tc.pane_id, tc.window_id, d->tflag))
             hypr_move(d->key);
     }

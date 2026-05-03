@@ -41,6 +41,7 @@
 !.local/src/hypr-nav/
 !.local/src/hypr-nav/**
 .local/src/hypr-nav/hypr-nav
+.local/src/hypr-nav/test_hypr_nav
 
 # Exclude stock omarchy files (restored by omarchy-theme-set / omarchy-refresh)
 .config/hypr/shaders/
