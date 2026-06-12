@@ -56,3 +56,6 @@ vim.opt.clipboard = ""
 
 vim.opt.wrap = false
 
+-- Allow project-local .nvim.lua files (e.g. for containerized clangd)
+vim.o.exrc = true
+
