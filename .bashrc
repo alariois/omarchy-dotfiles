@@ -19,3 +19,7 @@ alias dot='git --git-dir=$HOME/.dotfiles --work-tree=$HOME'
 source /usr/share/nvm/init-nvm.sh
 
 alias nv="NVIM_APPNAME='nvim-chad' nvim"
+
+# Android SDK platform tools
+export PATH="$PATH:$HOME/Android/Sdk/platform-tools"
+. "$HOME/.cargo/env"
