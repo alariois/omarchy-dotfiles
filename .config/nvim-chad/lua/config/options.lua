@@ -59,3 +59,13 @@ vim.opt.wrap = false
 -- Allow project-local .nvim.lua files (e.g. for containerized clangd)
 vim.o.exrc = true
 
+-- Suppress rust-analyzer internal panics from interrupting editing
+local original_notify = vim.notify
+vim.notify = function(msg, level, opts)
+    if type(msg) == "string" and msg:match("request handler panicked") then
+        vim.log.levels.DEBUG = vim.log.levels.DEBUG -- silently discard
+        return
+    end
+    return original_notify(msg, level, opts)
+end
+
