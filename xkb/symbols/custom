@@ -1,0 +1,29 @@
+// Personal keyboard remappings, reconstructing the `custom:caps_esc_compose`
+// and `custom:ralt_super` options the 3.x system had. Those lived in
+// /usr/share/X11/xkb -- system-wide, root-owned, and lost on reinstall. These
+// live in ~/.config/xkb instead: libxkbcommon searches there first, so the same
+// options work per-user with no root and can be tracked in this repo.
+//
+// Referenced by xkb/rules/evdev, selected in hypr/input.lua.
+// Verify a change without applying it:
+//   xkbcli compile-keymap --layout us --options custom:caps_esc_compose
+
+// Caps Lock becomes Escape -- it is on the home row and Escape is not.
+// The freed Escape key becomes Compose, which is what drives ~/.XCompose.
+// Nothing is lost: Caps Lock itself stays reachable via both Shifts together,
+// from Omarchy's default shift:both_capslock_cancel.
+partial modifier_keys
+xkb_symbols "caps_esc_compose" {
+    replace key <CAPS> { [ Escape ] };
+    replace key <ESC>  { [ Multi_key ] };
+};
+
+// Right Alt becomes a second Super, alongside the real one. Adding it to Mod4
+// is what makes Hyprland's SUPER bindings fire from it; `replace key` alone
+// would only change the keysym. This does give up AltGr -- Right Alt leaves
+// Mod5 -- which is fine on a us layout that never used it.
+partial modifier_keys
+xkb_symbols "ralt_super" {
+    replace key <RALT> { [ Super_R ] };
+    modifier_map Mod4 { <RALT> };
+};

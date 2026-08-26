@@ -34,6 +34,9 @@ include "/usr/share/omarchy/default/xcompose"
 # seeds ~/.XCompose.local from xcompose/XCompose.local.seed when it is missing,
 # then never touches it again, so the contents stay on this machine only.
 #
-# Deliberately last: if this include ever fails to parse, everything above it
-# has already been read.
+# This file MUST exist. A missing include is fatal: libxkbcommon abandons the
+# whole Compose file, so every binding above would silently stop working, not
+# just this include. That is why install.sh seeds it and doctor.sh both checks
+# for it and compiles ~/.XCompose to prove it still parses. Verified with
+# `xkbcli compile-compose --test`.
 include "%H/.XCompose.local"

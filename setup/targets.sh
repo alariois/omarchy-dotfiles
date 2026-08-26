@@ -31,6 +31,7 @@ HOOKS=(
   "$HOME/.config/tmux/tmux.conf|tmux|tmux/tmux.conf"
   "$HOME/.config/nvim/lua/config/options.lua|lua|nvim/options.lua"
   "$HOME/.config/hypr/bindings.lua|lua|hypr/bindings.lua"
+  "$HOME/.config/hypr/input.lua|lua|hypr/input.lua"
 )
 
 LINKS=(
@@ -46,6 +47,11 @@ LINKS=(
 
   # Ours outright: Omarchy ships no .XCompose.
   "$HOME/.XCompose|xcompose/XCompose"
+
+  # Custom xkb options, selected by hypr/input.lua. libxkbcommon searches
+  # ~/.config/xkb before the system tree, which is how these work without root.
+  # Omarchy puts nothing here, so the whole directory is safe to link.
+  "$HOME/.config/xkb|xkb"
 )
 
 # SEEDS -- machine-local files this repo deliberately does not own. install.sh

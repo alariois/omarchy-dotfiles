@@ -16,7 +16,8 @@ carries three commits on top of the delta-model groundwork:
 | `8020e1f` | hypr-nav; added the `BUILDS` lane for compiled source |
 | `e4e56bb` | the `nv` alias, completing the nvim-chad port |
 | `622fce1` | these notes |
-| *(latest)* | XCompose, and the `SEEDS` lane for machine-local files |
+| `644c128` | XCompose, and the `SEEDS` lane for machine-local files |
+| *(latest)* | Caps/Esc/Compose + Right Alt as Super, via custom xkb in `~/.config/xkb` |
 
 Verified on this machine after install:
 
@@ -37,18 +38,28 @@ authority — run it first after reboot and trust it over these notes.
 `worktree-port-nvim-tmux` (the same commits) is on origin. Push `quattro` so a
 disk failure is not a total loss.
 
-**2. Finish the XCompose swap.** The port is committed but *not yet live*,
-because `~/.XCompose` is still a real file and `install.sh` refuses to delete
-one it does not recognise. Everything in the live file is reproduced in
+**2. Finish the XCompose + keyboard swap.** Both are committed but *not yet
+live*, because `~/.XCompose` is still a real file and `install.sh` refuses to
+delete one it does not recognise. Everything in the live file is reproduced in
 `xcompose/XCompose` (verified line by line), so replacing it loses nothing:
 
 ```bash
-rm ~/.XCompose && setup/install.sh && omarchy-restart-xcompose
+rm ~/.XCompose && setup/install.sh
+omarchy-restart-xcompose
+hyprctl reload          # picks up hypr/input.lua -> the new kb_options
 ```
 
 `~/.XCompose.local` already exists on this machine with the phone expansion in
 it. It is deliberately untracked — the repo is public — and `install.sh` will
 leave it alone.
+
+After the reload, Caps Lock should be Escape, the Escape key should be Compose,
+and Right Alt should act as Super. `setup/doctor.sh`'s Keyboard section
+compiles both the Compose file and the keymap, so it catches the silent
+failures; `hyprctl getoption input:kb_options` shows what is actually live.
+
+If the keymap does not load, Hyprland falls back to a default layout — you
+still have a working keyboard, so this is recoverable from a terminal.
 
 **3. Decide on `nvim/plugins/telescope-find-all.lua`.** Ported verbatim, but
 telescope is not in this stack any more — Omarchy 4's LazyVim (install version

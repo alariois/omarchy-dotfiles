@@ -75,6 +75,8 @@ shell/bashrc                              bash config (hooked into ~/.bashrc)
 tmux/tmux.conf                            tmux config (hooked)
 nvim/options.lua                          nvim options (hooked into Omarchy's LazyVim)
 hypr/bindings.lua                         Hyprland keybindings (hooked)
+hypr/input.lua                            keyboard remapping via kb_options (hooked)
+xkb/                                      custom xkb options behind it (linked)
 nvim/plugins/*.lua                        added LazyVim plugin specs (linked)
 nvim-chad/                                standalone nvim config (linked wholesale)
 xcompose/XCompose                         compose-key expansions (linked)
@@ -182,10 +184,39 @@ Estonian keyboard relative to a US one. It ends with `include
 "%H/.XCompose.local"` for anything private — that file is seeded from a
 template and never tracked.
 
-The include of the local file is deliberately the last line, so a parse
-problem there cannot cost the bindings above it. Changes need
-`omarchy-restart-xcompose`, and running applications only pick them up when
-they restart.
+`~/.XCompose.local` **must exist**. A missing include is fatal — libxkbcommon
+abandons the entire Compose file, so every expansion stops working, not just
+the include. That is what the `SEEDS` lane is for, and why `doctor.sh` runs
+`xkbcli compile-compose --test` against the live file: the failure is total and
+otherwise completely silent.
+
+Changes need `omarchy-restart-xcompose`, and running applications only pick
+them up when they restart.
+
+**Keyboard.** Caps Lock is Escape, and the freed Escape key is Compose — which
+is what makes the XCompose file above reachable. Right Alt is a second Super.
+
+Neither is a stock xkb option; they are defined in `xkb/symbols/custom` and
+made selectable by `xkb/rules/evdev`, with `hypr/input.lua` naming them in
+`kb_options`. The 3.x system had the same two options as
+`custom:caps_esc_compose,custom:ralt_super`, but their definitions lived in
+`/usr/share/X11/xkb` — root-owned, outside any dotfiles repo, and gone after a
+reinstall. libxkbcommon searches `~/.config/xkb` ahead of the system tree, so
+the same options now work per-user with no root and are tracked here.
+
+Two consequences worth knowing:
+
+- This drops Omarchy's default `compose:caps`, which would otherwise fight for
+  the Caps key. `shift:both_capslock_cancel` is kept, and is what still gives a
+  Caps Lock — both Shifts together.
+- Right Alt leaves `Mod5`, so there is no AltGr. Fine on a `us` layout;
+  reconsider before adding a layout that needs it.
+
+Check a change without applying it, then reload:
+
+```bash
+xkbcli compile-keymap --layout us --options custom:caps_esc_compose,custom:ralt_super
+```
 
 **`~/.config/hypr/monitors.lua`** sets `local` variables consumed inside that
 file, so it cannot be hooked out — it needs a real edit to the stock file. It is

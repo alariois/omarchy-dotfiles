@@ -121,6 +121,39 @@ else
 fi
 
 echo
+echo "== Keyboard =="
+# Both of these fail silently in normal use, which is why they are checked here.
+# A Compose file that does not parse loses *every* binding in it, not just the
+# bad line -- a missing include is enough. And a kb_options naming an undefined
+# custom:* option leaves the remapping quietly not applied.
+if ! command -v xkbcli >/dev/null 2>&1; then
+  echo "  SKIP     xkbcli not installed (package libxkbcommon-tools)"
+else
+  if [[ -e $HOME/.XCompose ]]; then
+    if xkbcli compile-compose --test "$HOME/.XCompose" >/dev/null 2>&1; then
+      echo "  ok       ~/.XCompose compiles"
+    else
+      echo "  BROKEN   ~/.XCompose does not compile -- ALL expansions are dead:"
+      xkbcli compile-compose --test "$HOME/.XCompose" 2>&1 \
+        | sed 's/^/             /' | head -4
+    fi
+  else
+    echo "  MISSING  ~/.XCompose   -> run setup/install.sh"
+  fi
+
+  # Compile the options this repo actually asks for, out of the linked xkb dir.
+  opts=$(grep -oP 'kb_options\s*=\s*"\K[^"]+' "$DOTFILES/hypr/input.lua" 2>/dev/null | head -1)
+  if [[ -n $opts ]]; then
+    if XKB_CONFIG_EXTRA_PATH="$DOTFILES/xkb" \
+         xkbcli compile-keymap --layout us --options "$opts" >/dev/null 2>&1; then
+      echo "  ok       keymap compiles: $opts"
+    else
+      echo "  BROKEN   keymap will not compile: $opts"
+    fi
+  fi
+fi
+
+echo
 echo "== Omarchy hooks =="
 shopt -s nullglob
 for src in "$DOTFILES"/hooks/*.d/*.hook; do

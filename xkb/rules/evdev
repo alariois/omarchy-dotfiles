@@ -1,0 +1,12 @@
+// Make the custom:* options below selectable in kb_options, then fall through
+// to the system rules for everything else. Without the include, naming this
+// file would replace the stock ruleset entirely and no normal layout would
+// resolve.
+//
+// %S expands to the system rules directory.
+
+! option = symbols
+  custom:caps_esc_compose = +custom(caps_esc_compose)
+  custom:ralt_super       = +custom(ralt_super)
+
+! include %S/evdev
