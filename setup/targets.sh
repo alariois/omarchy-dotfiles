@@ -11,6 +11,7 @@
 #   sh   -> `#`  comments, `source "<path>"`
 #   tmux -> `#`  comments, `source-file "<path>"`
 #   lua  -> `--` comments, `dofile("<path>")`
+#   ini  -> `#`  comments, `[main]` + `include=<path>` (foot)
 #
 # The block is appended last, so an include that reassigns a setting the stock
 # file above it already set wins. That is how nvim/options.lua overrides
@@ -33,6 +34,7 @@ HOOKS=(
   "$HOME/.config/hypr/bindings.lua|lua|hypr/bindings.lua"
   "$HOME/.config/hypr/input.lua|lua|hypr/input.lua"
   "$HOME/.config/hypr/looknfeel.lua|lua|hypr/looknfeel.lua"
+  "$HOME/.config/foot/foot.ini|ini|foot/foot.ini"
 )
 
 LINKS=(
@@ -78,4 +80,23 @@ SEEDS=(
 # BUILDS section of lib.sh.
 BUILDS=(
   "hypr-nav|$HOME/.local/bin/hypr-nav"
+)
+
+# FONTS -- families we ask for that Omarchy does not ship, installed per-user
+# into ~/.local/share/fonts (fontconfig reads it via <dir prefix="xdg">fonts).
+#
+#   <fontconfig family>|<archive url>|<space-separated members to extract>
+#
+# Per-user and not `pacman -S` on purpose. The Arch package carrying these
+# faces, ttf-jetbrains-mono-nerd, Conflicts With ttf-jetbrains-mono-nerd-basic
+# -- which the `omarchy` package itself depends on, by that exact name. So
+# installing it would force omarchy's dependency to be broken, to gain 232MB
+# of faces for the sake of four. Unpacking what we need into $HOME leaves
+# pacman's world untouched and needs no root.
+#
+# The URL is pinned to a release rather than "latest" so every machine gets
+# the same faces. Members are listed exactly, not globbed: the archive holds
+# 16 weights of this family alone and a terminal wants four.
+FONTS=(
+  "JetBrainsMonoNL Nerd Font Mono|https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/JetBrainsMono.tar.xz|JetBrainsMonoNLNerdFontMono-Regular.ttf JetBrainsMonoNLNerdFontMono-Bold.ttf JetBrainsMonoNLNerdFontMono-Italic.ttf JetBrainsMonoNLNerdFontMono-BoldItalic.ttf"
 )

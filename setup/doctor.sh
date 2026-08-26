@@ -123,6 +123,27 @@ else
 fi
 
 echo
+echo "== Fonts =="
+font_count=0
+[[ -n ${FONTS+x} ]] && font_count=${#FONTS[@]}
+if (( font_count == 0 )); then
+  echo "  none declared"
+else
+  for entry in "${FONTS[@]}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r family url members <<< "$entry"
+    # Ask fontconfig, not the filesystem. A missing family is not an error
+    # anywhere downstream -- fontconfig quietly substitutes another one -- so
+    # this is the only place it ever gets noticed.
+    if font_installed "$family"; then
+      echo "  ok       $family"
+    else
+      echo "  MISSING  $family   -> run setup/install.sh (needs network)"
+    fi
+  done
+fi
+
+echo
 echo "== Hyprland =="
 # The files Hyprland watches only dofile() a path in this repo, so an edit here
 # is invisible to the running session until something reloads it. install.sh

@@ -27,6 +27,10 @@ quiet=false
 
 repaired=0
 conflicts=0
+# Reported problems that are not conflicts: nothing is wrong with the repo or
+# the live files, we just could not finish something. Tracked separately so the
+# summary cannot claim "Everything already current" right after warning.
+warnings=0
 
 # say: progress chatter, hidden by --quiet.
 # changed: things we actually modified, always printed. The post-update hook
@@ -60,6 +64,15 @@ ensure_hook() {
           include="source-file \"$abs\"" ;;
     lua)  open="-- >>> $MARKER >>>"; close="-- <<< $MARKER <<<"
           include="dofile(\"$abs\")" ;;
+          # foot.ini is sectioned, and this block lands at the end of the file
+          # -- inside whatever section came last. A bare `include` there is
+          # read as a key of that section, which foot rejects with
+          # "[text-bindings].include: not a valid XKB key name". Re-opening
+          # [main] first fixes it, and costs nothing: foot documents that the
+          # included file has its own section scope. Verified against
+          # `foot --check-config`.
+    ini)  open="# >>> $MARKER >>>";  close="# <<< $MARKER <<<"
+          include=$'[main]\ninclude='"$abs" ;;
     *)    echo "unknown comment style: $style" >&2; return 1 ;;
   esac
 
@@ -217,6 +230,62 @@ ensure_hypr_live() {
   repaired=$((repaired + 1))
 }
 
+# Unpack a font family Omarchy does not ship into the per-user font dir.
+#
+# A failure here warns rather than counting as a conflict. It is the one lane
+# that depends on the network, it is cosmetic when it fails (fontconfig
+# substitutes another family), and install.sh runs unattended from the
+# post-update hook -- a transient outage during `omarchy update` should not
+# report a broken install. doctor.sh keeps a missing family visible.
+ensure_font() {
+  local family=$1 url=$2 members=$3
+  local tmp archive
+
+  if font_installed "$family"; then
+    say "  ok       $family"
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    changed "  no font  $family  ->  curl not installed"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+
+  tmp=$(mktemp -d)
+  archive="$tmp/${url##*/}"
+
+  if ! curl -fsSL --retry 2 --max-time 120 -o "$archive" "$url"; then
+    rm -rf "$tmp"
+    changed "  no font  $family  ->  download failed, re-run when online"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+
+  mkdir -p "$FONT_DIR"
+  # Unquoted on purpose: members is a deliberate space-separated list.
+  # shellcheck disable=SC2086
+  if ! tar -xf "$archive" -C "$FONT_DIR" $members 2>/dev/null; then
+    rm -rf "$tmp"
+    changed "  no font  $family  ->  archive lacks the expected faces"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+  rm -rf "$tmp"
+
+  fc-cache -f "$FONT_DIR" >/dev/null 2>&1
+
+  # Unpacking is not the same as resolving -- ask fontconfig, do not assume.
+  if ! font_installed "$family"; then
+    changed "  no font  $family  ->  unpacked, but fontconfig does not see it"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+
+  changed "  font     $family  <-  ${url##*/}"
+  repaired=$((repaired + 1))
+}
+
 ensure_omarchy_hooks() {
   local src dest
   for src in "$DOTFILES"/hooks/*.d/*.hook; do
@@ -263,6 +332,13 @@ for entry in "${BUILDS[@]:-}"; do
   ensure_build "$dir" "$artifact"
 done
 
+say "Fonts:"
+for entry in "${FONTS[@]:-}"; do
+  [[ -n $entry ]] || continue
+  IFS='|' read -r family url members <<< "$entry"
+  ensure_font "$family" "$url" "$members"
+done
+
 say "Omarchy hooks:"
 ensure_omarchy_hooks
 
@@ -275,7 +351,13 @@ if (( conflicts )); then
 elif (( repaired )); then
   say "Applied $repaired change(s). Open a new shell to pick up shell changes."
 else
-  say "Everything already current."
+  (( warnings )) || say "Everything already current."
+fi
+# An `if`, not `(( warnings )) && say ...`: the latter leaves the script's exit
+# status riding on set -e's rules for a failing test in an AND-list, which is
+# too subtle to leave load-bearing this close to the final status line.
+if (( warnings )); then
+  say "$warnings warning(s) above -- see setup/doctor.sh."
 fi
 
 (( conflicts == 0 ))

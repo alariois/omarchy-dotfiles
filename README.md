@@ -79,6 +79,31 @@ touching it was enough to make `install.sh` report `ok` and `doctor.sh` report
 `built`, with nothing installed that worked. Both now agree, because both ask
 `lib.sh` the same question.
 
+### `FONTS` — families Omarchy does not ship
+
+`install.sh` unpacks these into `~/.local/share/fonts`, which fontconfig picks
+up through its `<dir prefix="xdg">fonts</dir>` entry — no root, and pacman's
+world is untouched.
+
+Per-user rather than `pacman -S` because the package route is a dead end here.
+The Arch package carrying the no-ligature faces, `ttf-jetbrains-mono-nerd`,
+`Conflicts With` `ttf-jetbrains-mono-nerd-basic` — which the `omarchy` package
+depends on *by that exact name*, so the provided-name alias does not save it.
+Installing it would mean breaking omarchy's dependency to gain 232 MB of faces
+for the sake of four.
+
+The check is "does fontconfig resolve this family", not "are the files there".
+Those differ, and the difference is silent: fontconfig answers a missing family
+by substituting another rather than failing, so a half-unpacked font produces
+no error anywhere — just the wrong glyphs.
+
+A failure here warns instead of counting as a conflict. It is the only lane
+that needs the network, it is cosmetic when it fails, and `install.sh` runs
+unattended from the post-update hook — a transient outage during an `omarchy
+update` should not report a broken install. `doctor.sh` keeps a missing family
+visible, and the run's summary reports the warning count rather than claiming
+everything is current.
+
 ### Keeping Hyprland in step
 
 Hyprland watches the files under `~/.config/hypr`, but our config is not there:
@@ -102,6 +127,7 @@ nvim/options.lua                          nvim options (hooked into Omarchy's La
 hypr/bindings.lua                         Hyprland keybindings (hooked)
 hypr/input.lua                            keyboard remapping and key repeat (hooked)
 hypr/looknfeel.lua                        gaps and corner rounding (hooked)
+foot/foot.ini                             terminal font (hooked, `ini` style)
 xkb/                                      custom xkb options behind it (linked)
 nvim/plugins/*.lua                        added LazyVim plugin specs (linked)
 nvim-chad/                                standalone nvim config (linked wholesale)

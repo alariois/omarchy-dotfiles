@@ -115,3 +115,18 @@ hypr_config_is_live() {
 hyprland_running() {
   command -v hyprctl >/dev/null 2>&1 && hyprctl version >/dev/null 2>&1
 }
+
+# ── FONTS ─────────────────────────────────────────────────────────────
+#
+# Shared so doctor.sh asks the same question install.sh does: not "did we
+# unpack some files" but "does fontconfig resolve this family". Those differ
+# -- an unreadable or half-written .ttf leaves files on disk that resolve to
+# nothing, and fontconfig answers a missing family by silently substituting
+# another rather than failing, so nothing downstream ever complains.
+
+FONT_DIR="$HOME/.local/share/fonts/omarchy-dotfiles"
+
+font_installed() {
+  fc-list : family 2>/dev/null | tr ',' '\n' | sed 's/^ *//; s/ *$//' \
+    | grep -qxF "$1"
+}
