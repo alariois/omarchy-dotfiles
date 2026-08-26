@@ -39,6 +39,8 @@ tilde() { echo "${1/#"$HOME"/\~}"; }
 
 # shellcheck source=targets.sh
 source "$DOTFILES/setup/targets.sh"
+# shellcheck source=lib.sh
+source "$DOTFILES/setup/lib.sh"
 
 echo "== Managed include blocks =="
 for entry in "${HOOKS[@]}"; do
@@ -106,10 +108,10 @@ else
     IFS='|' read -r dir artifact <<< "$entry"
     if [[ ! -x $artifact ]]; then
       echo "  MISSING  $(tilde "$artifact")   -> run setup/install.sh"
-    elif stale=$(find "$DOTFILES/$dir" -type f \
-                   \( -name '*.c' -o -name '*.h' -o -name 'Makefile' \) \
-                   -newer "$artifact" -print -quit) && [[ -n $stale ]]; then
-      echo "  STALE    $(tilde "$artifact")   -> ${stale#"$DOTFILES/"} is newer, rebuild"
+    elif ! build_is_current "$dir" "$artifact"; then
+      # By content, not mtime: an artifact can be newer than its sources and
+      # still be a build of something else entirely.
+      echo "  STALE    $(tilde "$artifact")   -> not a build of $dir, run setup/install.sh"
     else
       echo "  built    $(tilde "$artifact")  <-  $dir"
       # A binary that is not reachable by name is installed but unusable from a
@@ -118,6 +120,21 @@ else
         || echo "           WARNING: $(basename "$artifact") is not on this shell's PATH"
     fi
   done
+fi
+
+echo
+echo "== Hyprland =="
+# The files Hyprland watches only dofile() a path in this repo, so an edit here
+# is invisible to the running session until something reloads it. install.sh
+# does that; this reports when the session is behind anyway -- after a config
+# edit made without re-running install.sh, say.
+if ! hyprland_running; then
+  echo "  SKIP     no Hyprland session to query"
+elif hypr_config_is_live; then
+  echo "  ok       session is running this repo's config"
+else
+  echo "  BEHIND   session predates the current hypr/ config"
+  echo "           -> run setup/install.sh (or hyprctl reload)"
 fi
 
 echo

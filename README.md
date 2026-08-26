@@ -63,10 +63,35 @@ how a public Compose file carries private expansions.
 Neither lane above fits a program: the repo tracks source, but what the system
 needs is a binary, and a binary is a build artifact rather than config. So the
 source lives in the repo, `install.sh` runs `make install` out of it, and the
-compiled output is gitignored. `install.sh` only invokes `make` when a `.c`,
-`.h`, or `Makefile` is newer than the installed binary, so a repeat run is
-silent; a compile failure is reported with the compiler's output and makes
-`install.sh` exit non-zero.
+compiled output is gitignored. A compile failure is reported with the
+compiler's output and makes `install.sh` exit non-zero.
+
+`install.sh` invokes `make` only when the installed binary is not already a
+build of the current source, so a repeat run is silent. It decides that by
+hashing both — the `.c`, `.h` and `Makefile` inputs, and the artifact — and
+comparing against a stamp under `~/.local/state/omarchy-dotfiles/`.
+
+That used to be an mtime comparison, which cannot actually answer the
+question. A checkout stamps files with the time of the checkout, a restore
+from backup or a copy between machines carries whatever mtime it likes, and
+`touch` settles it outright. Replacing the installed binary with a stub and
+touching it was enough to make `install.sh` report `ok` and `doctor.sh` report
+`built`, with nothing installed that worked. Both now agree, because both ask
+`lib.sh` the same question.
+
+### Keeping Hyprland in step
+
+Hyprland watches the files under `~/.config/hypr`, but our config is not there:
+those files hold a one-line `dofile()` of a path in this repo, and the watcher
+does not follow it. So editing `hypr/bindings.lua` changes nothing in the
+running session — a new bind was still missing from `hyprctl binds` three
+seconds later, and appeared only after an explicit `hyprctl reload`.
+
+`install.sh` therefore ends by reloading Hyprland, stamped the same way so a
+repeat run does not. Outside a session it says so and writes no stamp, which
+leaves the reload to the next run that has one — an `omarchy update` on a
+console, say. `doctor.sh` reports `BEHIND` when the session is running older
+config than the repo holds.
 
 ## Layout
 
@@ -83,6 +108,7 @@ xcompose/XCompose                         compose-key expansions (linked)
 xcompose/XCompose.local.seed              template for the private half (seeded)
 hypr-nav/                                 C source for the hypr-nav binary (built)
 setup/targets.sh                          the delta table -- single source of truth
+setup/lib.sh                              freshness checks shared by the two below
 setup/install.sh                          assert every block, link, build, and hook
 setup/doctor.sh                           report state and unmanaged drift
 hooks/post-update.d/reapply-dotfiles.hook re-assert blocks after `omarchy update`

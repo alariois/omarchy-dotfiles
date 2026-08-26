@@ -72,8 +72,9 @@ SEEDS=(
 #   <repo-relative source dir>|<installed artifact>
 #
 # The source dir must hold a Makefile with an `install` target that honours
-# PREFIX. install.sh rebuilds only when a source file is newer than the
-# installed artifact.
+# PREFIX. install.sh rebuilds only when the installed artifact is not already a
+# build of the current source -- decided by content hash, not mtime; see the
+# BUILDS section of lib.sh.
 BUILDS=(
   "hypr-nav|$HOME/.local/bin/hypr-nav"
 )

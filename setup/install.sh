@@ -36,6 +36,13 @@ changed() { echo "$@"; }
 
 # shellcheck source=targets.sh
 source "$DOTFILES/setup/targets.sh"
+# shellcheck source=lib.sh
+source "$DOTFILES/setup/lib.sh"
+
+# Set when a target under ~/.config/hypr was rewritten, so the reload at the
+# end fires even if the repo payloads themselves are unchanged.
+hypr_dirty=0
+note_if_hypr() { [[ $1 == "$HOME/.config/hypr/"* ]] && hypr_dirty=1; return 0; }
 
 ensure_hook() {
   local target=$1 style=$2 payload=$3
@@ -77,6 +84,7 @@ ensure_hook() {
   mkdir -p "$(dirname "$target")"
   cp -f "$tmp" "$target"
   rm -f "$tmp"
+  note_if_hypr "$target"
   changed "  hooked   ${target/#"$HOME"/\~}  ->  $payload"
   repaired=$((repaired + 1))
 }
@@ -113,6 +121,7 @@ ensure_link() {
 
   mkdir -p "$(dirname "$target")"
   ln -sfn "$abs" "$target"
+  note_if_hypr "$target"
   changed "  linked   ${target/#"$HOME"/\~}  ->  $payload"
   repaired=$((repaired + 1))
 }
@@ -141,9 +150,12 @@ ensure_seed() {
   repaired=$((repaired + 1))
 }
 
-# Compile source in the repo and install the resulting binary. Skipped entirely
-# when nothing changed, so a repeat run stays silent instead of shelling out to
-# make and reprinting its output.
+# Compile source in the repo and install the resulting binary. Skipped when the
+# installed artifact already matches a build of the current source, so a repeat
+# run stays silent instead of shelling out to make and reprinting its output.
+#
+# "Matches" is by content, not mtime -- see the BUILDS section of lib.sh for why
+# mtime cannot answer this.
 ensure_build() {
   local dir=$1 artifact=$2
   local src="$DOTFILES/$dir" out bindir prefix
@@ -153,12 +165,7 @@ ensure_build() {
     return 1
   fi
 
-  # Only real inputs count as "newer" -- globbing every file would let a stray
-  # `make test` binary in the source dir trigger a pointless rebuild.
-  if [[ -x $artifact ]] &&
-     [[ -z $(find "$src" -type f \
-               \( -name '*.c' -o -name '*.h' -o -name 'Makefile' \) \
-               -newer "$artifact" -print -quit) ]]; then
+  if build_is_current "$dir" "$artifact"; then
     say "  ok       ${artifact/#"$HOME"/\~}"
     return 0
   fi
@@ -175,7 +182,38 @@ ensure_build() {
     return 0
   fi
 
+  record_build_stamp "$dir" "$artifact"
   changed "  built    ${artifact/#"$HOME"/\~}  <-  $dir"
+  repaired=$((repaired + 1))
+}
+
+# Re-read our Hyprland config into the running session.
+#
+# Nothing else does this: the files Hyprland watches only dofile() a path in
+# this repo, so a repo edit never reaches the session on its own. Without it
+# install.sh can report success while the session still runs the old binds.
+ensure_hypr_live() {
+  if (( hypr_dirty == 0 )) && hypr_config_is_live; then
+    say "  ok       Hyprland config is live"
+    return 0
+  fi
+
+  # Outside a session there is nothing to reload -- and deliberately no stamp
+  # either, so the reload happens on the next run that does have one.
+  if ! hyprland_running; then
+    say "  skip     no Hyprland session to reload"
+    return 0
+  fi
+
+  if ! hyprctl reload >/dev/null 2>&1; then
+    changed "  FAILED   hyprctl reload"
+    conflicts=$((conflicts + 1))
+    return 0
+  fi
+
+  mkdir -p "$STATE_DIR"
+  hypr_config_hash > "$(hypr_stamp_file)"
+  changed "  reloaded Hyprland"
   repaired=$((repaired + 1))
 }
 
@@ -227,6 +265,9 @@ done
 
 say "Omarchy hooks:"
 ensure_omarchy_hooks
+
+say "Hyprland:"
+ensure_hypr_live
 
 say ""
 if (( conflicts )); then
