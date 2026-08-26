@@ -169,12 +169,34 @@ static int is_terminal(const char *class)
     return 0;
 }
 
+/*
+ * Move Hyprland focus one window in direction `d` (l/d/u/r).
+ *
+ * Hyprland 0.56 (Omarchy 4) moved config and `hyprctl dispatch` onto Lua:
+ * the argument is now evaluated as `hl.dispatch(<arg>)`, so the old bare
+ * string form parses as Lua and dies with a syntax error --
+ *
+ *     $ hyprctl dispatch movefocus l
+ *     error: [string "return hl.dispatch(movefocus l)"]:1: ')' expected near 'l'
+ *
+ * -- while pre-0.56 Hyprland only understands that old form. This repo is
+ * shared across machines on both sides of that split, so try the Lua form
+ * first and fall back. hyprctl prints "ok" on success and an "error: ..."
+ * line otherwise, which is a steadier signal than its exit status.
+ */
 static void hypr_move(char d)
 {
-    dbg("fallback: hyprctl dispatch movefocus %c\n", d);
-    char cmd[64];
-    snprintf(cmd, sizeof(cmd), "hyprctl dispatch movefocus %c", d);
-    system(cmd);
+    char cmd[128], out[256];
+
+    snprintf(cmd, sizeof(cmd),
+             "hyprctl dispatch 'hl.dsp.focus({ direction = \"%c\" })' 2>&1", d);
+    cmd_out(cmd, out, sizeof(out));
+    dbg("fallback: hl.dsp.focus %c -> '%s'\n", d, out);
+    if (strcmp(out, "ok") == 0) return;
+
+    snprintf(cmd, sizeof(cmd), "hyprctl dispatch movefocus %c 2>&1", d);
+    cmd_out(cmd, out, sizeof(out));
+    dbg("fallback: legacy movefocus %c -> '%s'\n", d, out);
 }
 
 /* ── tmux ──────────────────────────────────────────────────────────── */
