@@ -1,0 +1,9 @@
+# Build artifacts and editor scratch
+*.bak
+*.bak.*
+*.swp
+
+# Secrets never belong in this repo
+*.key
+*.pem
+*.secret

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#
+# Runs after `omarchy update` (via omarchy-hook post-update).
+#
+# Omarchy migrations write config files by `mv`-ing a temp file over the
+# target, which silently drops our managed include block. This re-asserts it.
+# Installed as a symlink into the repo, so it resolves its own location.
+
+set -uo pipefail
+
+repo=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../.." && pwd)
+install="$repo/setup/install.sh"
+
+[[ -x $install ]] || exit 0
+
+if out=$("$install" --quiet 2>&1) && [[ -n $out ]]; then
+  notify-send -a "omarchy-dotfiles" \
+    "Dotfile hooks repaired after update" "$out" 2>/dev/null || true
+  echo "omarchy-dotfiles repaired:"
+  echo "$out"
+fi

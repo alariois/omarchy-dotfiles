@@ -1,0 +1,8 @@
+# Personal bash configuration.
+#
+# Sourced from ~/.bashrc by a managed block that setup/install.sh maintains.
+# Omarchy owns ~/.bashrc itself; everything of ours lives here so that an
+# `omarchy update` can never overwrite more than the one-line hook.
+
+# Vi keybindings at the prompt.
+set -o vi
