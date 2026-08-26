@@ -159,11 +159,32 @@ windows. It spans three layers, so the port touches all three lanes:
 | vim half of the hand-off | `LINKS` | `nvim/plugins/hypr-nav.lua` |
 
 Hyprland has to own the keys, because it is the only layer that sees the
-keypress first. `hypr-nav` then decides where the motion belongs: if the
-focused window is a terminal running tmux with vim in the active pane it
-forwards `M-hjkl` to vim, which calls back with `--from-vim` once the cursor is
-at the edge of its splits; otherwise it moves a tmux pane, and failing that a
-Hyprland window.
+keypress first. `hypr-nav` then decides where the motion belongs, by how the
+focused window is put together:
+
+| Focused window | Motion goes to | How the key gets there |
+|---|---|---|
+| tmux, vim in the active pane | vim, then tmux, then Hyprland | `tmux send-keys M-hjkl` |
+| tmux, no vim | tmux pane, then Hyprland | `tmux select-pane` |
+| a bare vim, no tmux | vim, then Hyprland | `hl.dsp.send_shortcut` ALT+hjkl |
+| anything else | Hyprland | `hl.dsp.focus` |
+
+In the two vim rows, vim calls back with `--from-vim` once the cursor is at the
+edge of its splits, and the motion continues outward from there.
+
+The bare-vim row is why `hypr-nav` reads `/proc`: with no tmux there is no
+send-keys channel, so it walks the window's process tree looking for a vim that
+is genuinely in front of its tty — the tty's foreground process group, and not
+stopped. Both halves matter. After Ctrl-Z under an interactive shell the tty
+hands off to the shell's group, but a vim started by a shell with no job
+control (`bash -c nvim`) keeps the tty even in state `T`. Matching either one
+would send Alt+hjkl to something that cannot act on it, swallowing the press
+instead of moving the Hyprland focus. tmux panes never match here — they are
+children of the tmux *server*, not of the terminal — so this can never shadow
+the tmux path.
+
+Hyprland does not re-run keybinds for a shortcut it sent itself, so
+`send_shortcut` cannot loop back into `hypr-nav`.
 
 Two things it depends on, both already true on stock Omarchy 4:
 
@@ -174,7 +195,12 @@ Two things it depends on, both already true on stock Omarchy 4:
   its `focused` flag, because multi-window terminals like Ghostty share one PID
   across every window and PID ancestry alone cannot tell them apart.
 
-`make -C hypr-nav test` runs 33 unit tests; `make -C hypr-nav test-integration`
+One thing to know about Hyprland versions: 0.56 (Omarchy 4) moved `hyprctl
+dispatch` onto Lua, so the old `hyprctl dispatch movefocus l` string now parses
+as Lua and fails. `hypr-nav` emits the Lua form and falls back to the string
+one, so the same binary works against Omarchy 3 and 4.
+
+`make -C hypr-nav test` runs 46 unit tests; `make -C hypr-nav test-integration`
 drives a real tmux session for 14 more.
 
 **XCompose.** Split across two files because the repo is public. The tracked

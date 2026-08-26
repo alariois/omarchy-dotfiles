@@ -10,10 +10,11 @@
 --
 -- Hyprland has to own these keys rather than tmux or nvim, because it is the
 -- only layer that sees the keypress first. hypr-nav then decides where the
--- motion belongs: it inspects the focused window, and if that window is a
--- terminal running tmux with vim in the active pane it forwards M-hjkl to vim,
--- which calls back with --from-vim once the cursor is at the edge of its
--- splits. Otherwise it moves a tmux pane, and failing that a Hyprland window.
+-- motion belongs by inspecting the focused window: tmux with vim in the active
+-- pane gets M-hjkl through send-keys; a bare vim with no tmux gets a real
+-- ALT+hjkl through send_shortcut; either way vim calls back with --from-vim
+-- once the cursor is at the edge of its splits. Failing all that it moves a
+-- tmux pane, and failing that a Hyprland window.
 --
 -- Requires:
 --   * the hypr-nav binary on PATH -- built and installed to ~/.local/bin by

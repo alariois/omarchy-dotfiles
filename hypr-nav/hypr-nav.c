@@ -4,7 +4,8 @@
  * When called from Hyprland (default):
  *   - Terminal with tmux + vim: sends Alt+key to vim (vim handles edge → --from-vim)
  *   - Terminal with tmux, no vim: navigates tmux panes, falls back to Hyprland
- *   - No tmux / not a terminal: Hyprland movefocus
+ *   - Terminal with a bare vim, no tmux: delivers a real Alt+key to the window
+ *   - Neither: Hyprland movefocus
  *
  * When called from vim (--from-vim):
  *   - Tries tmux pane navigation, falls back to Hyprland movefocus
@@ -45,22 +46,61 @@ static int cmd_out(const char *cmd, char *buf, size_t sz)
 
 /* ── Process tree ──────────────────────────────────────────────────── */
 
-/* Read PPID from /proc/<pid>/stat (no fork, fast) */
-static long get_ppid_proc(long pid)
+typedef struct {
+    char comm[64];
+    char state;  /* R/S/D/T/Z — T is stopped (Ctrl-Z)         */
+    long ppid;
+    long pgrp;   /* this process's group                      */
+    long tpgid;  /* group its controlling tty reads from now   */
+} ProcStat;
+
+/*
+ * Parse one line of /proc/<pid>/stat (pure function, no I/O).
+ *
+ * comm is parenthesised and may itself contain spaces and parens
+ * ("(nvim (v0.11))"), so every field after it can only be located from
+ * the *last* ')' — never by counting whitespace from the left.
+ *
+ * Fields after comm: state ppid pgrp session tty_nr tpgid
+ */
+static int parse_proc_stat(const char *line, ProcStat *ps)
 {
-    char path[64];
+    ps->comm[0] = '\0';
+    ps->state = '?';
+    ps->ppid = ps->pgrp = ps->tpgid = -1;
+
+    if (!line) return -1;
+    const char *op = strchr(line, '(');
+    const char *cp = strrchr(line, ')');
+    if (!op || !cp || cp <= op) return -1;
+
+    size_t len = (size_t)(cp - op - 1);
+    if (len >= sizeof(ps->comm)) len = sizeof(ps->comm) - 1;
+    memcpy(ps->comm, op + 1, len);
+    ps->comm[len] = '\0';
+
+    if (sscanf(cp + 2, "%c %ld %ld %*d %*d %ld",
+               &ps->state, &ps->ppid, &ps->pgrp, &ps->tpgid) != 4)
+        return -1;
+    return 0;
+}
+
+static int read_proc_stat(long pid, ProcStat *ps)
+{
+    char path[64], buf[1024];
     snprintf(path, sizeof(path), "/proc/%ld/stat", pid);
     FILE *fp = fopen(path, "r");
     if (!fp) return -1;
-    char buf[512];
-    if (!fgets(buf, sizeof(buf), fp)) { fclose(fp); return -1; }
+    int got = fgets(buf, sizeof(buf), fp) != NULL;
     fclose(fp);
-    /* Format: pid (comm) state ppid ... – comm may contain parens */
-    char *cp = strrchr(buf, ')');
-    if (!cp) return -1;
-    long ppid;
-    if (sscanf(cp + 2, "%*c %ld", &ppid) != 1) return -1;
-    return ppid;
+    return got ? parse_proc_stat(buf, ps) : -1;
+}
+
+/* Read PPID from /proc/<pid>/stat (no fork, fast) */
+static long get_ppid_proc(long pid)
+{
+    ProcStat ps;
+    return read_proc_stat(pid, &ps) == 0 ? ps.ppid : -1;
 }
 
 /* Function pointer for get_ppid — swappable for testing */
@@ -88,16 +128,17 @@ static int is_ancestor_of(long ancestor, long pid)
 /* ── Direction mapping ─────────────────────────────────────────────── */
 
 typedef struct {
-    char key;           /* l, d, u, r           */
-    const char *tflag;  /* tmux: -L, -D, -U, -R */
-    const char *vkey;   /* Alt key: M-h … M-l   */
+    char key;           /* l, d, u, r                        */
+    const char *tflag;  /* tmux: -L, -D, -U, -R              */
+    const char *vkey;   /* tmux send-keys name: M-h … M-l    */
+    char akey;          /* the same key bare: h, j, k, l     */
 } Dir;
 
 static const Dir dirs[] = {
-    { 'l', "-L", "M-h" },
-    { 'd', "-D", "M-j" },
-    { 'u', "-U", "M-k" },
-    { 'r', "-R", "M-l" },
+    { 'l', "-L", "M-h", 'h' },
+    { 'd', "-D", "M-j", 'j' },
+    { 'u', "-U", "M-k", 'k' },
+    { 'r', "-R", "M-l", 'l' },
 };
 
 static const Dir *dir_lookup(char c)
@@ -112,6 +153,7 @@ static const Dir *dir_lookup(char c)
 typedef struct {
     long pid;
     char class[128];
+    char addr[32];      /* e.g. 0x55f2dca5ed0 — for send_shortcut */
 } WinInfo;
 
 /* Parse hyprctl activewindow JSON into WinInfo (pure function, no I/O) */
@@ -119,6 +161,7 @@ static int parse_active_window(const char *json, WinInfo *w)
 {
     w->pid = 0;
     w->class[0] = '\0';
+    w->addr[0] = '\0';
 
     if (!json || !*json) return -1;
 
@@ -137,6 +180,19 @@ static int parse_active_window(const char *json, WinInfo *w)
             if (len >= sizeof(w->class)) len = sizeof(w->class) - 1;
             memcpy(w->class, p, len);
             w->class[len] = '\0';
+        }
+    }
+
+    /* Extract "address": "0x..." */
+    p = strstr(json, "\"address\"");
+    if (p && (p = strchr(p, ':')) && (p = strchr(p, '"'))) {
+        p++;
+        const char *end = strchr(p, '"');
+        if (end) {
+            size_t len = (size_t)(end - p);
+            if (len >= sizeof(w->addr)) len = sizeof(w->addr) - 1;
+            memcpy(w->addr, p, len);
+            w->addr[len] = '\0';
         }
     }
     return 0;
@@ -167,6 +223,91 @@ static int is_terminal(const char *class)
     for (const char **t = terms; *t; t++)
         if (strstr(lower, *t)) return 1;
     return 0;
+}
+
+/* Does this command name look like a vim? */
+static int is_vim_command(const char *cmd)
+{
+    char lower[128];
+    snprintf(lower, sizeof(lower), "%s", cmd ? cmd : "");
+    for (char *p = lower; *p; p++) *p = tolower(*p);
+    return strstr(lower, "vim") != NULL || strstr(lower, "view") != NULL;
+}
+
+/*
+ * Find a vim running in the foreground of `root`'s process tree.
+ *
+ * This is the no-tmux case.  With tmux we hand the motion to vim through
+ * `tmux send-keys`; a bare `nvim` in a terminal has no such channel, so
+ * hypr-nav has to spot it from /proc and deliver a real Alt+key instead.
+ *
+ * Breadth-first over /proc/<pid>/task/<pid>/children.  Note this never
+ * reaches panes of a tmux session — those are children of the tmux
+ * *server*, not of the terminal — so it cannot shadow the tmux path.
+ *
+ * "Foreground" means the process's own group is the one its tty is
+ * currently reading from (pgrp == tpgid), and it is not stopped.  Both
+ * halves are needed: after Ctrl-Z under an interactive shell the tty
+ * hands off to the shell's group, but a vim started from a shell with no
+ * job control (`bash -c nvim`) stays the tty's foreground group even in
+ * state T.  Either way it cannot act on the key, so matching it would
+ * swallow the press instead of moving the Hyprland focus.
+ */
+static long find_foreground_vim(long root)
+{
+    long queue[256];
+    size_t head = 0, tail = 0;
+    queue[tail++] = root;
+
+    while (head < tail) {
+        long pid = queue[head++];
+        ProcStat ps;
+
+        if (pid != root && read_proc_stat(pid, &ps) == 0
+            && ps.pgrp == ps.tpgid && ps.state != 'T'
+            && is_vim_command(ps.comm)) {
+            dbg("bare vim: pid=%ld comm='%s' state=%c pgrp=%ld tpgid=%ld\n",
+                pid, ps.comm, ps.state, ps.pgrp, ps.tpgid);
+            return pid;
+        }
+
+        char path[80];
+        snprintf(path, sizeof(path), "/proc/%ld/task/%ld/children", pid, pid);
+        FILE *fp = fopen(path, "r");
+        if (!fp) continue;
+        long child;
+        while (tail < sizeof(queue) / sizeof(queue[0])
+               && fscanf(fp, "%ld", &child) == 1)
+            queue[tail++] = child;
+        fclose(fp);
+    }
+    return 0;
+}
+
+/*
+ * Build the hyprctl call that delivers ALT+<key> to one window.
+ * Split out from the caller so the quoting stays testable.
+ */
+static void build_send_shortcut(char *out, size_t sz, const char *addr, char key)
+{
+    snprintf(out, sz,
+             "hyprctl dispatch 'hl.dsp.send_shortcut({ mods = \"ALT\", "
+             "key = \"%c\", window = \"address:%s\" })' 2>&1",
+             key, addr);
+}
+
+/*
+ * Deliver ALT+<key> straight to a window, bypassing our own keybind.
+ * Hyprland does not re-run binds for a shortcut it sent itself, so this
+ * cannot loop back into hypr-nav; vim receives the key, and calls back
+ * with --from-vim once it is at the edge of its splits.
+ */
+static void hypr_send_shortcut(const char *addr, char key)
+{
+    char cmd[256], out[256];
+    build_send_shortcut(cmd, sizeof(cmd), addr, key);
+    cmd_out(cmd, out, sizeof(out));
+    dbg("bare vim: send_shortcut ALT+%c to %s -> '%s'\n", key, addr, out);
 }
 
 /*
@@ -275,8 +416,7 @@ static int is_vim_in_pane(const char *pane_id)
     snprintf(cmd, sizeof(cmd),
              "tmux display-message -t '%s' -p '#{pane_current_command}'", pane_id);
     if (cmd_out(cmd, buf, sizeof(buf)) != 0) return 0;
-    for (char *p = buf; *p; p++) *p = tolower(*p);
-    int result = strstr(buf, "vim") != NULL || strstr(buf, "view") != NULL;
+    int result = is_vim_command(buf);
     dbg("pane %s command='%s' is_vim=%d\n", pane_id, buf, result);
     return result;
 }
@@ -428,7 +568,16 @@ int main(int argc, char *argv[])
 
     TmuxClient tc = find_tmux_client(win.pid);
     if (!tc.found) {
-        dbg("no tmux client, direct movefocus\n");
+        /* No tmux, so no send-keys channel — but a bare vim in this
+         * window can still take the motion as a real Alt+key. */
+        long vpid = find_foreground_vim(win.pid);
+        if (vpid > 0 && win.addr[0]) {
+            dbg("no tmux client; bare vim pid=%ld, sending ALT+%c\n",
+                vpid, d->akey);
+            hypr_send_shortcut(win.addr, d->akey);
+            return 0;
+        }
+        dbg("no tmux client and no bare vim, direct movefocus\n");
         hypr_move(d->key);
         return 0;
     }

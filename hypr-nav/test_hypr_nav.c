@@ -59,6 +59,7 @@ static void test_dir_lookup_left(void)
     assert(d->key == 'l');
     assert(strcmp(d->tflag, "-L") == 0);
     assert(strcmp(d->vkey, "M-h") == 0);
+    assert(d->akey == 'h');
 }
 
 static void test_dir_lookup_down(void)
@@ -68,6 +69,7 @@ static void test_dir_lookup_down(void)
     assert(d->key == 'd');
     assert(strcmp(d->tflag, "-D") == 0);
     assert(strcmp(d->vkey, "M-j") == 0);
+    assert(d->akey == 'j');
 }
 
 static void test_dir_lookup_up(void)
@@ -77,6 +79,7 @@ static void test_dir_lookup_up(void)
     assert(d->key == 'u');
     assert(strcmp(d->tflag, "-U") == 0);
     assert(strcmp(d->vkey, "M-k") == 0);
+    assert(d->akey == 'k');
 }
 
 static void test_dir_lookup_right(void)
@@ -86,6 +89,7 @@ static void test_dir_lookup_right(void)
     assert(d->key == 'r');
     assert(strcmp(d->tflag, "-R") == 0);
     assert(strcmp(d->vkey, "M-l") == 0);
+    assert(d->akey == 'l');
 }
 
 static void test_dir_lookup_invalid(void)
@@ -153,6 +157,7 @@ static void test_parse_window_full(void)
     assert(parse_active_window(json, &w) == 0);
     assert(w.pid == 2479196);
     assert(strcmp(w.class, "com.mitchellh.ghostty") == 0);
+    assert(strcmp(w.addr, "0x562c07644c10") == 0);
 }
 
 static void test_parse_window_missing_pid(void)
@@ -162,6 +167,7 @@ static void test_parse_window_missing_pid(void)
     assert(parse_active_window(json, &w) == 0);
     assert(w.pid == 0);
     assert(strcmp(w.class, "kitty") == 0);
+    assert(w.addr[0] == '\0');   /* absent address must not be stale */
 }
 
 static void test_parse_window_missing_class(void)
@@ -339,6 +345,141 @@ static void test_get_ppid_nonexistent(void)
     assert(get_ppid_proc(999999999) == -1);
 }
 
+
+/* ── parse_proc_stat tests ─────────────────────────────────────────── */
+
+static void test_proc_stat_simple(void)
+{
+    ProcStat ps;
+    /* pid (comm) state ppid pgrp session tty_nr tpgid ... */
+    assert(parse_proc_stat("4242 (nvim) S 100 4242 4242 34816 4242 4194304 ...",
+                           &ps) == 0);
+    assert(strcmp(ps.comm, "nvim") == 0);
+    assert(ps.state == 'S');
+    assert(ps.ppid  == 100);
+    assert(ps.pgrp  == 4242);
+    assert(ps.tpgid == 4242);
+}
+
+static void test_proc_stat_comm_with_spaces_and_parens(void)
+{
+    /* comm is only bounded by the LAST ')' — counting fields from the
+     * left would misread every field after it. */
+    ProcStat ps;
+    assert(parse_proc_stat("77 (nvim (v0.11)) S 5 66 66 34816 88 0 0",
+                           &ps) == 0);
+    assert(strcmp(ps.comm, "nvim (v0.11)") == 0);
+    assert(ps.ppid  == 5);
+    assert(ps.pgrp  == 66);
+    assert(ps.tpgid == 88);
+}
+
+static void test_proc_stat_backgrounded(void)
+{
+    /* Ctrl-Z'd vim: its group is not the one the tty reads from. */
+    ProcStat ps;
+    assert(parse_proc_stat("9 (nvim) T 5 900 900 34816 500 0 0", &ps) == 0);
+    assert(ps.pgrp != ps.tpgid);
+    assert(ps.state == 'T');
+}
+
+static void test_proc_stat_stopped_but_still_foreground(void)
+{
+    /* Started by a shell with no job control (`bash -c nvim`): Ctrl-Z
+     * stops it, yet its group still owns the tty — so pgrp == tpgid is
+     * not on its own enough to prove it can act on a key. */
+    ProcStat ps;
+    assert(parse_proc_stat("9 (nvim) T 5 900 900 34816 900 0 0", &ps) == 0);
+    assert(ps.pgrp == ps.tpgid);
+    assert(ps.state == 'T');
+}
+
+static void test_proc_stat_no_tty(void)
+{
+    /* A daemon has no controlling tty: tpgid is -1, never a match. */
+    ProcStat ps;
+    assert(parse_proc_stat("3 (foot) S 1 3 3 0 -1 0 0", &ps) == 0);
+    assert(ps.tpgid == -1);
+    assert(ps.pgrp != ps.tpgid);
+}
+
+static void test_proc_stat_malformed(void)
+{
+    ProcStat ps;
+    assert(parse_proc_stat("", &ps) == -1);
+    assert(parse_proc_stat(NULL, &ps) == -1);
+    assert(parse_proc_stat("4242 nvim S 100", &ps) == -1);      /* no parens */
+    assert(parse_proc_stat("4242 (nvim) S", &ps) == -1);        /* truncated */
+}
+
+/* ── is_vim_command tests ──────────────────────────────────────────── */
+
+static void test_is_vim_command_matches(void)
+{
+    assert(is_vim_command("nvim"));
+    assert(is_vim_command("vim"));
+    assert(is_vim_command("NVIM"));          /* case insensitive */
+    assert(is_vim_command("view"));
+    assert(is_vim_command("nvim (v0.11)"));
+}
+
+static void test_is_vim_command_rejects(void)
+{
+    assert(!is_vim_command("bash"));
+    assert(!is_vim_command("foot"));
+    assert(!is_vim_command("claude"));
+    assert(!is_vim_command(""));
+    assert(!is_vim_command(NULL));
+}
+
+/* ── build_send_shortcut tests ─────────────────────────────────────── */
+
+static void test_send_shortcut_command(void)
+{
+    char cmd[256];
+    build_send_shortcut(cmd, sizeof(cmd), "0x559f2dca5ed0", 'h');
+    assert(strstr(cmd, "hyprctl dispatch") != NULL);
+    assert(strstr(cmd, "hl.dsp.send_shortcut") != NULL);
+    assert(strstr(cmd, "mods = \"ALT\"") != NULL);
+    assert(strstr(cmd, "key = \"h\"") != NULL);
+    assert(strstr(cmd, "window = \"address:0x559f2dca5ed0\"") != NULL);
+}
+
+static void test_send_shortcut_quoting(void)
+{
+    /* The Lua table needs double quotes inside, so the shell word has to
+     * be single-quoted — one unbalanced quote and hyprctl gets garbage. */
+    char cmd[256];
+    build_send_shortcut(cmd, sizeof(cmd), "0xabc", 'l');
+    int singles = 0;
+    for (const char *p = cmd; *p; p++) if (*p == '\'') singles++;
+    assert(singles == 2);
+    assert(strchr(cmd, '\'') < strstr(cmd, "hl.dsp.send_shortcut"));
+}
+
+static void test_send_shortcut_all_directions(void)
+{
+    for (int i = 0; i < 4; i++) {
+        char cmd[256], want[32];
+        build_send_shortcut(cmd, sizeof(cmd), "0x1", dirs[i].akey);
+        snprintf(want, sizeof(want), "key = \"%c\"", dirs[i].akey);
+        assert(strstr(cmd, want) != NULL);
+    }
+}
+
+/* ── find_foreground_vim tests (real /proc) ────────────────────────── */
+
+static void test_find_foreground_vim_none(void)
+{
+    /* This test binary is not a vim and has no vim children. */
+    assert(find_foreground_vim((long)getpid()) == 0);
+}
+
+static void test_find_foreground_vim_bad_root(void)
+{
+    assert(find_foreground_vim(999999999L) == 0);
+}
+
 /* ── Main ──────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -387,6 +528,27 @@ int main(void)
     RUN(test_valid_move_up);
     RUN(test_valid_move_down);
     RUN(test_valid_move_invalid_flag);
+
+    printf("\nparse_proc_stat:\n");
+    RUN(test_proc_stat_simple);
+    RUN(test_proc_stat_comm_with_spaces_and_parens);
+    RUN(test_proc_stat_backgrounded);
+    RUN(test_proc_stat_stopped_but_still_foreground);
+    RUN(test_proc_stat_no_tty);
+    RUN(test_proc_stat_malformed);
+
+    printf("\nis_vim_command:\n");
+    RUN(test_is_vim_command_matches);
+    RUN(test_is_vim_command_rejects);
+
+    printf("\nbuild_send_shortcut:\n");
+    RUN(test_send_shortcut_command);
+    RUN(test_send_shortcut_quoting);
+    RUN(test_send_shortcut_all_directions);
+
+    printf("\nfind_foreground_vim (real /proc):\n");
+    RUN(test_find_foreground_vim_none);
+    RUN(test_find_foreground_vim_bad_root);
 
     printf("\nget_ppid (real /proc):\n");
     RUN(test_get_ppid_self);
