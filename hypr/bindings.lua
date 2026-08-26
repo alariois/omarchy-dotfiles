@@ -30,3 +30,22 @@ o.bind("ALT + H", "Navigate left", "hypr-nav l")
 o.bind("ALT + J", "Navigate down", "hypr-nav d")
 o.bind("ALT + K", "Navigate up", "hypr-nav u")
 o.bind("ALT + L", "Navigate right", "hypr-nav r")
+
+-- SUPER + SHIFT + G: Gmail, in place of Omarchy's Signal.
+--
+-- The unbind is required, not tidiness. Omarchy binds this key in
+-- default/hypr/bindings/applications.lua, and its o.bind() throws away the
+-- handle hl.bind() returns -- so unlike Omarchy's own examples there is no
+-- object here to call :set_enabled(false) on. Binding over it without the
+-- unbind leaves *both* registered: `hyprctl binds` then lists Signal and
+-- Gmail on SUPER+SHIFT+G, which is ambiguous at best.
+--
+-- Unbinding by key works because this file is dofile'd from the user's
+-- bindings.lua, which Omarchy loads after its own defaults, so the key is
+-- already taken by the time we get here.
+--
+-- `{ webapp = ..., focus = true }` is Omarchy's own vocabulary: it resolves
+-- to `omarchy-launch-or-focus-webapp "Gmail" "<url>"`, so a second press
+-- focuses the existing window instead of opening another.
+hl.unbind("SUPER + SHIFT + G")
+o.bind("SUPER + SHIFT + G", "Gmail", { webapp = "https://mail.google.com/", focus = true })
