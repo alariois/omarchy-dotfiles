@@ -29,5 +29,9 @@
 hl.config({
   input = {
     kb_options = "custom:caps_esc_compose,custom:ralt_super,shift:both_capslock_cancel",
+
+    -- Ported from `main`. Stock Omarchy 4 is 250; this is the delay before a
+    -- held key starts repeating, in ms, so a longer one is less twitchy.
+    repeat_delay = 300,
   },
 })
