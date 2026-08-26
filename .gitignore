@@ -9,6 +9,10 @@
 hypr-nav/hypr-nav
 hypr-nav/test_hypr_nav
 
+# Claude Code's per-checkout scratch: agent worktrees and session state. Local
+# to this machine and never part of the config.
+.claude/
+
 # Secrets never belong in this repo
 *.key
 *.pem
