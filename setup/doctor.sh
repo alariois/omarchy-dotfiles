@@ -3,8 +3,9 @@
 # Report the state of the delta model on this machine:
 #
 #   1. Are our managed include blocks in place?
-#   2. Are the Omarchy hook symlinks intact?
-#   3. Which Omarchy-owned config files differ from the shipped stock defaults
+#   2. Do our symlinks point into this repo?
+#   3. Are the Omarchy hook symlinks intact?
+#   4. Which Omarchy-owned config files differ from the shipped stock defaults
 #      in ways this repo does NOT capture? Those are the drift -- either port
 #      them into the repo as a delta, or revert them.
 
@@ -12,13 +13,23 @@ set -uo pipefail
 
 DOTFILES=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)
 OMARCHY=${OMARCHY_PATH:-/usr/share/omarchy}
+OMARCHY_NVIM=${OMARCHY_NVIM_PATH:-/usr/share/omarchy-nvim}
 MARKER='omarchy-dotfiles'
 
-# Files under $OMARCHY/config that are runtime state rather than user config.
-# Omarchy ships a seed copy, the app then rewrites it constantly, so diffing
-# them reports noise forever.
+# Stock trees to diff the live system against, as <stock root>|<live root>.
+# Omarchy ships nvim from its own package, not from $OMARCHY/config, so it
+# needs a second entry rather than being reachable from the first.
+STOCK_ROOTS=(
+  "$OMARCHY/config|$HOME/.config"
+  "$OMARCHY_NVIM/config|$HOME/.config/nvim"
+)
+
+# Paths (relative to their stock root) that are runtime state rather than user
+# config. Omarchy ships a seed copy, the app then rewrites it constantly, so
+# diffing them reports noise forever.
 DRIFT_IGNORE=(
   'chromium/Default/Preferences'
+  'lazy-lock.json'
 )
 
 # Max diff lines to print per drifted file before truncating.
@@ -40,6 +51,27 @@ for entry in "${HOOKS[@]}"; do
 done
 
 echo
+echo "== Symlinks into this repo =="
+# ${#LINKS[@]} would abort under `set -u` if targets.sh ever drops the array.
+link_count=0
+[[ -n ${LINKS+x} ]] && link_count=${#LINKS[@]}
+if (( link_count == 0 )); then
+  echo "  none declared"
+else
+  for entry in "${LINKS[@]}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r target payload <<< "$entry"
+    if [[ -L $target && $(readlink -f "$target") == "$DOTFILES/$payload" ]]; then
+      echo "  linked   $(tilde "$target")  ->  $payload"
+    elif [[ -e $target ]]; then
+      echo "  STALE    $(tilde "$target")   -> real file/dir, or link elsewhere"
+    else
+      echo "  MISSING  $(tilde "$target")   -> run setup/install.sh"
+    fi
+  done
+fi
+
+echo
 echo "== Omarchy hooks =="
 shopt -s nullglob
 for src in "$DOTFILES"/hooks/*.d/*.hook; do
@@ -56,43 +88,56 @@ done
 echo
 echo "== Omarchy-owned files that differ from stock =="
 found=0
-while IFS= read -r stock; do
-  rel=${stock#"$OMARCHY/config/"}
-  live="$HOME/.config/$rel"
-  [[ -f $live ]] || continue
+for root in "${STOCK_ROOTS[@]}"; do
+  IFS='|' read -r stock_root live_root <<< "$root"
+  [[ -d $stock_root ]] || continue
 
-  skip=false
-  for ignore in "${DRIFT_IGNORE[@]}"; do
-    [[ $rel == $ignore ]] && skip=true && break
-  done
-  $skip && continue
+  while IFS= read -r stock; do
+    rel=${stock#"$stock_root/"}
+    live="$live_root/$rel"
+    [[ -f $live ]] || continue
 
-  # Compare with our managed block stripped out, so only unmanaged local edits
-  # show up here. Only round-trip through awk when a block is actually
-  # present -- command substitution mangles trailing newlines, which turns
-  # empty stock files into phantom drift.
-  if grep -qF ">>> $MARKER >>>" "$live" 2>/dev/null; then
-    cmp_live=$(mktemp)
-    awk -v m="$MARKER" '
-      index($0, ">>> " m " >>>") { skip = 1; next }
-      index($0, "<<< " m " <<<") { skip = 0; next }
-      !skip' "$live" > "$cmp_live"
-    trap 'rm -f "$cmp_live"' EXIT
-  else
+    skip=false
+    for ignore in "${DRIFT_IGNORE[@]}"; do
+      [[ $rel == "$ignore" ]] && skip=true && break
+    done
+    $skip && continue
+
+    # A live path that is a symlink into this repo is ours by construction --
+    # the Symlinks section above already reports on it.
+    if [[ -L $live && $(readlink -f "$live") == "$DOTFILES"/* ]]; then
+      continue
+    fi
+
+    # Compare with our managed block stripped out, so only unmanaged local
+    # edits show up here. Only round-trip through awk when a block is actually
+    # present -- command substitution mangles trailing newlines, which turns
+    # empty stock files into phantom drift.
     cmp_live="$live"
-  fi
+    tmp_live=
+    if grep -qF ">>> $MARKER >>>" "$live" 2>/dev/null; then
+      tmp_live=$(mktemp)
+      awk -v m="$MARKER" '
+        index($0, ">>> " m " >>>") { skip = 1; next }
+        index($0, "<<< " m " <<<") { skip = 0; next }
+        !skip' "$live" > "$tmp_live"
+      cmp_live="$tmp_live"
+    fi
 
-  if ! cmp -s "$cmp_live" "$stock"; then
-    echo "  drift    ~/.config/$rel"
-    # stock is '-', live is '+'
-    diff --unified=0 "$stock" "$cmp_live" \
-      | sed '1,2d' \
-      | awk -v cap="$DIFF_CAP" '
-          NR <= cap { print "             " $0; next }
-          NR == cap + 1 { print "             ... (" NR - 1 "+ lines, run diff for the rest)" }'
-    found=$((found + 1))
-  fi
-done < <(find "$OMARCHY/config" -type f 2>/dev/null | sort)
+    if ! cmp -s "$cmp_live" "$stock"; then
+      echo "  drift    $(tilde "$live")"
+      # stock is '-', live is '+'
+      diff --unified=0 "$stock" "$cmp_live" \
+        | sed '1,2d' \
+        | awk -v cap="$DIFF_CAP" '
+            NR <= cap { print "             " $0; next }
+            NR == cap + 1 { print "             ... (" NR - 1 "+ lines, run diff for the rest)" }'
+      found=$((found + 1))
+    fi
+
+    [[ -n $tmp_live ]] && rm -f "$tmp_live"
+  done < <(find "$stock_root" -type f 2>/dev/null | sort)
+done
 
 if (( found == 0 )); then
   echo "  none -- every Omarchy-owned file is stock plus our managed blocks"

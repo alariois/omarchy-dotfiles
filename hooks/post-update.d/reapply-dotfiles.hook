@@ -13,9 +13,22 @@ install="$repo/setup/install.sh"
 
 [[ -x $install ]] || exit 0
 
-if out=$("$install" --quiet 2>&1) && [[ -n $out ]]; then
-  notify-send -a "omarchy-dotfiles" \
-    "Dotfile hooks repaired after update" "$out" 2>/dev/null || true
-  echo "omarchy-dotfiles repaired:"
+out=$("$install" --quiet 2>&1)
+status=$?
+
+# Report whenever install.sh had anything to say. Checking the output rather
+# than the exit status matters: a non-zero status means it hit a conflict it
+# would not resolve on its own, which is exactly when we must not stay quiet.
+if [[ -n $out ]]; then
+  if (( status == 0 )); then
+    title="Dotfile hooks repaired after update"
+  else
+    title="Dotfile hooks need attention after update"
+  fi
+  notify-send -a "omarchy-dotfiles" "$title" "$out" 2>/dev/null || true
+  echo "omarchy-dotfiles: $title"
   echo "$out"
 fi
+
+# Never fail the update itself.
+exit 0
