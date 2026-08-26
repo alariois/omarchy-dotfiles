@@ -6,3 +6,7 @@
 
 # Vi keybindings at the prompt.
 set -o vi
+
+# The standalone config in nvim-chad/, linked to ~/.config/nvim-chad. Plain
+# `nvim` stays on Omarchy's LazyVim.
+alias nv="NVIM_APPNAME='nvim-chad' nvim"

@@ -115,7 +115,16 @@ the current theme). So:
   every plugin update, so diffing it reports noise forever.
 
 `nvim-chad/` is a second, standalone config with no overlap with Omarchy's.
-Launch it with `NVIM_APPNAME=nvim-chad nvim`.
+Launch it with `nv` (aliased in `shell/bashrc`); plain `nvim` stays on
+Omarchy's LazyVim.
+
+**bash.** `shell/bashrc` carries `set -o vi` and the `nv` alias. The 3.x-era
+`.bashrc` on `main` had five more personal lines, all deliberately dropped:
+`nvm`, `~/.cargo/env`, `~/.local/bin/env` (uv), and Android SDK
+platform-tools all point at paths that do not exist on this machine — sourcing
+them would error on every shell start — and `alias dot=...` drove a bare git
+repo at `~/.dotfiles` that this repo replaces. Omarchy 4 manages toolchains
+with mise. Re-add any of them the day the tool is actually installed.
 
 **tmux.** The only surviving delta is `unbind k`. The 3.x-era snapshot on `main`
 also carried extended keys, `escape-time`, and a copy-mode status indicator —
