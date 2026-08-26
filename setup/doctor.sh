@@ -72,6 +72,32 @@ else
 fi
 
 echo
+echo "== Compiled binaries =="
+build_count=0
+[[ -n ${BUILDS+x} ]] && build_count=${#BUILDS[@]}
+if (( build_count == 0 )); then
+  echo "  none declared"
+else
+  for entry in "${BUILDS[@]}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r dir artifact <<< "$entry"
+    if [[ ! -x $artifact ]]; then
+      echo "  MISSING  $(tilde "$artifact")   -> run setup/install.sh"
+    elif stale=$(find "$DOTFILES/$dir" -type f \
+                   \( -name '*.c' -o -name '*.h' -o -name 'Makefile' \) \
+                   -newer "$artifact" -print -quit) && [[ -n $stale ]]; then
+      echo "  STALE    $(tilde "$artifact")   -> ${stale#"$DOTFILES/"} is newer, rebuild"
+    else
+      echo "  built    $(tilde "$artifact")  <-  $dir"
+      # A binary that is not reachable by name is installed but unusable from a
+      # keybinding, which is the only way this one ever gets called.
+      command -v "$(basename "$artifact")" >/dev/null 2>&1 \
+        || echo "           WARNING: $(basename "$artifact") is not on this shell's PATH"
+    fi
+  done
+fi
+
+echo
 echo "== Omarchy hooks =="
 shopt -s nullglob
 for src in "$DOTFILES"/hooks/*.d/*.hook; do

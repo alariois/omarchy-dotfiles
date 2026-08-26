@@ -30,6 +30,7 @@ HOOKS=(
   "$HOME/.bashrc|sh|shell/bashrc"
   "$HOME/.config/tmux/tmux.conf|tmux|tmux/tmux.conf"
   "$HOME/.config/nvim/lua/config/options.lua|lua|nvim/options.lua"
+  "$HOME/.config/hypr/bindings.lua|lua|hypr/bindings.lua"
 )
 
 LINKS=(
@@ -42,4 +43,17 @@ LINKS=(
   # beside them is safe -- link the files, never the directory.
   "$HOME/.config/nvim/lua/plugins/hypr-nav.lua|nvim/plugins/hypr-nav.lua"
   "$HOME/.config/nvim/lua/plugins/telescope-find-all.lua|nvim/plugins/telescope-find-all.lua"
+)
+
+# BUILDS -- source we compile. Neither lane above fits: the repo tracks source,
+# but what the system needs is a binary, and a binary is a build artifact rather
+# than config (hence the .gitignore entries).
+#
+#   <repo-relative source dir>|<installed artifact>
+#
+# The source dir must hold a Makefile with an `install` target that honours
+# PREFIX. install.sh rebuilds only when a source file is newer than the
+# installed artifact.
+BUILDS=(
+  "hypr-nav|$HOME/.local/bin/hypr-nav"
 )

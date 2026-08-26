@@ -117,6 +117,44 @@ ensure_link() {
   repaired=$((repaired + 1))
 }
 
+# Compile source in the repo and install the resulting binary. Skipped entirely
+# when nothing changed, so a repeat run stays silent instead of shelling out to
+# make and reprinting its output.
+ensure_build() {
+  local dir=$1 artifact=$2
+  local src="$DOTFILES/$dir" out bindir prefix
+
+  if [[ ! -f $src/Makefile ]]; then
+    echo "MISSING Makefile: $src/Makefile" >&2
+    return 1
+  fi
+
+  # Only real inputs count as "newer" -- globbing every file would let a stray
+  # `make test` binary in the source dir trigger a pointless rebuild.
+  if [[ -x $artifact ]] &&
+     [[ -z $(find "$src" -type f \
+               \( -name '*.c' -o -name '*.h' -o -name 'Makefile' \) \
+               -newer "$artifact" -print -quit) ]]; then
+    say "  ok       ${artifact/#"$HOME"/\~}"
+    return 0
+  fi
+
+  # The Makefile convention is $(PREFIX)/bin/<binary>, so PREFIX is two levels
+  # up from the artifact.
+  bindir=$(dirname "$artifact")
+  prefix=$(dirname "$bindir")
+
+  if ! out=$(make -C "$src" PREFIX="$prefix" install 2>&1); then
+    changed "  FAILED   build $dir  ->  ${artifact/#"$HOME"/\~}"
+    changed "$out"
+    conflicts=$((conflicts + 1))
+    return 0
+  fi
+
+  changed "  built    ${artifact/#"$HOME"/\~}  <-  $dir"
+  repaired=$((repaired + 1))
+}
+
 ensure_omarchy_hooks() {
   local src dest
   for src in "$DOTFILES"/hooks/*.d/*.hook; do
@@ -145,6 +183,13 @@ for entry in "${LINKS[@]:-}"; do
   [[ -n $entry ]] || continue
   IFS='|' read -r target payload <<< "$entry"
   ensure_link "$target" "$payload"
+done
+
+say "Builds:"
+for entry in "${BUILDS[@]:-}"; do
+  [[ -n $entry ]] || continue
+  IFS='|' read -r dir artifact <<< "$entry"
+  ensure_build "$dir" "$artifact"
 done
 
 say "Omarchy hooks:"

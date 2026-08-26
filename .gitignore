@@ -3,6 +3,12 @@
 *.bak.*
 *.swp
 
+# Compiled by setup/install.sh from hypr-nav/hypr-nav.c. The binary is a build
+# artifact, not config -- the repo tracks the source and the installed copy
+# lives at ~/.local/bin/hypr-nav.
+hypr-nav/hypr-nav
+hypr-nav/test_hypr_nav
+
 # Secrets never belong in this repo
 *.key
 *.pem
