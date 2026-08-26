@@ -1,1 +1,0 @@
-/home/alari/.config/omarchy/current/theme/neovim.lua
