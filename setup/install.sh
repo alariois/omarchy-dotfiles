@@ -117,6 +117,30 @@ ensure_link() {
   repaired=$((repaired + 1))
 }
 
+# Drop a template into place the first time and then leave it alone forever.
+# The point is the "leave it alone": the target holds machine-local content the
+# repo must not own, so an existing file is never compared or overwritten.
+ensure_seed() {
+  local target=$1 payload=$2
+  local abs="$DOTFILES/$payload"
+
+  if [[ ! -f $abs ]]; then
+    echo "MISSING template: $abs" >&2
+    return 1
+  fi
+
+  if [[ -e $target ]]; then
+    say "  ok       ${target/#"$HOME"/\~}  (local, left alone)"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$target")"
+  cp "$abs" "$target"
+  changed "  seeded   ${target/#"$HOME"/\~}  <-  $payload"
+  changed "           machine-local and untracked; edit it there, not in the repo"
+  repaired=$((repaired + 1))
+}
+
 # Compile source in the repo and install the resulting binary. Skipped entirely
 # when nothing changed, so a repeat run stays silent instead of shelling out to
 # make and reprinting its output.
@@ -176,6 +200,15 @@ say "Config hooks:"
 for entry in "${HOOKS[@]}"; do
   IFS='|' read -r target style payload <<< "$entry"
   ensure_hook "$target" "$style" "$payload"
+done
+
+# Seeded before the symlinks, because xcompose/XCompose includes the local file
+# that this creates.
+say "Local files:"
+for entry in "${SEEDS[@]:-}"; do
+  [[ -n $entry ]] || continue
+  IFS='|' read -r target payload <<< "$entry"
+  ensure_seed "$target" "$payload"
 done
 
 say "Symlinks:"

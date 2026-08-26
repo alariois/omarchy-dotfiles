@@ -72,6 +72,29 @@ else
 fi
 
 echo
+echo "== Machine-local files =="
+seed_count=0
+[[ -n ${SEEDS+x} ]] && seed_count=${#SEEDS[@]}
+if (( seed_count == 0 )); then
+  echo "  none declared"
+else
+  for entry in "${SEEDS[@]}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r target payload <<< "$entry"
+    if [[ -e $target ]]; then
+      # Still matching the template means it was seeded but never filled in.
+      if cmp -s "$target" "$DOTFILES/$payload"; then
+        echo "  seeded   $(tilde "$target")   -> still the bare template"
+      else
+        echo "  local    $(tilde "$target")   -> has local content (not tracked)"
+      fi
+    else
+      echo "  MISSING  $(tilde "$target")   -> run setup/install.sh"
+    fi
+  done
+fi
+
+echo
 echo "== Compiled binaries =="
 build_count=0
 [[ -n ${BUILDS+x} ]] && build_count=${#BUILDS[@]}

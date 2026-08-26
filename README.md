@@ -46,6 +46,18 @@ Never link a path Omarchy migrates — a migration `mv`s over its target and
 would replace the link with a regular file. And only link a whole *directory*
 when Omarchy owns nothing inside it.
 
+### `SEEDS` — machine-local files the repo must not own
+
+A template copied into place the first time and then left alone forever. The
+point is the leaving alone: the target holds content that should not be
+committed, so an existing file is never compared, never overwritten, and never
+reported as drift.
+
+This repo is public, so anything with a phone number, a client name, an
+internal hostname, or an address goes here rather than into a tracked file.
+`xcompose/XCompose` ends with an `include` of its seeded local file, which is
+how a public Compose file carries private expansions.
+
 ### `BUILDS` — source we compile
 
 Neither lane above fits a program: the repo tracks source, but what the system
@@ -65,6 +77,8 @@ nvim/options.lua                          nvim options (hooked into Omarchy's La
 hypr/bindings.lua                         Hyprland keybindings (hooked)
 nvim/plugins/*.lua                        added LazyVim plugin specs (linked)
 nvim-chad/                                standalone nvim config (linked wholesale)
+xcompose/XCompose                         compose-key expansions (linked)
+xcompose/XCompose.local.seed              template for the private half (seeded)
 hypr-nav/                                 C source for the hypr-nav binary (built)
 setup/targets.sh                          the delta table -- single source of truth
 setup/install.sh                          assert every block, link, build, and hook
@@ -95,7 +109,8 @@ it into the repo as a delta, or revert it with
 
 1. Put the configuration in a repo file (e.g. `hypr/looknfeel.lua`).
 2. Add one row to `setup/targets.sh` — to `HOOKS` if Omarchy owns the live
-   file, to `LINKS` if it does not, to `BUILDS` if it needs compiling.
+   file, to `LINKS` if it does not, to `BUILDS` if it needs compiling, to
+   `SEEDS` if it must stay off GitHub.
 3. Run `setup/install.sh`.
 
 ## Notes on specific configs
@@ -160,6 +175,18 @@ Two things it depends on, both already true on stock Omarchy 4:
 `make -C hypr-nav test` runs 33 unit tests; `make -C hypr-nav test-integration`
 drives a real tmux session for 14 more.
 
+**XCompose.** Split across two files because the repo is public. The tracked
+`xcompose/XCompose` holds the emoji include, the name/email/repo expansions,
+the LAN prefixes, and the eight Estonian letters mapped to where they sit on an
+Estonian keyboard relative to a US one. It ends with `include
+"%H/.XCompose.local"` for anything private — that file is seeded from a
+template and never tracked.
+
+The include of the local file is deliberately the last line, so a parse
+problem there cannot cost the bindings above it. Changes need
+`omarchy-restart-xcompose`, and running applications only pick them up when
+they restart.
+
 **`~/.config/hypr/monitors.lua`** sets `local` variables consumed inside that
 file, so it cannot be hooked out — it needs a real edit to the stock file. It is
 per-machine anyway (scale differs per display), so it belongs in a
@@ -173,12 +200,8 @@ repo and apply it from `install.sh` rather than tracking the whole file.
 The `main` branch holds the previous Omarchy 3.x-era snapshot: whole-file
 copies of hypr `.conf` files, waybar, and mako, none of which 4.x uses.
 
-Ported onto this branch so far: the bash, tmux, nvim, and nvim-chad configs,
-and hypr-nav. Still only on `main` and worth porting:
-
-- **`.XCompose`** — Omarchy ships no `.XCompose`, so this is a clean `LINKS`
-  candidate. The live file has already lost the Estonian-letter bindings and
-  the identification expansions; `main` still has them.
+Everything worth carrying is now ported: the bash, tmux, nvim, and nvim-chad
+configs, hypr-nav, and XCompose. Nothing is left waiting on `main`.
 
 `starship.toml` needs no port: `main`'s copy is byte-identical to 4.x stock.
 It was only ever a snapshot of the default.

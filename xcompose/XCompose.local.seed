@@ -1,0 +1,14 @@
+# Machine-local Compose expansions -- NOT tracked in git.
+#
+# setup/install.sh copies this template to ~/.XCompose.local only when that
+# file does not exist, and never overwrites it afterwards. Edit the copy in
+# your home directory, not this template.
+#
+# This exists because omarchy-dotfiles is a public repository. Anything with a
+# phone number, a client name, an internal hostname, or an address belongs
+# here rather than in xcompose/XCompose.
+#
+# Same syntax as any Compose file:
+#   <Multi_key> <space> <i> : "3701234567"
+#
+# Apply changes with `omarchy-restart-xcompose`.

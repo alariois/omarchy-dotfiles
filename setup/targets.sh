@@ -43,6 +43,20 @@ LINKS=(
   # beside them is safe -- link the files, never the directory.
   "$HOME/.config/nvim/lua/plugins/hypr-nav.lua|nvim/plugins/hypr-nav.lua"
   "$HOME/.config/nvim/lua/plugins/telescope-find-all.lua|nvim/plugins/telescope-find-all.lua"
+
+  # Ours outright: Omarchy ships no .XCompose.
+  "$HOME/.XCompose|xcompose/XCompose"
+)
+
+# SEEDS -- machine-local files this repo deliberately does not own. install.sh
+# copies the template in when the target is missing and never touches it again,
+# so the copy can hold whatever should not be committed. This repo is public.
+#
+#   <target file>|<repo-relative template>
+SEEDS=(
+  # Compose expansions with personal details in them. xcompose/XCompose ends
+  # with an include of this file.
+  "$HOME/.XCompose.local|xcompose/XCompose.local.seed"
 )
 
 # BUILDS -- source we compile. Neither lane above fits: the repo tracks source,

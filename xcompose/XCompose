@@ -1,0 +1,39 @@
+# Personal Compose-key expansions.
+#
+# Linked to ~/.XCompose by setup/install.sh. Omarchy ships no .XCompose of its
+# own, so this file is ours outright -- a link, not a hook.
+#
+# Apply changes with `omarchy-restart-xcompose`. Already-running applications
+# only pick them up when they restart.
+
+# Omarchy's fast emoji access. This is 4.x's path; 3.x shipped it under
+# %H/.local/share/omarchy, which is why the copy on `main` points somewhere
+# that no longer exists.
+include "/usr/share/omarchy/default/xcompose"
+
+# Identification
+<Multi_key> <space> <n> : "Alari"
+<Multi_key> <space> <e> : "alari.ois.ao@gmail.com"
+<Multi_key> <space> <s> : "alari@superhands.ee"
+<Multi_key> <space> <r> : "git@github.com:superhandsrepo/"
+<Multi_key> <space> <0> : "192.168.0."
+<Multi_key> <space> <1> : "192.168.1."
+
+# Estonian letters, by where they sit on an Estonian keyboard relative to a US
+# one. <semicolon> is where ö lives, <apostrophe> where ä lives, and so on.
+<Multi_key> <semicolon>    : "ö"
+<Multi_key> <colon>        : "Ö"
+<Multi_key> <apostrophe>   : "ä"
+<Multi_key> <quotedbl>     : "Ä"
+<Multi_key> <bracketleft>  : "õ"
+<Multi_key> <braceleft>    : "Õ"
+<Multi_key> <bracketright> : "ü"
+<Multi_key> <braceright>   : "Ü"
+
+# Expansions that must not be published -- this repo is public. setup/install.sh
+# seeds ~/.XCompose.local from xcompose/XCompose.local.seed when it is missing,
+# then never touches it again, so the contents stay on this machine only.
+#
+# Deliberately last: if this include ever fails to parse, everything above it
+# has already been read.
+include "%H/.XCompose.local"

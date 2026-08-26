@@ -15,6 +15,8 @@ carries three commits on top of the delta-model groundwork:
 | `cb79348` | tmux + nvim + nvim-chad configs; activated the `LINKS` symlink lane |
 | `8020e1f` | hypr-nav; added the `BUILDS` lane for compiled source |
 | `e4e56bb` | the `nv` alias, completing the nvim-chad port |
+| `622fce1` | these notes |
+| *(latest)* | XCompose, and the `SEEDS` lane for machine-local files |
 
 Verified on this machine after install:
 
@@ -35,13 +37,18 @@ authority — run it first after reboot and trust it over these notes.
 `worktree-port-nvim-tmux` (the same commits) is on origin. Push `quattro` so a
 disk failure is not a total loss.
 
-**2. Port `.XCompose`.** The one config still only on `main`. Omarchy ships no
-`.XCompose`, so it is a clean `LINKS` candidate — a single row in
-`setup/targets.sh`. The live `~/.XCompose` has already lost the
-Estonian-letter bindings (`<Multi_key> <semicolon>` → ö, and the rest) and the
-identification expansions; `git show main:.XCompose` still has them. Note the
-live file also fixes the include path to `/usr/share/omarchy/default/xcompose`,
-which `main`'s version has wrong — keep the live path when porting.
+**2. Finish the XCompose swap.** The port is committed but *not yet live*,
+because `~/.XCompose` is still a real file and `install.sh` refuses to delete
+one it does not recognise. Everything in the live file is reproduced in
+`xcompose/XCompose` (verified line by line), so replacing it loses nothing:
+
+```bash
+rm ~/.XCompose && setup/install.sh && omarchy-restart-xcompose
+```
+
+`~/.XCompose.local` already exists on this machine with the phone expansion in
+it. It is deliberately untracked — the repo is public — and `install.sh` will
+leave it alone.
 
 **3. Decide on `nvim/plugins/telescope-find-all.lua`.** Ported verbatim, but
 telescope is not in this stack any more — Omarchy 4's LazyVim (install version
