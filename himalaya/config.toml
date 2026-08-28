@@ -1,0 +1,40 @@
+# Gmail over IMAP, for scripting.
+#
+# Linked to ~/.config/himalaya/config.toml by setup/install.sh. Omarchy ships
+# nothing under ~/.config/himalaya, so this file is ours outright -- a link,
+# not a hook.
+#
+# No secret lives here. The app password sits in gnome-keyring and is fetched
+# by the command at the bottom, so this file stays safe in a public repo.
+#
+# To set it up on a new machine:
+#
+#   1. Google account -> Security -> 2-Step Verification -> App passwords
+#      (https://myaccount.google.com/apppasswords). App passwords only exist
+#      once 2-Step Verification is on.
+#   2. secret-tool store --label="Gmail app password (himalaya)" \
+#        service himalaya account alari.ois.ao@gmail.com
+#      It reads the password from stdin and stores nothing on disk in cleartext.
+#   3. himalaya account check
+#
+# The schema below was read out of himalaya 2.1's own parser rather than from
+# a blog post; `himalaya json-schema <dir>` dumps the JSON shape of every
+# command's output, which is what the mail-last helper is written against.
+
+[accounts.gmail]
+default = true
+email = "alari.ois.ao@gmail.com"
+display-name = "Alari"
+
+[accounts.gmail.imap]
+# Implicit TLS on 993. Gmail also offers STARTTLS on 143; there is no reason
+# to prefer it.
+server = "imap.gmail.com:993"
+
+[accounts.gmail.imap.sasl.plain]
+username = "alari.ois.ao@gmail.com"
+
+# `cmd`, never `raw`: raw would put the app password in this file, and this
+# repository is public.
+[accounts.gmail.imap.sasl.plain.passwd]
+cmd = "secret-tool lookup service himalaya account alari.ois.ao@gmail.com"

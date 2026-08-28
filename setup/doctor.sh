@@ -123,6 +123,35 @@ else
 fi
 
 echo
+echo "== Mail =="
+# Three separate things, each of which fails in its own way: the binary, the
+# config, and the credential. Checked apart so the report says which.
+if ! command -v himalaya >/dev/null 2>&1; then
+  echo "  MISSING  himalaya   -> sudo pacman -S himalaya"
+else
+  if himalaya -c "$DOTFILES/himalaya/config.toml" --json account list >/dev/null 2>&1; then
+    echo "  ok       himalaya config parses"
+  else
+    echo "  BROKEN   himalaya config does not parse:"
+    himalaya -c "$DOTFILES/himalaya/config.toml" account list 2>&1 \
+      | sed 's/^/             /' | head -4
+  fi
+
+  # Presence only -- never print it, and never send it anywhere. A live login
+  # test is `himalaya account check`, deliberately not run here: doctor.sh is
+  # meant to be cheap and offline.
+  if secret-tool lookup service himalaya \
+       account "$(sed -n 's/^email *= *"\(.*\)"/\1/p' "$DOTFILES/himalaya/config.toml" | head -1)" \
+       >/dev/null 2>&1; then
+    echo "  ok       app password present in the keyring"
+  else
+    echo "  MISSING  app password not in the keyring"
+    echo "           -> secret-tool store --label='Gmail app password (himalaya)' \\"
+    echo "                service himalaya account <your-address>"
+  fi
+fi
+
+echo
 echo "== Fonts =="
 font_count=0
 [[ -n ${FONTS+x} ]] && font_count=${#FONTS[@]}

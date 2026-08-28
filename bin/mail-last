@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+#
+# mail-last -- the newest Gmail message(s) as JSON on stdout, for piping into
+# whatever wants to process them.
+#
+# Linked to ~/.local/bin/mail-last by setup/install.sh; the account it uses is
+# himalaya/config.toml in the same repo.
+#
+#   mail-last                 # newest message in the inbox
+#   mail-last -n 5            # five newest
+#   mail-last -m '[Gmail]/Sent Mail'
+#   mail-last --raw           # bodies as raw RFC822 instead of parsed
+#
+# Output is always a JSON array, one object per message:
+#
+#   [ { "envelope": { id, date, from, to, subject, flags, ... },
+#       "message":  <whatever `himalaya message read --json` emits> } ]
+#
+# The message half is passed through verbatim rather than reshaped. himalaya
+# documents it only as "a minimal header block followed by a per-part walk",
+# with no fixed schema, so anything this script asserted about its innards
+# would be a guess that breaks on the next release. The envelope half *is*
+# schema'd (`himalaya json-schema`), so filter on that and reach into
+# .message only for content.
+#
+# Reading does not mark anything as seen: `himalaya message read` only sets
+# the flag when passed --seen, which this never does. Running it is safe to
+# repeat and safe to pipe into something half-written.
+
+set -euo pipefail
+
+count=1
+mailbox=INBOX
+raw=()
+
+die() { echo "mail-last: $*" >&2; exit 1; }
+
+usage() {
+  sed -n '3,26p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
+  exit "${1:-0}"
+}
+
+while (($#)); do
+  case $1 in
+    -n|--count)   count=${2:-} ; shift 2 || die "-n needs a number" ;;
+    -m|--mailbox) mailbox=${2:-}; shift 2 || die "-m needs a mailbox" ;;
+    --raw)        raw=(--raw)  ; shift ;;
+    -h|--help)    usage 0 ;;
+    *)            die "unknown argument: $1  (try --help)" ;;
+  esac
+done
+
+[[ $count =~ ^[1-9][0-9]*$ ]] || die "count must be a positive integer, got '$count'"
+
+for tool in himalaya jq; do
+  command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
+done
+
+# One list call, then one read per message. himalaya orders envelopes date
+# descending, so page 1 is already the newest -- no sorting needed here.
+envelopes=$(himalaya envelope list --mailbox "$mailbox" --page-size "$count" --json) \
+  || die "could not list '$mailbox' -- is the app password in the keyring? (himalaya account check)"
+
+jq -e '.envelopes | length > 0' <<<"$envelopes" >/dev/null 2>&1 \
+  || die "no messages in '$mailbox'"
+
+# Accumulate into a JSON array with jq rather than string-concatenating, so a
+# subject containing a quote or a newline cannot corrupt the output.
+out='[]'
+while IFS= read -r id; do
+  envelope=$(jq -c --arg id "$id" '.envelopes[] | select(.id == $id)' <<<"$envelopes")
+  message=$(himalaya message read "${raw[@]}" --mailbox "$mailbox" --json "$id") \
+    || die "could not read message $id"
+  out=$(jq -c --argjson e "$envelope" --argjson m "$message" \
+          '. + [{envelope: $e, message: $m}]' <<<"$out")
+done < <(jq -r '.envelopes[].id' <<<"$envelopes")
+
+jq . <<<"$out"

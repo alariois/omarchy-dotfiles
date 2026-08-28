@@ -51,6 +51,13 @@ LINKS=(
   # Ours outright: Omarchy ships no .XCompose.
   "$HOME/.XCompose|xcompose/XCompose"
 
+  # Gmail over IMAP for scripting, plus the helper that reads it. Omarchy
+  # ships nothing under ~/.config/himalaya, and ~/.local/bin is already on the
+  # session PATH for hypr-nav's sake. No secret is tracked: the config fetches
+  # the app password from gnome-keyring at run time.
+  "$HOME/.config/himalaya/config.toml|himalaya/config.toml"
+  "$HOME/.local/bin/mail-last|bin/mail-last"
+
   # Custom xkb options, selected by hypr/input.lua. libxkbcommon searches
   # ~/.config/xkb before the system tree, which is how these work without root.
   # Omarchy puts nothing here, so the whole directory is safe to link.

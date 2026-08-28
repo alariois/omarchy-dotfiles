@@ -134,6 +134,8 @@ nvim-chad/                                standalone nvim config (linked wholesa
 xcompose/XCompose                         compose-key expansions (linked)
 xcompose/XCompose.local.seed              template for the private half (seeded)
 hypr-nav/                                 C source for the hypr-nav binary (built)
+himalaya/config.toml                      Gmail over IMAP for scripting (linked)
+bin/mail-last                             newest message(s) as JSON (linked)
 setup/targets.sh                          the delta table -- single source of truth
 setup/lib.sh                              freshness checks shared by the two below
 setup/install.sh                          assert every block, link, build, and hook
@@ -304,6 +306,44 @@ host-specific overlay rather than here.
 
 **`shell.json`** is JSON with no include directive. Keep a `jq` patch in the
 repo and apply it from `install.sh` rather than tracking the whole file.
+
+**Mail.** `himalaya` reads Gmail over IMAP, for scripting rather than for
+sitting in. `bin/mail-last` wraps it into the one thing wanted most often:
+
+```bash
+mail-last            # newest inbox message, as JSON
+mail-last -n 5       # five newest
+mail-last -m '[Gmail]/Sent Mail'
+```
+
+Output is a JSON array of `{ envelope, message }`. The envelope half has a
+published schema — `himalaya json-schema <dir>` dumps the JSON shape of every
+command — so filter on that. The message half is passed through verbatim,
+because himalaya documents it only as "a minimal header block followed by a
+per-part walk" with no fixed schema; reshaping it here would be a guess that
+breaks on the next release. Reading never marks anything seen: `himalaya
+message read` sets that flag only when passed `--seen`, which the wrapper
+never does.
+
+Credentials are a Gmail **app password**, which requires 2-Step Verification on
+the account, stored in gnome-keyring:
+
+```bash
+secret-tool store --label="Gmail app password (himalaya)" \
+  service himalaya account <your-address>
+```
+
+`himalaya/config.toml` fetches it with a `cmd`, never a `raw` — the repo is
+public and nothing secret may be tracked. `doctor.sh` checks the binary, the
+config and the credential separately, because each fails differently; it tests
+only that the credential *exists*, never printing it and never logging in.
+`himalaya account check` does the live login when you want it.
+
+OAuth2 against the Gmail REST API is the other option, and himalaya ships it
+(`+gmail`, with `labels`, `threads`, `history` and `settings` subcommands that
+IMAP cannot express). It needs a Google Cloud OAuth client, so it is not set up
+here; the config is structured so a `[accounts.gmail.gmail]` block can be added
+beside the IMAP one rather than replacing it.
 
 ## History
 
