@@ -13,12 +13,13 @@
 #   mail-last --raw           # bodies as raw RFC822 instead of parsed
 #
 # By default it prints date, from, subject and body as text. Any subset can be
-# asked for instead, and they always come out in that order however the flags
-# were typed:
+# asked for instead, and they always come out in the order date, from, subject,
+# code, text however the flags were typed:
 #
 #   mail-last --subject                 # just the subject
 #   mail-last --from --subject          # sender and subject
 #   mail-last --text                    # just the body
+#   mail-last --code                    # the one-time code, or NOT FOUND
 #   mail-last --json                    # the full structure, below
 #
 # Asking for exactly one field prints the bare value, so it pipes cleanly. Ask
@@ -27,6 +28,12 @@
 #
 # --date renders as "2026-08-28 09:48 (2 hours ago)". The relative half is the
 # point: absolute timestamps make you do the arithmetic yourself.
+#
+# --code digs the one-time code out of the body, printing NOT FOUND when there
+# is none. The work is in bin/mail-code, which is a separate program precisely
+# so it can be tested against awkward mail without a mailbox:
+# `mail-code --self-test`. It is not in the default set -- most mail has no
+# code, and NOT FOUND on every message would be noise.
 #
 # --json emits a JSON array, newest first, one object per message:
 #
@@ -91,6 +98,7 @@ want_json=false
 want_date=false
 want_from=false
 want_subject=false
+want_code=false
 want_text=false
 any_field=false
 
@@ -114,6 +122,7 @@ while (($#)); do
     --date)       want_date=true   ; any_field=true; shift ;;
     --from)       want_from=true   ; any_field=true; shift ;;
     --subject)    want_subject=true; any_field=true; shift ;;
+    --code)       want_code=true   ; any_field=true; shift ;;
     --text)       want_text=true   ; any_field=true; shift ;;
     -h|--help)    usage 0 ;;
     *)            die "unknown argument: $1  (try --help)" ;;
@@ -125,7 +134,7 @@ done
 # --json is a whole other output shape, not a fifth field, so combining it with
 # field flags has no sensible meaning. Say so rather than silently picking one.
 if $want_json && $any_field; then
-  die "--json cannot be combined with --date/--from/--subject/--text"
+  die "--json cannot be combined with --date/--from/--subject/--code/--text"
 fi
 
 # No field flags means all four.
@@ -134,13 +143,22 @@ if ! $want_json && ! $any_field; then
 fi
 
 # The body costs a fetch per message; the rest are already in the envelope.
+# --code needs it too: the code is in the body, not the headers.
 need_body=false
-if $want_json || $want_text; then need_body=true; fi
+if $want_json || $want_text || $want_code; then need_body=true; fi
 
 selected=0
-for f in $want_date $want_from $want_subject $want_text; do
+for f in $want_date $want_from $want_subject $want_code $want_text; do
   $f && selected=$((selected + 1))
 done
+
+# Prefer the copy beside this script over whatever is on PATH, so a checkout
+# always uses its own extractor rather than an older installed one.
+code_tool=$(dirname "$(readlink -f "$0")")/mail-code
+[[ -x $code_tool ]] || code_tool=$(command -v mail-code || true)
+if $want_code && [[ -z $code_tool ]]; then
+  die "--code needs mail-code, which is not installed"
+fi
 
 for tool in himalaya jq; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
@@ -285,6 +303,19 @@ fi
 # reading case. Labels are padded to the longest in use, not to a constant,
 # so `--from --subject` does not carry indentation for a date that is absent.
 label() { $bare || printf '%-*s ' "$labelw" "$1:"; }
+
+# The plain-text body of message $1, preferring a text part and falling back
+# to the html one, which after himalaya's part walk is usually readable.
+body_text() {
+  jq -r --argjson i "$1" '
+    .[$i].message as $m
+    | if $m == null then "(no body)"
+      elif ($m.text_body // []) | length > 0
+        then $m.parts[$m.text_body[0]].body.Text
+      elif ($m.html_body // []) | length > 0
+        then $m.parts[$m.html_body[0]].body.Text
+      else "(no readable body)" end' "$out"
+}
 bare=false; (( selected == 1 )) && bare=true
 labelw=0
 $want_date    && (( labelw < 5 )) && labelw=5
@@ -315,17 +346,16 @@ for i in $(seq 0 $((msg_count - 1))); do
     jq -r --argjson i "$i" '.[$i].envelope.subject // "(no subject)"' "$out"
   fi
 
+  if $want_code; then
+    label Code
+    # Same body extraction as --text; mail-code decides what counts as a code.
+    body_text "$i" | "$code_tool" || true
+  fi
+
   if $want_text; then
     # Blank line before the body only when something precedes it, so
     # `--text` alone emits nothing but the body.
     (( selected > 1 )) && echo
-    jq -r --argjson i "$i" '
-      .[$i].message as $m
-      | if $m == null then "(no body)"
-        elif ($m.text_body // []) | length > 0
-          then $m.parts[$m.text_body[0]].body.Text
-        elif ($m.html_body // []) | length > 0
-          then $m.parts[$m.html_body[0]].body.Text
-        else "(no readable body)" end' "$out"
+    body_text "$i"
   fi
 done

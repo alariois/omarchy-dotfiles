@@ -57,6 +57,7 @@ LINKS=(
   # the app password from gnome-keyring at run time.
   "$HOME/.config/himalaya/config.toml|himalaya/config.toml"
   "$HOME/.local/bin/mail-last|bin/mail-last"
+  "$HOME/.local/bin/mail-code|bin/mail-code"
 
   # Custom xkb options, selected by hypr/input.lua. libxkbcommon searches
   # ~/.config/xkb before the system tree, which is how these work without root.

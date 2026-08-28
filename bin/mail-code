@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""
+mail-code -- pull a one-time code out of an email body read on stdin.
+
+Prints the code, or NOT FOUND (exit 1) if nothing convincing turned up.
+Used by `mail-last --code`; usable on its own for anything that has the
+body already:
+
+    mail-last --text | mail-code
+
+The hard part is not finding digits, it is not finding the WRONG digits.
+Real mail is full of them: street numbers, ZIP codes, copyright years,
+"expires in 10 minutes", phone numbers, order ids. A plain
+"four or more digits" match picks the footer as often as the code.
+
+So candidates are ranked by how close they sit to a word like "code" or
+"password", in EITHER direction. Direction matters: plenty of senders put
+the code first and explain it afterwards --
+
+    600338
+
+    This code expires in 30 minutes.
+
+-- while others lead with the label:
+
+    Your one-time verification code:
+    474661
+
+Both are the same problem once distance is unsigned. A footer's
+"© 2026 Acme Inc." and "#4133 Covina, CA 91723" stay far from any keyword
+and lose.
+
+To extend it, add to PATTERNS or KEYWORDS below. PATTERNS is ordered:
+earlier entries win ties, so put the more specific shapes first. Run
+`mail-code --self-test` after changing either.
+"""
+
+import re
+import sys
+
+# Candidate shapes, most specific first. Each must match the whole code.
+PATTERNS = [
+    # Chunked, e.g. ABCD-EFGH-IJKL or 4F2A-9C31. The digit lookahead is not
+    # optional: without it this matches "one-time" and "single-use", which sit
+    # at distance zero from the very keyword that found them and so beat every
+    # real candidate.
+    re.compile(r"\b(?=[A-Za-z0-9-]*\d)[A-Za-z0-9]{3,6}(?:-[A-Za-z0-9]{3,6}){1,5}\b"),
+    # Digits split for readability, e.g. 123 456 or 123-456.
+    re.compile(r"\b\d{3}[ -]\d{3}\b"),
+    # Plain run of digits. The common case.
+    re.compile(r"\b\d{4,10}\b"),
+    # Mixed letters and digits, e.g. 7GTQ4X. Both lookaheads are required:
+    # without them this matches any shouted word in a marketing header.
+    re.compile(r"\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{5,10}\b"),
+]
+
+KEYWORDS = re.compile(
+    r"(?i)\b("
+    r"code|passcode|password|pin|otp|one[\s-]?time|single[\s-]?use|"
+    r"verification|verify|verifying|token|2fa|mfa|"
+    r"authenticat\w*|confirm\w*|security\s+code|login\s+code|access\s+code"
+    r")\b"
+)
+
+# How far from a keyword a candidate may sit, in characters. Wide enough to
+# span the blank lines and boilerplate senders like to put between the label
+# and the code; narrow enough that a footer three paragraphs down loses.
+WINDOW = 300
+
+# Regions a code never lives in. Checked by overlap, so a candidate anywhere
+# inside one is discarded rather than merely penalised.
+NEVER = [
+    re.compile(r"https?://\S+"),              # URLs: tracking ids, ports
+    re.compile(r"\b[\w.+-]+@[\w.-]+\.\w+\b"), # email addresses
+    # Hex colours. #333333 is six digits sitting next to the word "code" in
+    # any stylesheet that themes a <code> element, which is how a sign-in
+    # NOTIFICATION with no code in it at all reported one.
+    re.compile(r"#[0-9A-Fa-f]{3,8}\b"),
+    re.compile(r"(?i)(?:©|\(c\)|copyright)\s*\d{4}"),
+    re.compile(r"(?i)\b\d{1,5}\s+[A-Z][A-Za-z.]*\s+"
+               r"(?:st|street|ave|avenue|rd|road|blvd|boulevard|"
+               r"ln|lane|dr|drive|way|floor|suite|ste)\b"),
+]
+
+
+# Lines that are markup rather than message. HTML mail converted to text drags
+# whole stylesheets along, and CSS is dense with both digits and the word
+# "code" -- selectors like `code, code.inline {` and `.vercel-code-block`.
+# Dropping these lines wholesale is cruder than parsing, and right: a one-time
+# code is never delivered inside a declaration block.
+NOISE_LINE = re.compile(
+    r"!important"
+    r"|^\s*[.#@][\w-]+[\w\s.,:#()-]*\{"
+    r"|[{};]\s*$"
+    r"|:\s*#[0-9A-Fa-f]{3,8}"
+    r"|\b\d+(?:px|pt|em|rem|%)\b"
+    r"|\b(?:font|background|border|margin|padding|color|width|height)\s*:"
+)
+
+
+def strip_noise(text):
+    return "\n".join(l for l in text.splitlines() if not NOISE_LINE.search(l))
+
+
+def find_code(text):
+    """Return the best candidate code, or None."""
+    if not text:
+        return None
+    text = strip_noise(text)
+
+    banned = [m.span() for pat in NEVER for m in pat.finditer(text)]
+    keywords = [m.span() for m in KEYWORDS.finditer(text)]
+    if not keywords:
+        return None
+
+    def overlaps_banned(span):
+        return any(span[0] < b[1] and b[0] < span[1] for b in banned)
+
+    def distance(span):
+        # Unsigned gap to the nearest keyword, so a label after the code
+        # counts exactly as much as one before it.
+        return min(
+            0 if (span[0] < k[1] and k[0] < span[1])
+            else k[0] - span[1] if k[0] >= span[1]
+            else span[0] - k[1]
+            for k in keywords
+        )
+
+    best = None
+    for rank, pat in enumerate(PATTERNS):
+        for m in pat.finditer(text):
+            span = m.span()
+            if overlaps_banned(span):
+                continue
+            d = distance(span)
+            if d > WINDOW:
+                continue
+            # Closest wins; then the more specific pattern; then the earliest
+            # in the body, which is where senders put the thing you need.
+            key = (d, rank, span[0])
+            if best is None or key < best[0]:
+                best = (key, m.group(0))
+
+    return best[1] if best else None
+
+
+SELF_TEST = [
+    # (name, body, expected)
+    ("label before, blank line between",
+     "You requested to sign up. Your one-time code is:\n \n202845\n\n"
+     "This code expires in 10 minutes.\n", "202845"),
+
+    ("label after the code",
+     "A login request was made from Tallinn, Estonia.\n\n600338\n\n"
+     "This code expires in 30 minutes.\n", "600338"),
+
+    ("footer address and copyright must not win",
+     "A login request was made from Tallinn, Estonia.\n\n600338\n\n"
+     "This code expires in 30 minutes.\n\n"
+     "If you didn't request this, ignore this email. We will never ask for "
+     "this\ncode by phone, chat, or email.\n\n"
+     "Copyright © 2026 Example Inc. All rights reserved.\n"
+     "440 N Barranca Ave #4133 Covina, CA 91723\n", "600338"),
+
+    ("whitespace-heavy html-to-text",
+     "\n\n\n     Your one-time verification code:\n\n\n\n     474661\n\n\n"
+     "     This code expires after 5 minutes.\n\n"
+     "     Sent from Example, Inc., 1633 Broadway, 38th floor, NY, NY 10019\n",
+     "474661"),
+
+    ("chunked alphanumeric",
+     "Your access code is ABCD-EFGH-1234. It expires shortly.\n",
+     "ABCD-EFGH-1234"),
+
+    ("digits split by a space",
+     "Your verification code: 123 456\n", "123 456"),
+
+    ("mixed letters and digits",
+     "Your login code is 7GTQ4X and expires in five minutes.\n", "7GTQ4X"),
+
+    ("no keyword anywhere means no code",
+     "Your order 84726194 shipped on 2026-08-28 to 91723.\n", None),
+
+    ("code inside a URL is not a code",
+     "Confirm your account: https://example.com/verify/998877\n", None),
+
+    ("expiry minutes must not beat the code",
+     "Your code is 5 minutes from expiry.\n\n881234\n", "881234"),
+
+    ("empty body", "", None),
+
+    # Regression: the chunked pattern used to match the keyword itself.
+    ("hyphenated keywords are not codes",
+     "Your one-time single-use code:\n\n553311\n", "553311"),
+
+    # Regression: a sign-in NOTIFICATION carrying a stylesheet reported
+    # #333333 as a code, because CSS that themes a <code> element puts six
+    # digits right beside the keyword.
+    ("css colours in a notification are not codes",
+     "New sign-in detected on your account.\n"
+     "pre { color: #ededed !important; border-color: #333333 !important; }\n"
+     "code, code.inline { background-color: #282828 !important; }\n"
+     ".footer-hr { border-top-color: #333333 !important; }\n"
+     "If this was not you, secure your account.\n", None),
+
+    ("a real code still wins past a stylesheet",
+     ".block { border-color: #333333 !important; }\n"
+     "code, code.inline { color: #ededed !important; }\n\n"
+     "Your verification code is 918273.\n", "918273"),
+]
+
+
+def self_test():
+    failed = 0
+    for name, body, expected in SELF_TEST:
+        got = find_code(body)
+        ok = got == expected
+        if not ok:
+            failed += 1
+        print(f"  {'PASS' if ok else 'FAIL'}  {name}")
+        if not ok:
+            print(f"        expected {expected!r}, got {got!r}")
+    total = len(SELF_TEST)
+    print(f"\n{total - failed}/{total} passed")
+    return 1 if failed else 0
+
+
+def main():
+    if "--self-test" in sys.argv[1:]:
+        return self_test()
+    if any(a in ("-h", "--help") for a in sys.argv[1:]):
+        print(__doc__.strip())
+        return 0
+
+    code = find_code(sys.stdin.read())
+    if code is None:
+        print("NOT FOUND")
+        return 1
+    print(code)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

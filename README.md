@@ -135,7 +135,8 @@ xcompose/XCompose                         compose-key expansions (linked)
 xcompose/XCompose.local.seed              template for the private half (seeded)
 hypr-nav/                                 C source for the hypr-nav binary (built)
 himalaya/config.toml                      Gmail over IMAP for scripting (linked)
-bin/mail-last                             newest message(s) as JSON (linked)
+bin/mail-last                             newest message(s), as text or JSON (linked)
+bin/mail-code                             one-time code extraction (linked)
 setup/targets.sh                          the delta table -- single source of truth
 setup/lib.sh                              freshness checks shared by the two below
 setup/install.sh                          assert every block, link, build, and hook
@@ -316,21 +317,50 @@ mail-last                  # newest across every account: date, from, subject, b
 mail-last --subject        # just the subject
 mail-last --from --subject # sender and subject
 mail-last --text           # just the body
+mail-last --code           # the one-time code, or NOT FOUND
 mail-last --json           # the full structure
 mail-last -n 5             # five newest overall, merged
 mail-last -a superhands    # one account only
 mail-last -m Junk          # a named mailbox instead of the inbox
 ```
 
-Fields always print in the order date, from, subject, text, however the flags
-were typed. Asking for exactly one prints the bare value so it pipes cleanly;
+Fields always print in the order date, from, subject, code, text, however the
+flags were typed. Asking for exactly one prints the bare value so it pipes cleanly;
 asking for more labels each line, since that is the reading case rather than
 the scripting one. `--date` renders as `2026-08-28 09:48 (18 minutes ago)` —
 the relative half being the point.
 
-Only `--text` and `--json` need a body, so the other fields answer from the
-envelope alone: `mail-last -n 3 --subject` makes 2 `envelope list` calls and
-**zero** `message read` calls, against 3 for `--text`.
+Only `--text`, `--code` and `--json` need a body, so the other fields answer
+from the envelope alone: `mail-last -n 3 --subject` makes 2 `envelope list`
+calls and **zero** `message read` calls, against 3 for `--text`.
+
+`--code` extracts one-time codes, and lives in `bin/mail-code` — a separate
+program so it can be tested against awkward mail with no mailbox involved
+(`mail-code --self-test`, 14 cases). It also works on its own: `mail-last
+--text | mail-code`.
+
+Finding digits is easy; not finding the *wrong* digits is the job. Real mail is
+full of street numbers, ZIP codes, copyright years and "expires in 10 minutes",
+so candidates are ranked by distance to a word like *code* or *password* — in
+**either** direction, because senders disagree about which comes first:
+
+```
+600338                              Your one-time verification code:
+                                    474661
+This code expires in 30 minutes.
+```
+
+Two traps found by running it against live mail, both now regression-tested.
+Hyphenated keywords: the chunked pattern `ABCD-1234` happily matched the words
+*one-time* and *single-use*, which sit at distance zero from the very keyword
+that found them, so chunked candidates must contain a digit. And CSS: HTML mail
+drags whole stylesheets along, and a stylesheet that themes a `<code>` element
+puts `#333333` right beside the keyword — which made a sign-in *notification*
+with no code in it report one. Declaration-block lines are dropped before
+anything is matched.
+
+To extend it, add to `PATTERNS` or `KEYWORDS` at the top of `bin/mail-code`;
+`PATTERNS` is ordered, earlier entries winning ties.
 
 With no `-a` it queries every account and merges by date, so "the last mail I
 got" means what it says. `-n` counts *after* merging. Without `-m` no
