@@ -92,6 +92,22 @@ BUILDS=(
   "hypr-nav|$HOME/.local/bin/hypr-nav"
 )
 
+# PACKAGES -- commands our own tools need that a stock Omarchy does not ship.
+#
+#   <command>|<pacman package>|<what stops working without it>
+#
+# Checked, never installed. install.sh has no sudo anywhere and runs unattended
+# from the post-update hook, so prompting for a password there would hang an
+# `omarchy update`. It reports these as warnings and doctor.sh lists them.
+#
+# Only genuinely missing things belong here. Verified against
+# /usr/share/omarchy/install/*.packages and pactree: jq, less, wl-clipboard and
+# xdg-terminal-exec are all on Omarchy's own base list, gawk comes with Arch's
+# `base`, and make/gcc come with base-devel, which Omarchy installs.
+PACKAGES=(
+  "himalaya|himalaya|mail-last, mail-peek, mail-otp -- the whole mail stack"
+)
+
 # FONTS -- families we ask for that Omarchy does not ship, installed per-user
 # into ~/.local/share/fonts (fontconfig reads it via <dir prefix="xdg">fonts).
 #

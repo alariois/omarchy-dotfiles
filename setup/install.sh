@@ -332,6 +332,21 @@ for entry in "${BUILDS[@]:-}"; do
   ensure_build "$dir" "$artifact"
 done
 
+say "Packages:"
+for entry in "${PACKAGES[@]:-}"; do
+  [[ -n $entry ]] || continue
+  IFS='|' read -r cmd pkg needs <<< "$entry"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    say "  ok       $cmd"
+  else
+    # A warning, not a conflict: nothing here is broken, something is just
+    # absent, and install.sh cannot fix it without sudo it must not have.
+    changed "  no pkg   $cmd  ->  sudo pacman -S $pkg"
+    changed "           needed by $needs"
+    warnings=$((warnings + 1))
+  fi
+done
+
 say "Fonts:"
 for entry in "${FONTS[@]:-}"; do
   [[ -n $entry ]] || continue

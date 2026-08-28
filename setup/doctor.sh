@@ -123,11 +123,30 @@ else
 fi
 
 echo
+echo "== Required packages =="
+pkg_count=0
+[[ -n ${PACKAGES+x} ]] && pkg_count=${#PACKAGES[@]}
+if (( pkg_count == 0 )); then
+  echo "  none declared"
+else
+  for entry in "${PACKAGES[@]}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r cmd pkg needs <<< "$entry"
+    if command -v "$cmd" >/dev/null 2>&1; then
+      echo "  ok       $cmd"
+    else
+      echo "  MISSING  $cmd   -> sudo pacman -S $pkg"
+      echo "           needed by $needs"
+    fi
+  done
+fi
+
+echo
 echo "== Mail =="
 # Three separate things, each of which fails in its own way: the binary, the
 # config, and the credential. Checked apart so the report says which.
 if ! command -v himalaya >/dev/null 2>&1; then
-  echo "  MISSING  himalaya   -> sudo pacman -S himalaya"
+  echo "  SKIP     himalaya not installed (see Required packages above)"
 else
   if himalaya -c "$DOTFILES/himalaya/config.toml" --json account list >/dev/null 2>&1; then
     echo "  ok       himalaya config parses"

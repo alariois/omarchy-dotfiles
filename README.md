@@ -153,6 +153,36 @@ setup/install.sh      # wire the repo into the live system; safe to re-run
 setup/doctor.sh       # what's hooked, what's linked, what drifted from stock
 ```
 
+### On a fresh Omarchy
+
+`setup/install.sh` reapplies everything the repo owns: managed blocks, symlinks,
+the machine-local seed, the compiled `hypr-nav` binary, the no-ligature font,
+the Omarchy post-update hook, and a Hyprland reload to make it all live.
+
+Three things it deliberately does not do, because it cannot:
+
+1. **`sudo pacman -S himalaya`.** `install.sh` has no sudo anywhere and runs
+   unattended from the post-update hook, where a password prompt would hang an
+   `omarchy update`. It warns and names the package instead. This is the only
+   package missing from a stock Omarchy — `jq`, `less`, `wl-clipboard` and
+   `xdg-terminal-exec` are all on Omarchy's own base list, `gawk` comes with
+   Arch's `base`, and `make`/`gcc` come with `base-devel`.
+2. **The two mail passwords**, which belong in the keyring and nowhere else:
+
+   ```bash
+   secret-tool store --label="Gmail app password (himalaya)" \
+     service himalaya account <gmail-address>
+   secret-tool store --label="Zone mail (himalaya)" \
+     service himalaya account <work-address>
+   ```
+
+3. **Gmail's "Leave a copy of retrieved message on the server"**, a per-account
+   tick-box in Gmail's own settings. Without it Gmail drains the Zone mailbox
+   and the `superhands` account reads empty.
+
+`setup/doctor.sh` reports the state of all three, so the fastest way to find
+out what a new machine still needs is to run it.
+
 `install.sh` exits non-zero if it hit a conflict — a real file or directory
 sitting where a link belongs, whose contents it does not recognise. It never
 deletes such a file; it reports it and leaves the decision to you. (A path that
