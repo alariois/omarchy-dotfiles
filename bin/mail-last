@@ -1,21 +1,46 @@
 #!/usr/bin/env bash
 #
-# mail-last -- the newest Gmail message(s) as JSON on stdout, for piping into
+# mail-last -- the newest message(s) as JSON on stdout, for piping into
 # whatever wants to process them.
 #
-# Linked to ~/.local/bin/mail-last by setup/install.sh; the account it uses is
-# himalaya/config.toml in the same repo.
+# Linked to ~/.local/bin/mail-last by setup/install.sh; the accounts it uses
+# are in himalaya/config.toml in the same repo.
 #
-#   mail-last                 # newest message in the inbox
-#   mail-last -n 5            # five newest
-#   mail-last -a superhands   # a non-default account (see `himalaya account list`)
-#   mail-last -m '[Gmail]/Sent Mail'
+#   mail-last                 # newest across every configured account
+#   mail-last -n 5            # five newest, still merged across accounts
+#   mail-last -a superhands   # one account only (see `himalaya account list`)
+#   mail-last -m Junk         # a named mailbox instead of the inbox
 #   mail-last --raw           # bodies as raw RFC822 instead of parsed
 #
-# Output is always a JSON array, one object per message:
+# Output is always a JSON array, newest first, one object per message:
 #
-#   [ { "envelope": { id, date, from, to, subject, flags, ... },
+#   [ { "account":  "gmail",
+#       "accounts": ["superhands", "gmail"],
+#       "envelope": { id, date, from, to, subject, flags, ... },
 #       "message":  <whatever `himalaya message read --json` emits> } ]
+#
+# With no -a it queries every account and merges by date, so "the last mail I
+# got" means what it says regardless of which mailbox it landed in. -n is the
+# count *after* merging: `-n 5` is the five newest overall, not five per
+# account.
+#
+# One message can legitimately sit in two accounts at once -- mail to
+# alari@superhands.ee lands on Zone and Gmail POP-fetches a copy, leaving the
+# original -- so merged output is de-duplicated by Message-ID. The surviving
+# entry names every account holding it in `accounts`, and `account` is the one
+# it was actually read from. Messages with no Message-ID are never folded
+# together, since there is nothing to match them on. -a skips all of this:
+# with a single account there is nothing to merge.
+#
+# Without -m no --mailbox is passed at all, so each account resolves its own
+# `mailbox.alias.inbox`. That matters because the accounts disagree about the
+# name -- Gmail calls it INBOX, Zone calls it Inbox -- and hardcoding either
+# breaks the other. With -m the name is passed through verbatim and is the
+# caller's problem across accounts.
+#
+# An account that fails to list is reported on stderr and skipped rather than
+# killing the run, so one unreachable server does not cost you the mail you
+# can still reach. Exit is non-zero only if nothing was collected at all.
 #
 # The message half is passed through verbatim rather than reshaped. himalaya
 # documents it only as "a minimal header block followed by a per-part walk",
@@ -40,17 +65,15 @@
 set -euo pipefail
 
 count=1
-mailbox=INBOX
+mailbox=()
 raw=()
-# Empty means "whatever the config marks default", rather than naming an
-# account here that the config might not have.
-account=()
+only_account=
 
-die() { echo "mail-last: $*" >&2; exit 1; }
+die()  { echo "mail-last: $*" >&2; exit 1; }
+warn() { echo "mail-last: $*" >&2; }
 
-# Print the header comment as help. Driven by "lines 3..N that start with #"
-# rather than a hardcoded range, so editing the header above cannot silently
-# truncate --help.
+# Help is the header block above, found by "lines 3..N starting with #" rather
+# than a hardcoded range, so editing that header cannot silently truncate it.
 usage() {
   awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; next } NR > 2 { exit }' "$0"
   exit "${1:-0}"
@@ -58,10 +81,10 @@ usage() {
 
 while (($#)); do
   case $1 in
-    -n|--count)   count=${2:-} ; shift 2 || die "-n needs a number" ;;
-    -m|--mailbox) mailbox=${2:-}; shift 2 || die "-m needs a mailbox" ;;
-    -a|--account) account=(--account "${2:-}"); shift 2 || die "-a needs an account" ;;
-    --raw)        raw=(--raw)  ; shift ;;
+    -n|--count)   count=${2:-}       ; shift 2 || die "-n needs a number" ;;
+    -m|--mailbox) mailbox=(--mailbox "${2:-}"); shift 2 || die "-m needs a mailbox" ;;
+    -a|--account) only_account=${2:-}; shift 2 || die "-a needs an account" ;;
+    --raw)        raw=(--raw)        ; shift ;;
     -h|--help)    usage 0 ;;
     *)            die "unknown argument: $1  (try --help)" ;;
   esac
@@ -73,25 +96,63 @@ for tool in himalaya jq; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
 done
 
-# One list call, then one read per message. himalaya orders envelopes date
-# descending, so page 1 is already the newest -- no sorting needed here.
-envelopes=$(himalaya "${account[@]}" envelope list \
-              --mailbox "$mailbox" --page-size "$count" --json) \
-  || die "could not list '$mailbox' -- is the password in the keyring? (himalaya ${account[*]} account check)"
+if [[ -n $only_account ]]; then
+  accounts=("$only_account")
+else
+  mapfile -t accounts < <(himalaya --json account list 2>/dev/null \
+                            | jq -r '.accounts[].name') \
+    || die "could not read the account list from himalaya"
+  ((${#accounts[@]})) || die "no accounts configured"
+fi
 
-jq -e '.envelopes | length > 0' <<<"$envelopes" >/dev/null 2>&1 \
-  || die "no messages in '$mailbox'"
+# Collect envelopes from every account, tagging each with where it came from.
+# Fetch `count` from each: the newest overall could all be in one account, so
+# fetching fewer risks missing them.
+collected='[]'
+reachable=0
+for acct in "${accounts[@]}"; do
+  if ! out=$(himalaya --account "$acct" envelope list \
+               "${mailbox[@]}" --page-size "$count" --json 2>/dev/null); then
+    warn "skipping '$acct': could not list (try: himalaya -a $acct account check)"
+    continue
+  fi
+  reachable=$((reachable + 1))
+  collected=$(jq -c --argjson acc "$collected" --arg a "$acct" \
+                '$acc + [(.envelopes // [])[] | {account: $a, envelope: .}]' <<<"$out")
+done
 
-# Accumulate into a JSON array with jq rather than string-concatenating, so a
-# subject containing a quote or a newline cannot corrupt the output.
+((reachable)) || die "no account could be listed"
+
+# Newest first, then fold copies of one message together, then trim to n --
+# in that order. Trimming before folding would let a message displace its own
+# duplicate out of the window and return fewer distinct messages than asked
+# for.
+#
+# `// ""` keeps a null date from sorting above real ones once reversed, rather
+# than jq's default of sorting null to the very front. Null Message-IDs get a
+# unique key so they are never folded into each other.
+top=$(jq -c --argjson n "$count" '
+        sort_by(.envelope.date // "") | reverse
+        | group_by(.envelope["message-id"] // "\u0000none-\(.envelope.id)")
+        | map(sort_by(.envelope.date // "") | reverse
+              | .[0] + {accounts: map(.account)})
+        | sort_by(.envelope.date // "") | reverse
+        | .[0:$n]' <<<"$collected")
+
+(( $(jq 'length' <<<"$top") )) || die "no messages found"
+
+# Build the output with jq rather than string concatenation, so a subject
+# holding a quote or a newline cannot corrupt it.
 out='[]'
-while IFS= read -r id; do
-  envelope=$(jq -c --arg id "$id" '.envelopes[] | select(.id == $id)' <<<"$envelopes")
-  message=$(himalaya "${account[@]}" message read "${raw[@]}" \
-              --mailbox "$mailbox" --json "$id") \
-    || die "could not read message $id"
-  out=$(jq -c --argjson e "$envelope" --argjson m "$message" \
-          '. + [{envelope: $e, message: $m}]' <<<"$out")
-done < <(jq -r '.envelopes[].id' <<<"$envelopes")
+while IFS=$'\t' read -r acct id; do
+  message=$(himalaya --account "$acct" message read "${raw[@]}" \
+              "${mailbox[@]}" --json "$id") \
+    || die "could not read message $id from '$acct'"
+  out=$(jq -c --argjson o "$out" --arg a "$acct" --argjson m "$message" \
+          --argjson t "$top" --arg id "$id" \
+          '$o + [($t[] | select(.account == $a and .envelope.id == $id)
+                  | {account: $a, accounts: .accounts,
+                     envelope: .envelope, message: $m})]' <<<'null')
+done < <(jq -r '.[] | "\(.account)\t\(.envelope.id)"' <<<"$top")
 
 jq . <<<"$out"

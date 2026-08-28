@@ -312,25 +312,40 @@ sitting in. Two accounts: `gmail` (the default) and `superhands` (work, hosted
 by Zone.ee). `bin/mail-last` wraps it into the one thing wanted most often:
 
 ```bash
-mail-last                  # newest inbox message, as JSON
-mail-last -n 5             # five newest
-mail-last -a superhands    # the other account
-mail-last -m '[Gmail]/Sent Mail'
+mail-last                  # newest across every account, as JSON
+mail-last -n 5             # five newest overall, merged
+mail-last -a superhands    # one account only
+mail-last -m Junk          # a named mailbox instead of the inbox
 ```
 
-Reading superhands.ee mail goes through the **gmail** account, not the
-`superhands` one. Gmail POP-fetches those mailboxes with "Leave a copy of
-retrieved message on the server" off, so it empties Zone as it goes — measured
-2026-08-28, Zone's Inbox held 0 messages against a UIDNEXT of 23482. The mail
-itself is fine; it is all in Gmail:
+With no `-a` it queries every account and merges by date, so "the last mail I
+got" means what it says. `-n` counts *after* merging. Without `-m` no
+`--mailbox` is passed at all, letting each account resolve its own
+`mailbox.alias.inbox` — which is what lets Gmail's `INBOX` and Zone's `Inbox`
+coexist without the wrapper hardcoding either.
+
+Merged output is de-duplicated by `Message-ID`, because one message really can
+live in two accounts: mail to `alari@superhands.ee` lands on Zone and Gmail
+POP-fetches a copy. The surviving entry lists every account holding it in
+`accounts`, while `account` is the one it was read from. An account that fails
+to list is reported on stderr and skipped rather than killing the run — stdout
+stays valid JSON — and the exit is non-zero only if nothing could be reached.
+
+One wrinkle worth knowing. Gmail POP-fetches the superhands.ee mailboxes, and
+whether it *deletes them from Zone as it goes* is a per-account tick-box in
+Gmail ("Leave a copy of retrieved message on the server"). It is on for
+`alari@superhands.ee`, so that mail stays on Zone and is readable the moment it
+lands — before Gmail even fetches it, which is the whole point. It is still off
+for `info@`, `admin@` and `development@`, so those are drained and only ever
+readable through the `gmail` account:
 
 ```bash
-himalaya envelope search "to superhands.ee"
+himalaya envelope search "to info@superhands.ee"
 ```
 
-The `superhands` account stays configured because Junk, Trash and Sent Mail are
-untouched by POP, and because ticking "Leave a copy" in Gmail would make direct
-reads work immediately — with no POP delay, which is the reason to want it.
+That history is visible in the UID counter: before the change Zone's Inbox held
+0 messages against a UIDNEXT of 23482, i.e. ~23k messages had passed through
+and been deleted. Do not read an empty Inbox as a broken setup.
 
 Zone publishes no autoconfig — neither the Thunderbird ISPDB nor
 `autoconfig.superhands.ee` has an entry — so its settings were read off the

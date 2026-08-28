@@ -59,21 +59,24 @@ cmd = "secret-tool lookup service himalaya account alari.ois.ao@gmail.com"
 # OAuth involved. mail.zone.eu and mail.superhands.ee do not resolve; do not
 # guess them back in.
 #
-# NOTE: reading this account directly is currently pointless. Gmail POP-fetches
-# this mailbox (Settings -> Accounts and Import -> "Check mail from other
-# accounts") with "Leave a copy of retrieved message on the server" turned OFF,
-# so it deletes each message from Zone once it has it. Measured on 2026-08-28:
-# Inbox holds 0 messages while its UIDNEXT is 23482, i.e. ~23k messages have
-# passed through and been drained. Junk (9), Trash (406) and Sent Mail (2) are
-# untouched, which is why the account is still worth having configured.
+# Gmail POP-fetches these mailboxes (Settings -> Accounts and Import -> "Check
+# mail from other accounts"), and whether it deletes them from Zone as it goes
+# is a per-account tick-box there: "Leave a copy of retrieved message on the
+# server".
 #
-# So incoming superhands.ee mail is read through the `gmail` account, where POP
-# delivers it:
+# It is ON for alari@superhands.ee, so that mail stays here and is readable the
+# moment it arrives, ahead of Gmail's own POP schedule. Verified 2026-08-28: a
+# test message showed up in Zone's Inbox and in Gmail at once, and Zone's Inbox
+# went from 0 messages / UIDNEXT 23482 to 1 / 23483.
 #
-#   himalaya envelope search "to superhands.ee"
+# It is still OFF for info@, admin@ and development@, which are therefore
+# drained and readable only through the `gmail` account:
 #
-# Tick "Leave a copy" in Gmail if you would rather read it here directly, with
-# no POP delay.
+#   himalaya envelope search "to info@superhands.ee"
+#
+# That 23482 is the tell for how long the draining ran: ~23k messages passed
+# through this Inbox and were deleted. An empty Inbox here is that history, not
+# a broken setup.
 #
 # The secret is the Zone mailbox password:
 #
