@@ -75,6 +75,11 @@
 # schema'd (`himalaya json-schema`), so filter on that and reach into
 # .message only for content.
 #
+# --text and --code tidy the body for reading: every line loses its leading and
+# trailing whitespace, runs of blank lines collapse to one, and blank runs at
+# the start and end go entirely. --json does not, so anything parsing a body
+# still gets exactly what the sender sent.
+#
 # What .message looks like in 2.1, observed rather than promised: text_body
 # and html_body are arrays of *indices into* parts, and a part's text lives at
 # .body.Text -- so the plain-text body of the newest message is
@@ -304,6 +309,30 @@ fi
 # so `--from --subject` does not carry indentation for a date that is absent.
 label() { $bare || printf '%-*s ' "$labelw" "$1:"; }
 
+# Tidy a body for reading. Senders indent everything, pad with whitespace-only
+# lines, and leave great voids where markup used to be, so the raw part is
+# mostly empty screen with the text drifting rightwards.
+#
+# Three passes in one: strip leading and trailing whitespace from every line,
+# allow at most one blank line between paragraphs, and drop blank runs at the
+# very start and end. The blank-run handling is why this is awk and not
+# `cat -s`: cat -s only collapses genuinely EMPTY lines, and these are full of
+# spaces until the strip has already happened.
+#
+# --json is deliberately not run through this. Anything parsing the body wants
+# what the sender actually sent; anything reading it wants this.
+tidy_body() {
+  awk '
+    { sub(/[[:space:]]+$/, ""); sub(/^[[:space:]]+/, "") }
+    /^$/ { blank = 1; next }
+    {
+      if (started && blank) print ""
+      started = 1; blank = 0
+      print
+    }
+  '
+}
+
 # The plain-text body of message $1, preferring a text part and falling back
 # to the html one, which after himalaya's part walk is usually readable.
 body_text() {
@@ -314,7 +343,7 @@ body_text() {
         then $m.parts[$m.text_body[0]].body.Text
       elif ($m.html_body // []) | length > 0
         then $m.parts[$m.html_body[0]].body.Text
-      else "(no readable body)" end' "$out"
+      else "(no readable body)" end' "$out" | tidy_body
 }
 bare=false; (( selected == 1 )) && bare=true
 labelw=0

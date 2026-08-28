@@ -336,6 +336,15 @@ Only `--text`, `--code` and `--json` need a body, so the other fields answer
 from the envelope alone: `mail-last -n 3 --subject` makes 2 `envelope list`
 calls and **zero** `message read` calls, against 3 for `--text`.
 
+`--text` and `--code` tidy the body for reading: every line loses its leading
+and trailing whitespace, runs of blank lines collapse to a single one, and
+blank runs at the start and end go entirely. `--json` does not, so anything
+parsing a body still gets exactly what the sender sent.
+
+This is awk rather than `cat -s`, which does nothing on its own here: the
+"blank" lines are not empty but full of spaces, so the strip has to happen
+first, and `cat -s` cannot drop the runs at the very start and end.
+
 `--code` extracts one-time codes, and lives in `bin/mail-code` — a separate
 program so it can be tested against awkward mail with no mailbox involved
 (`mail-code --self-test`, 14 cases). It also works on its own: `mail-last
@@ -371,9 +380,9 @@ window rather than trusting it:
   alternate screen `less` paints inline and leaves a short message pinned to
   the *bottom* under a screenful of nothing.
 - **Whitespace.** HTML-to-text converters leave voids — the MongoDB code mail
-  is mostly empty screen. `cat -s` alone does nothing, because those lines are
-  not empty but full of spaces; trailing whitespace has to go first. Display
-  only: `mail-last --text` still emits the body exactly as sent.
+  is mostly empty screen — and indent everything, so the text drifts
+  rightwards. Tidying now lives in `mail-last` itself rather than the window,
+  so `--text` and `--code` get it too; see below.
 
 Finding digits is easy; not finding the *wrong* digits is the job. Real mail is
 full of street numbers, ZIP codes, copyright years and "expires in 10 minutes",

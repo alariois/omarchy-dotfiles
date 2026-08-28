@@ -37,9 +37,7 @@ clear
 #
 # -~ blanks the tilde column less draws past end of file. A pager showing a
 # file is one thing; a window showing a message should not look like vi.
-# Collapse the voids HTML-to-text converters leave behind -- the MongoDB code
-# mail is most of a screen of nothing. cat -s alone does nothing here: those
-# lines are not empty, they are full of spaces, so trailing whitespace has to
-# go first. A display choice, not a content one: `mail-last --text` still emits
-# the body exactly as sent, for anything parsing it.
-printf '%s\n' "$out" | sed 's/[[:space:]]*$//' | cat -s | less -R -c -~ --quit-on-intr -Ps'  q to close '
+# No whitespace tidying here: mail-last --text already strips indentation and
+# collapses blank runs, so doing it again would only risk the two drifting
+# apart.
+printf '%s\n' "$out" | less -R -c -~ --quit-on-intr -Ps'  q to close '
