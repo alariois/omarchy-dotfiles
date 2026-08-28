@@ -137,6 +137,8 @@ hypr-nav/                                 C source for the hypr-nav binary (buil
 himalaya/config.toml                      Gmail over IMAP for scripting (linked)
 bin/mail-last                             newest message(s), as text or JSON (linked)
 bin/mail-code                             one-time code extraction (linked)
+bin/mail-peek                             newest mail in a floating window (linked)
+bin/mail-otp                              login code to clipboard, via toast (linked)
 setup/targets.sh                          the delta table -- single source of truth
 setup/lib.sh                              freshness checks shared by the two below
 setup/install.sh                          assert every block, link, build, and hook
@@ -338,6 +340,40 @@ calls and **zero** `message read` calls, against 3 for `--text`.
 program so it can be tested against awkward mail with no mailbox involved
 (`mail-code --self-test`, 14 cases). It also works on its own: `mail-last
 --text | mail-code`.
+
+Two Hyprland bindings sit on top of all this:
+
+| Key | What |
+|---|---|
+| `SUPER + ALT + M` | the newest message in a floating window (`bin/mail-peek`) |
+| `SUPER + ALT + CTRL + M` | its login code onto the clipboard, toast only (`bin/mail-otp`) |
+
+Two shapes for two jobs. Reading wants a window you can scroll and dismiss;
+grabbing a code wants no window at all, because you are mid-login in another
+app and a window would steal the focus you are about to type into. The code
+path raises a "Fetching…" toast and *replaces* it in place with the result, so
+the stack never holds two.
+
+The reader opens before the fetch starts — IMAP takes a second or two, and a
+window that appears only afterwards reads as a dropped keypress. Its window
+rule lives beside its binding in `hypr/bindings.lua`, because it is not really
+a window rule, it is half of the binding; `--app-id=mail-peek` is what ties
+them together, private rather than the terminal's own id so the rule cannot
+catch an ordinary terminal.
+
+Three things that turned out to matter, all found by screenshotting the actual
+window rather than trusting it:
+
+- **Opacity.** Omarchy tags every window `default-opacity`, which is right for
+  a terminal you type in and wrong for one you read: the window behind shows
+  through the body. Pinned to `1.0`.
+- **`less -c`.** `foot-extra`'s terminfo carries no `smcup`, so without an
+  alternate screen `less` paints inline and leaves a short message pinned to
+  the *bottom* under a screenful of nothing.
+- **Whitespace.** HTML-to-text converters leave voids — the MongoDB code mail
+  is mostly empty screen. `cat -s` alone does nothing, because those lines are
+  not empty but full of spaces; trailing whitespace has to go first. Display
+  only: `mail-last --text` still emits the body exactly as sent.
 
 Finding digits is easy; not finding the *wrong* digits is the job. Real mail is
 full of street numbers, ZIP codes, copyright years and "expires in 10 minutes",

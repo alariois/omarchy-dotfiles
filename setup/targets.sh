@@ -58,6 +58,8 @@ LINKS=(
   "$HOME/.config/himalaya/config.toml|himalaya/config.toml"
   "$HOME/.local/bin/mail-last|bin/mail-last"
   "$HOME/.local/bin/mail-code|bin/mail-code"
+  "$HOME/.local/bin/mail-peek|bin/mail-peek"
+  "$HOME/.local/bin/mail-otp|bin/mail-otp"
 
   # Custom xkb options, selected by hypr/input.lua. libxkbcommon searches
   # ~/.config/xkb before the system tree, which is how these work without root.

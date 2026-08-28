@@ -49,3 +49,33 @@ o.bind("ALT + L", "Navigate right", "hypr-nav r")
 -- focuses the existing window instead of opening another.
 hl.unbind("SUPER + SHIFT + G")
 o.bind("SUPER + SHIFT + G", "Gmail", { webapp = "https://mail.google.com/", focus = true })
+
+-- SUPER + ALT + M: the newest mail, in a floating window.
+-- SUPER + ALT + CTRL + M: its login code, straight onto the clipboard.
+--
+-- Two shapes for two jobs. Reading wants a window you can scroll and dismiss;
+-- grabbing a code wants no window at all, because you are mid-login in another
+-- app and a window would steal the focus you are about to type into. So the
+-- code path only ever raises toasts -- see bin/mail-otp.
+--
+-- The window rule lives here rather than in a windows file because it is not
+-- really a window rule: it is half of this binding. --app-id is what ties them
+-- together, and it is a private id rather than the terminal's own, so the rule
+-- cannot catch an ordinary terminal.
+--
+-- uwsm-app matches how Omarchy launches everything else, which keeps the
+-- window in the right systemd scope rather than parented to Hyprland.
+-- Opaque on purpose. Omarchy tags every window with default-opacity, which is
+-- fine for a terminal you are typing in and wrong for one you are reading:
+-- whatever sits behind shows through the message body.
+o.window("^(mail-peek)$", {
+  float = true,
+  center = true,
+  size = { 900, 720 },
+  tag = "-default-opacity",
+  opacity = "1.0 1.0",
+})
+
+o.bind("SUPER + ALT + M", "Latest mail",
+  "setsid uwsm-app -- xdg-terminal-exec --app-id=mail-peek --title=Mail -e mail-peek")
+o.bind("SUPER + ALT + CTRL + M", "Copy login code", "mail-otp")

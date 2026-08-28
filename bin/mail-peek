@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+#
+# mail-peek -- show the newest message in a floating window.
+#
+# Bound to SUPER + ALT + M in hypr/bindings.lua, which launches a terminal
+# with --app-id=mail-peek and floats it by that id. Not useful on its own,
+# though running it in any terminal works fine.
+#
+# The window opens before the fetch starts, so the keypress always visibly
+# does something: IMAP takes a second or two and a window that appears only
+# afterwards reads as a dropped keypress.
+#
+# Closing is `q`, not Escape. Escape can be bound in less through a lesskey
+# file, but `\e` alone risks shadowing the arrow keys, which also arrive as
+# escape sequences -- and that could not be verified here, since driving less
+# through a pty in a test harness does not deliver arrow keys at all. A pager
+# that quits when you try to scroll would be a bad trade for one keybinding.
+
+set -uo pipefail
+
+clear
+printf '\n  Fetching mail…\n'
+
+if ! out=$(mail-last --date --from --subject --text 2>&1); then
+  out=$'Could not fetch mail.\n\n'$out
+fi
+
+clear
+# -P sets the status line, so the hint stays put instead of scrolling away
+# with the body. --quit-on-intr makes Ctrl-C close it too.
+#
+# -c is not cosmetic. Without an alternate screen less paints inline, which
+# leaves a short message pinned to the BOTTOM of the window under a screenful
+# of nothing. foot-extra's terminfo carries no smcup, so whether the alternate
+# screen exists depends on which TERM this window happens to get; -c repaints
+# from the top line down either way.
+#
+# -~ blanks the tilde column less draws past end of file. A pager showing a
+# file is one thing; a window showing a message should not look like vi.
+# Collapse the voids HTML-to-text converters leave behind -- the MongoDB code
+# mail is most of a screen of nothing. cat -s alone does nothing here: those
+# lines are not empty, they are full of spaces, so trailing whitespace has to
+# go first. A display choice, not a content one: `mail-last --text` still emits
+# the body exactly as sent, for anything parsing it.
+printf '%s\n' "$out" | sed 's/[[:space:]]*$//' | cat -s | less -R -c -~ --quit-on-intr -Ps'  q to close '

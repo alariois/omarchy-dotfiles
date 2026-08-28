@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+#
+# mail-otp -- put the newest login code on the clipboard, and say so.
+#
+# Bound to SUPER + ALT + CTRL + M in hypr/bindings.lua. No window: a
+# "Fetching…" toast goes up immediately and is REPLACED in place by the
+# result, so the notification stack never holds two of these at once.
+#
+# The first toast is not decoration. The fetch is IMAP over the network and
+# takes a second or more; without it the keypress looks like it did nothing.
+
+set -uo pipefail
+
+APP=Mail
+
+notify() { # title, body, [urgency]
+  notify-send --app-name="$APP" --urgency="${3:-normal}" \
+    ${REPLACE_ID:+--replace-id="$REPLACE_ID"} "$1" "$2"
+}
+
+# -p prints the id so the result can replace this toast rather than stack
+# beneath it. If the daemon does not return one, the toasts simply stack.
+REPLACE_ID=$(notify-send --app-name="$APP" -p --urgency=low \
+  "Fetching login code…" "" 2>/dev/null) || REPLACE_ID=
+
+out=$(mail-last --code --from --date 2>&1)
+rc=$?
+
+if (( rc != 0 )); then
+  notify "Mail unreachable" "Could not fetch the latest message" critical
+  exit 1
+fi
+
+# mail-last labels its fields when more than one is asked for, and always in
+# the order date, from, code -- so the labels are the contract here.
+when=$(sed -n 's/^Date: *//p'    <<<"$out" | head -1)
+from=$(sed -n 's/^From: *//p'    <<<"$out" | head -1)
+code=$(sed -n 's/^Code: *//p'    <<<"$out" | head -1)
+
+# "2026-08-28 11:39 (23 minutes ago)" -> "23 minutes ago". The absolute half
+# is noise in a toast; the relative half is the whole question you are asking.
+rel=$(sed -n 's/.*(\(.*\))$/\1/p' <<<"$when")
+[[ -n $rel ]] || rel=$when
+
+# "MongoDB Account <mongodb-account@mongodb.com>" -> "MongoDB Account".
+who=$(sed 's/ *<[^>]*>$//' <<<"$from")
+[[ -n $who ]] || who="unknown sender"
+
+if [[ -z $code || $code == "NOT FOUND" ]]; then
+  notify "No code in latest mail" "$who · $rel" critical
+  exit 1
+fi
+
+if printf '%s' "$code" | wl-copy 2>/dev/null; then
+  notify "Code $code copied" "$who · $rel"
+else
+  # Worth distinguishing: the code was found, it just is not on the clipboard,
+  # so showing it is still useful.
+  notify "Code $code (copy failed)" "$who · $rel" critical
+  exit 1
+fi
