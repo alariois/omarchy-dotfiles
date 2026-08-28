@@ -325,6 +325,21 @@ breaks on the next release. Reading never marks anything seen: `himalaya
 message read` sets that flag only when passed `--seen`, which the wrapper
 never does.
 
+The shape `.message` actually has in 2.1, observed against a live inbox rather
+than promised anywhere: `text_body` and `html_body` are arrays of *indices
+into* `parts`, and a part's content sits at `.body.Text`. So:
+
+```bash
+# plain-text body of the newest message
+mail-last | jq -r '.[0].message as $m | $m.parts[$m.text_body[0]].body.Text'
+
+# who has been mailing most, out of the last 20
+mail-last -n 20 | jq -r '.[].envelope.from[0].email' | sort | uniq -c | sort -rn
+```
+
+Treat the `.body.Text` path as a convention rather than a contract — pin
+himalaya, or check the shape, if something depends on it.
+
 Credentials are a Gmail **app password**, which requires 2-Step Verification on
 the account, stored in gnome-keyring:
 

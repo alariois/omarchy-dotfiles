@@ -23,6 +23,15 @@
 # schema'd (`himalaya json-schema`), so filter on that and reach into
 # .message only for content.
 #
+# What .message looks like in 2.1, observed rather than promised: text_body
+# and html_body are arrays of *indices into* parts, and a part's text lives at
+# .body.Text -- so the plain-text body of the newest message is
+#
+#   mail-last | jq -r '.[0].message as $m | $m.parts[$m.text_body[0]].body.Text'
+#
+# Treat that path as a convention, not a contract: pin himalaya, or check the
+# shape, if a script depends on it.
+#
 # Reading does not mark anything as seen: `himalaya message read` only sets
 # the flag when passed --seen, which this never does. Running it is safe to
 # repeat and safe to pipe into something half-written.
@@ -35,8 +44,11 @@ raw=()
 
 die() { echo "mail-last: $*" >&2; exit 1; }
 
+# Print the header comment as help. Driven by "lines 3..N that start with #"
+# rather than a hardcoded range, so editing the header above cannot silently
+# truncate --help.
 usage() {
-  sed -n '3,26p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
+  awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; next } NR > 2 { exit }' "$0"
   exit "${1:-0}"
 }
 
