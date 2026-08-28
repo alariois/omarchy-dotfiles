@@ -12,12 +12,31 @@
 #   mail-last -m Junk         # a named mailbox instead of the inbox
 #   mail-last --raw           # bodies as raw RFC822 instead of parsed
 #
-# Output is always a JSON array, newest first, one object per message:
+# By default it prints date, from, subject and body as text. Any subset can be
+# asked for instead, and they always come out in that order however the flags
+# were typed:
+#
+#   mail-last --subject                 # just the subject
+#   mail-last --from --subject          # sender and subject
+#   mail-last --text                    # just the body
+#   mail-last --json                    # the full structure, below
+#
+# Asking for exactly one field prints the bare value, so it pipes cleanly. Ask
+# for more and each line is labelled, since that is the reading case rather
+# than the scripting one.
+#
+# --date renders as "2026-08-28 09:48 (2 hours ago)". The relative half is the
+# point: absolute timestamps make you do the arithmetic yourself.
+#
+# --json emits a JSON array, newest first, one object per message:
 #
 #   [ { "account":  "gmail",
 #       "accounts": ["superhands", "gmail"],
 #       "envelope": { id, date, from, to, subject, flags, ... },
 #       "message":  <whatever `himalaya message read --json` emits> } ]
+#
+# Only --text and --json need the body, so the other fields answer from the
+# envelope alone and skip a fetch per message entirely.
 #
 # With no -a it queries every account and merges by date, so "the last mail I
 # got" means what it says regardless of which mailbox it landed in. -n is the
@@ -68,6 +87,12 @@ count=1
 mailbox=()
 raw=()
 only_account=
+want_json=false
+want_date=false
+want_from=false
+want_subject=false
+want_text=false
+any_field=false
 
 die()  { echo "mail-last: $*" >&2; exit 1; }
 warn() { echo "mail-last: $*" >&2; }
@@ -85,6 +110,11 @@ while (($#)); do
     -m|--mailbox) mailbox=(--mailbox "${2:-}"); shift 2 || die "-m needs a mailbox" ;;
     -a|--account) only_account=${2:-}; shift 2 || die "-a needs an account" ;;
     --raw)        raw=(--raw)        ; shift ;;
+    --json)       want_json=true     ; shift ;;
+    --date)       want_date=true   ; any_field=true; shift ;;
+    --from)       want_from=true   ; any_field=true; shift ;;
+    --subject)    want_subject=true; any_field=true; shift ;;
+    --text)       want_text=true   ; any_field=true; shift ;;
     -h|--help)    usage 0 ;;
     *)            die "unknown argument: $1  (try --help)" ;;
   esac
@@ -92,9 +122,34 @@ done
 
 [[ $count =~ ^[1-9][0-9]*$ ]] || die "count must be a positive integer, got '$count'"
 
+# --json is a whole other output shape, not a fifth field, so combining it with
+# field flags has no sensible meaning. Say so rather than silently picking one.
+if $want_json && $any_field; then
+  die "--json cannot be combined with --date/--from/--subject/--text"
+fi
+
+# No field flags means all four.
+if ! $want_json && ! $any_field; then
+  want_date=true want_from=true want_subject=true want_text=true
+fi
+
+# The body costs a fetch per message; the rest are already in the envelope.
+need_body=false
+if $want_json || $want_text; then need_body=true; fi
+
+selected=0
+for f in $want_date $want_from $want_subject $want_text; do
+  $f && selected=$((selected + 1))
+done
+
 for tool in himalaya jq; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
 done
+
+# One scratch dir for the whole run. Everything large moves through files
+# rather than argv -- see the note by the message loop below.
+work=$(mktemp -d) || die "could not create a temporary directory"
+trap 'rm -rf "$work"' EXIT
 
 if [[ -n $only_account ]]; then
   accounts=("$only_account")
@@ -108,17 +163,20 @@ fi
 # Collect envelopes from every account, tagging each with where it came from.
 # Fetch `count` from each: the newest overall could all be in one account, so
 # fetching fewer risks missing them.
-collected='[]'
+envs="$work/envelopes.jsonl"
+: > "$envs"
 reachable=0
 for acct in "${accounts[@]}"; do
-  if ! out=$(himalaya --account "$acct" envelope list \
-               "${mailbox[@]}" --page-size "$count" --json 2>/dev/null); then
+  if ! himalaya --account "$acct" envelope list \
+         "${mailbox[@]}" --page-size "$count" --json \
+         > "$work/list.json" 2>/dev/null; then
     warn "skipping '$acct': could not list (try: himalaya -a $acct account check)"
     continue
   fi
   reachable=$((reachable + 1))
-  collected=$(jq -c --argjson acc "$collected" --arg a "$acct" \
-                '$acc + [(.envelopes // [])[] | {account: $a, envelope: .}]' <<<"$out")
+  jq -c --arg a "$acct" \
+     '(.envelopes // [])[] | {account: $a, envelope: .}' \
+     "$work/list.json" >> "$envs"
 done
 
 ((reachable)) || die "no account could be listed"
@@ -128,31 +186,146 @@ done
 # duplicate out of the window and return fewer distinct messages than asked
 # for.
 #
-# `// ""` keeps a null date from sorting above real ones once reversed, rather
-# than jq's default of sorting null to the very front. Null Message-IDs get a
-# unique key so they are never folded into each other.
+# Sorting is on a real epoch, not on the ISO string. Mail arrives with mixed
+# offsets -- "2026-08-28T07:20:10Z" against "2026-08-28T00:40:46-07:00" -- and
+# comparing those as text puts the second one last when it is in fact 20
+# minutes newer. jq's fromdateiso8601 only accepts Z, so the offset is applied
+# by hand: a local time minus its offset is UTC.
+#
+# Undated mail sorts to the end (-1) rather than jq's default of null first.
+# Null Message-IDs get a unique key so they are never folded into each other.
 top=$(jq -c --argjson n "$count" '
-        sort_by(.envelope.date // "") | reverse
+        def epoch:
+          if . == null then -1
+          else . as $d
+            | ($d | capture("^(?<base>\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2})(?<off>Z|[+-]\\d{2}:\\d{2})?")) as $m
+            | if $m == null then -1
+              else (($m.base + "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) as $t
+                | if (($m.off // "Z") == "Z") then $t
+                  else ($m.off | capture("(?<sign>[+-])(?<h>\\d{2}):(?<mm>\\d{2})")) as $o
+                    | $t - ((($o.h | tonumber) * 3600 + ($o.mm | tonumber) * 60)
+                            * (if $o.sign == "+" then 1 else -1 end))
+                  end
+              end
+          end;
+        map(. + {_t: (.envelope.date | epoch)})
+        | sort_by(._t) | reverse
         | group_by(.envelope["message-id"] // "\u0000none-\(.envelope.id)")
-        | map(sort_by(.envelope.date // "") | reverse
-              | .[0] + {accounts: map(.account)})
-        | sort_by(.envelope.date // "") | reverse
-        | .[0:$n]' <<<"$collected")
+        | map(sort_by(._t) | reverse | .[0] + {accounts: map(.account)})
+        | sort_by(._t) | reverse
+        | .[0:$n]
+        | map(del(._t))' <<<"$(jq -s '.' "$envs")")
 
 (( $(jq 'length' <<<"$top") )) || die "no messages found"
 
-# Build the output with jq rather than string concatenation, so a subject
+# Render an ISO date as "2026-08-28 09:48 (2 hours ago)".
+#
+# Falls back to printing the raw string if date(1) cannot parse it: a mail with
+# an odd Date: header should not take the whole command down.
+human_date() {
+  local iso=$1 epoch now diff unit n
+  [[ -n $iso && $iso != null ]] || { echo "(no date)"; return; }
+  if ! epoch=$(date -d "$iso" +%s 2>/dev/null); then echo "$iso"; return; fi
+  now=$(date +%s)
+  diff=$((now - epoch))
+
+  if   (( diff < 0 ));      then unit="in the future"; n=
+  elif (( diff < 60 ));     then unit="just now";      n=
+  elif (( diff < 3600 ));   then n=$((diff / 60));     unit="minute"
+  elif (( diff < 86400 ));  then n=$((diff / 3600));   unit="hour"
+  elif (( diff < 604800 )); then n=$((diff / 86400));  unit="day"
+  else                           n=$((diff / 604800)); unit="week"
+  fi
+
+  local rel
+  if [[ -z $n ]]; then
+    rel=$unit
+  else
+    rel="$n $unit"; (( n == 1 )) || rel="$rel"s
+    rel="$rel ago"
+  fi
+  printf '%s (%s)\n' "$(date -d "$iso" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$iso")" "$rel"
+}
+
+# Build the structure with jq rather than string concatenation, so a subject
 # holding a quote or a newline cannot corrupt it.
-out='[]'
+#
+# Message bodies go through files, never argv. Accumulating with
+# `jq --argjson o "$out"` reads naturally but passes the whole growing result
+# as a command-line argument, and dies with "Argument list too long" once the
+# bodies add up -- at -n 5 on real mail, which is well inside normal use. One
+# JSON object per line here, slurped into an array at the end.
+lines="$work/lines.jsonl"
+: > "$lines"
+
 while IFS=$'\t' read -r acct id; do
-  message=$(himalaya --account "$acct" message read "${raw[@]}" \
-              "${mailbox[@]}" --json "$id") \
-    || die "could not read message $id from '$acct'"
-  out=$(jq -c --argjson o "$out" --arg a "$acct" --argjson m "$message" \
-          --argjson t "$top" --arg id "$id" \
-          '$o + [($t[] | select(.account == $a and .envelope.id == $id)
-                  | {account: $a, accounts: .accounts,
-                     envelope: .envelope, message: $m})]' <<<'null')
+  if $need_body; then
+    himalaya --account "$acct" message read "${raw[@]}" \
+      "${mailbox[@]}" --json "$id" > "$work/msg.json" \
+      || die "could not read message $id from '$acct'"
+  else
+    echo null > "$work/msg.json"
+  fi
+  jq -c --arg a "$acct" --arg id "$id" --argjson t "$top" \
+     '. as $m
+      | ($t[] | select(.account == $a and .envelope.id == $id)
+        | {account: $a, accounts: .accounts, envelope: .envelope, message: $m})' \
+     "$work/msg.json" >> "$lines"
 done < <(jq -r '.[] | "\(.account)\t\(.envelope.id)"' <<<"$top")
 
-jq . <<<"$out"
+out="$work/out.json"
+jq -s '.' "$lines" > "$out"
+
+if $want_json; then
+  jq . "$out"
+  exit 0
+fi
+
+# One field: bare value, so it pipes. More: labelled, since that is the
+# reading case. Labels are padded to the longest in use, not to a constant,
+# so `--from --subject` does not carry indentation for a date that is absent.
+label() { $bare || printf '%-*s ' "$labelw" "$1:"; }
+bare=false; (( selected == 1 )) && bare=true
+labelw=0
+$want_date    && (( labelw < 5 )) && labelw=5
+$want_from    && (( labelw < 5 )) && labelw=5
+$want_subject && labelw=8
+true
+
+msg_count=$(jq 'length' "$out")
+for i in $(seq 0 $((msg_count - 1))); do
+  (( i > 0 )) && echo
+
+  if $want_date; then
+    label Date
+    human_date "$(jq -r --argjson i "$i" '.[$i].envelope.date // ""' "$out")"
+  fi
+
+  if $want_from; then
+    label From
+    jq -r --argjson i "$i" '
+      (.[$i].envelope.from // [])[0]
+      | if . == null then "(unknown)"
+        elif (.name // "") == "" then .email
+        else "\(.name) <\(.email)>" end' "$out"
+  fi
+
+  if $want_subject; then
+    label Subject
+    jq -r --argjson i "$i" '.[$i].envelope.subject // "(no subject)"' "$out"
+  fi
+
+  if $want_text; then
+    # Blank line before the body only when something precedes it, so
+    # `--text` alone emits nothing but the body.
+    (( selected > 1 )) && echo
+    jq -r --argjson i "$i" '
+      .[$i].message as $m
+      | if $m == null then "(no body)"
+        elif ($m.text_body // []) | length > 0
+          then $m.parts[$m.text_body[0]].body.Text
+        elif ($m.html_body // []) | length > 0
+          then $m.parts[$m.html_body[0]].body.Text
+        else "(no readable body)" end' "$out"
+  fi
+done

@@ -312,11 +312,25 @@ sitting in. Two accounts: `gmail` (the default) and `superhands` (work, hosted
 by Zone.ee). `bin/mail-last` wraps it into the one thing wanted most often:
 
 ```bash
-mail-last                  # newest across every account, as JSON
+mail-last                  # newest across every account: date, from, subject, body
+mail-last --subject        # just the subject
+mail-last --from --subject # sender and subject
+mail-last --text           # just the body
+mail-last --json           # the full structure
 mail-last -n 5             # five newest overall, merged
 mail-last -a superhands    # one account only
 mail-last -m Junk          # a named mailbox instead of the inbox
 ```
+
+Fields always print in the order date, from, subject, text, however the flags
+were typed. Asking for exactly one prints the bare value so it pipes cleanly;
+asking for more labels each line, since that is the reading case rather than
+the scripting one. `--date` renders as `2026-08-28 09:48 (18 minutes ago)` —
+the relative half being the point.
+
+Only `--text` and `--json` need a body, so the other fields answer from the
+envelope alone: `mail-last -n 3 --subject` makes 2 `envelope list` calls and
+**zero** `message read` calls, against 3 for `--text`.
 
 With no `-a` it queries every account and merges by date, so "the last mail I
 got" means what it says. `-n` counts *after* merging. Without `-m` no
