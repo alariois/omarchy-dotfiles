@@ -318,6 +318,20 @@ mail-last -a superhands    # the other account
 mail-last -m '[Gmail]/Sent Mail'
 ```
 
+Reading superhands.ee mail goes through the **gmail** account, not the
+`superhands` one. Gmail POP-fetches those mailboxes with "Leave a copy of
+retrieved message on the server" off, so it empties Zone as it goes — measured
+2026-08-28, Zone's Inbox held 0 messages against a UIDNEXT of 23482. The mail
+itself is fine; it is all in Gmail:
+
+```bash
+himalaya envelope search "to superhands.ee"
+```
+
+The `superhands` account stays configured because Junk, Trash and Sent Mail are
+untouched by POP, and because ticking "Leave a copy" in Gmail would make direct
+reads work immediately — with no POP delay, which is the reason to want it.
+
 Zone publishes no autoconfig — neither the Thunderbird ISPDB nor
 `autoconfig.superhands.ee` has an entry — so its settings were read off the
 server: `imap.zone.eu:993` presents a cert for exactly that name and advertises

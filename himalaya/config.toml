@@ -26,6 +26,12 @@ default = true
 email = "alari.ois.ao@gmail.com"
 display-name = "Alari"
 
+# Without this, every command that touches a mailbox demands an explicit
+# --mailbox and fails with "Mailbox is required" otherwise -- including a bare
+# `himalaya envelope list`.
+[accounts.gmail.mailbox.alias]
+inbox = "INBOX"
+
 [accounts.gmail.imap]
 # Implicit TLS on 993. Gmail also offers STARTTLS on 143; there is no reason
 # to prefer it.
@@ -53,6 +59,22 @@ cmd = "secret-tool lookup service himalaya account alari.ois.ao@gmail.com"
 # OAuth involved. mail.zone.eu and mail.superhands.ee do not resolve; do not
 # guess them back in.
 #
+# NOTE: reading this account directly is currently pointless. Gmail POP-fetches
+# this mailbox (Settings -> Accounts and Import -> "Check mail from other
+# accounts") with "Leave a copy of retrieved message on the server" turned OFF,
+# so it deletes each message from Zone once it has it. Measured on 2026-08-28:
+# Inbox holds 0 messages while its UIDNEXT is 23482, i.e. ~23k messages have
+# passed through and been drained. Junk (9), Trash (406) and Sent Mail (2) are
+# untouched, which is why the account is still worth having configured.
+#
+# So incoming superhands.ee mail is read through the `gmail` account, where POP
+# delivers it:
+#
+#   himalaya envelope search "to superhands.ee"
+#
+# Tick "Leave a copy" in Gmail if you would rather read it here directly, with
+# no POP delay.
+#
 # The secret is the Zone mailbox password:
 #
 #   secret-tool store --label="Zone mail (himalaya)" \
@@ -61,6 +83,9 @@ cmd = "secret-tool lookup service himalaya account alari.ois.ao@gmail.com"
 [accounts.superhands]
 email = "alari@superhands.ee"
 display-name = "Alari"
+
+[accounts.superhands.mailbox.alias]
+inbox = "Inbox"
 
 [accounts.superhands.imap]
 server = "imap.zone.eu:993"
