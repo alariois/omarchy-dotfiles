@@ -307,14 +307,22 @@ host-specific overlay rather than here.
 **`shell.json`** is JSON with no include directive. Keep a `jq` patch in the
 repo and apply it from `install.sh` rather than tracking the whole file.
 
-**Mail.** `himalaya` reads Gmail over IMAP, for scripting rather than for
-sitting in. `bin/mail-last` wraps it into the one thing wanted most often:
+**Mail.** `himalaya` reads mail over IMAP, for scripting rather than for
+sitting in. Two accounts: `gmail` (the default) and `superhands` (work, hosted
+by Zone.ee). `bin/mail-last` wraps it into the one thing wanted most often:
 
 ```bash
-mail-last            # newest inbox message, as JSON
-mail-last -n 5       # five newest
+mail-last                  # newest inbox message, as JSON
+mail-last -n 5             # five newest
+mail-last -a superhands    # the other account
 mail-last -m '[Gmail]/Sent Mail'
 ```
+
+Zone publishes no autoconfig — neither the Thunderbird ISPDB nor
+`autoconfig.superhands.ee` has an entry — so its settings were read off the
+server: `imap.zone.eu:993` presents a cert for exactly that name and advertises
+`AUTH=PLAIN` with `SASL-IR`, so it takes the same plain-SASL-over-TLS shape as
+Gmail. `mail.zone.eu` and `mail.superhands.ee` do not resolve.
 
 Output is a JSON array of `{ envelope, message }`. The envelope half has a
 published schema — `himalaya json-schema <dir>` dumps the JSON shape of every

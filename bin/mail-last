@@ -8,6 +8,7 @@
 #
 #   mail-last                 # newest message in the inbox
 #   mail-last -n 5            # five newest
+#   mail-last -a superhands   # a non-default account (see `himalaya account list`)
 #   mail-last -m '[Gmail]/Sent Mail'
 #   mail-last --raw           # bodies as raw RFC822 instead of parsed
 #
@@ -41,6 +42,9 @@ set -euo pipefail
 count=1
 mailbox=INBOX
 raw=()
+# Empty means "whatever the config marks default", rather than naming an
+# account here that the config might not have.
+account=()
 
 die() { echo "mail-last: $*" >&2; exit 1; }
 
@@ -56,6 +60,7 @@ while (($#)); do
   case $1 in
     -n|--count)   count=${2:-} ; shift 2 || die "-n needs a number" ;;
     -m|--mailbox) mailbox=${2:-}; shift 2 || die "-m needs a mailbox" ;;
+    -a|--account) account=(--account "${2:-}"); shift 2 || die "-a needs an account" ;;
     --raw)        raw=(--raw)  ; shift ;;
     -h|--help)    usage 0 ;;
     *)            die "unknown argument: $1  (try --help)" ;;
@@ -70,8 +75,9 @@ done
 
 # One list call, then one read per message. himalaya orders envelopes date
 # descending, so page 1 is already the newest -- no sorting needed here.
-envelopes=$(himalaya envelope list --mailbox "$mailbox" --page-size "$count" --json) \
-  || die "could not list '$mailbox' -- is the app password in the keyring? (himalaya account check)"
+envelopes=$(himalaya "${account[@]}" envelope list \
+              --mailbox "$mailbox" --page-size "$count" --json) \
+  || die "could not list '$mailbox' -- is the password in the keyring? (himalaya ${account[*]} account check)"
 
 jq -e '.envelopes | length > 0' <<<"$envelopes" >/dev/null 2>&1 \
   || die "no messages in '$mailbox'"
@@ -81,7 +87,8 @@ jq -e '.envelopes | length > 0' <<<"$envelopes" >/dev/null 2>&1 \
 out='[]'
 while IFS= read -r id; do
   envelope=$(jq -c --arg id "$id" '.envelopes[] | select(.id == $id)' <<<"$envelopes")
-  message=$(himalaya message read "${raw[@]}" --mailbox "$mailbox" --json "$id") \
+  message=$(himalaya "${account[@]}" message read "${raw[@]}" \
+              --mailbox "$mailbox" --json "$id") \
     || die "could not read message $id"
   out=$(jq -c --argjson e "$envelope" --argjson m "$message" \
           '. + [{envelope: $e, message: $m}]' <<<"$out")

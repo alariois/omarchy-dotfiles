@@ -137,18 +137,23 @@ else
       | sed 's/^/             /' | head -4
   fi
 
-  # Presence only -- never print it, and never send it anywhere. A live login
-  # test is `himalaya account check`, deliberately not run here: doctor.sh is
-  # meant to be cheap and offline.
-  if secret-tool lookup service himalaya \
-       account "$(sed -n 's/^email *= *"\(.*\)"/\1/p' "$DOTFILES/himalaya/config.toml" | head -1)" \
-       >/dev/null 2>&1; then
-    echo "  ok       app password present in the keyring"
-  else
-    echo "  MISSING  app password not in the keyring"
-    echo "           -> secret-tool store --label='Gmail app password (himalaya)' \\"
-    echo "                service himalaya account <your-address>"
-  fi
+  # Every account, not just the first -- a second mailbox whose password was
+  # never stored fails only when something reaches for it, which is exactly
+  # the kind of thing this report exists to catch early.
+  #
+  # Presence only: never print the secret, never send it anywhere. The live
+  # login test is `himalaya account check`, deliberately not run here, so that
+  # doctor.sh stays cheap and works offline.
+  while IFS= read -r addr; do
+    [[ -n $addr ]] || continue
+    if secret-tool lookup service himalaya account "$addr" >/dev/null 2>&1; then
+      echo "  ok       password in keyring for $addr"
+    else
+      echo "  MISSING  no keyring password for $addr"
+      echo "           -> secret-tool store --label='himalaya' \\"
+      echo "                service himalaya account $addr"
+    fi
+  done < <(sed -n 's/^email *= *"\(.*\)"/\1/p' "$DOTFILES/himalaya/config.toml")
 fi
 
 echo

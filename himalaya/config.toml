@@ -38,3 +38,35 @@ username = "alari.ois.ao@gmail.com"
 # repository is public.
 [accounts.gmail.imap.sasl.plain.passwd]
 cmd = "secret-tool lookup service himalaya account alari.ois.ao@gmail.com"
+
+# Work mail, hosted by Zone.ee (superhands.ee has MX zonemx.eu and
+# SPF include:_spf.zone.eu).
+#
+# Zone publishes no autoconfig -- neither the Thunderbird ISPDB nor
+# autoconfig.superhands.ee has an entry -- so these were read off the server
+# itself. imap.zone.eu:993 answers with a cert valid for exactly that name and
+# advertises:
+#
+#   * CAPABILITY IMAP4rev1 ... AUTH=PLAIN AUTH=PLAIN-CLIENTTOKEN ... SASL-IR
+#
+# So plain SASL over implicit TLS, same shape as the Gmail account above. No
+# OAuth involved. mail.zone.eu and mail.superhands.ee do not resolve; do not
+# guess them back in.
+#
+# The secret is the Zone mailbox password:
+#
+#   secret-tool store --label="Zone mail (himalaya)" \
+#     service himalaya account alari@superhands.ee
+
+[accounts.superhands]
+email = "alari@superhands.ee"
+display-name = "Alari"
+
+[accounts.superhands.imap]
+server = "imap.zone.eu:993"
+
+[accounts.superhands.imap.sasl.plain]
+username = "alari@superhands.ee"
+
+[accounts.superhands.imap.sasl.plain.passwd]
+cmd = "secret-tool lookup service himalaya account alari@superhands.ee"
