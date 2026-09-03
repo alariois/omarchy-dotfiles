@@ -79,3 +79,25 @@ o.window("^(mail-peek)$", {
 o.bind("SUPER + ALT + M", "Latest mail",
   "setsid uwsm-app -- xdg-terminal-exec --app-id=mail-peek --title=Mail -e mail-peek")
 o.bind("SUPER + ALT + CTRL + M", "Copy login code", "mail-otp")
+
+-- SUPER + SHIFT + S: Slack, in place of Omarchy's Google Maps.
+--
+-- The unbind is required for the same reason as Gmail's above: Omarchy's
+-- o.bind() drops the hl.bind() handle, so there is no object to disable and
+-- binding over the key would leave both entries registered.
+--
+-- `launch = "slack.desktop"` rather than `"slack"`, because the flags matter.
+-- ~/.local/share/applications/slack.desktop adds --ozone-platform-hint=auto
+-- and --enable-wayland-ime, without which Electron falls back to XWayland:
+-- blurry text on a scaled display and no compose-key input. uwsm-app takes a
+-- Desktop Entry ID as readily as an executable and honours its Exec line, so
+-- the flags live in one place instead of being copied into this file.
+--
+-- The pattern is anchored because omarchy-launch-or-focus tests it against
+-- both .class and .title, case-insensitively, and picks the first hit. Slack
+-- puts "Slack" in its own title, so a bare `slack` also matches any window
+-- merely *about* Slack -- a browser tab, or a terminal with it in the prompt --
+-- and there is no ordering guarantee about which one wins. `^slack$` pins it
+-- to the class, which is lowercase.
+hl.unbind("SUPER + SHIFT + S")
+o.bind("SUPER + SHIFT + S", "Slack", { launch = "slack.desktop", focus = "^slack$" })
