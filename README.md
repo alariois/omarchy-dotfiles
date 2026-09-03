@@ -483,18 +483,36 @@ never does.
 
 The shape `.message` actually has in 2.1, observed against a live inbox rather
 than promised anywhere: `text_body` and `html_body` are arrays of *indices
-into* `parts`, and a part's content sits at `.body.Text`. So:
+into* `parts`, and a part's content sits under a single-key tag naming its
+variant — `.body.Text` or `.body.Html`.
+
+Those two arrays are **not** a text/html split, which is the trap. An
+HTML-only mail lists the *same* index in both, and that part is `{"Html": …}`
+— so `text_body[0]` can name a part with no `.body.Text` at all. Select on the
+variant the part carries, never on which array named it:
 
 ```bash
-# plain-text body of the newest message
-mail-last | jq -r '.[0].message as $m | $m.parts[$m.text_body[0]].body.Text'
+# readable body of the newest message, whichever variant it has
+mail-last | jq -r '.[0].message as $m
+  | ($m.text_body + $m.html_body) as $c
+  | first($c[] | select($m.parts[.].body | has("Text")))
+    // first($c[] | select($m.parts[.].body | has("Html")))
+  | $m.parts[.].body | (.Text // .Html)'
 
 # who has been mailing most, out of the last 20
 mail-last -n 20 | jq -r '.[].envelope.from[0].email' | sort | uniq -c | sort -rn
 ```
 
-Treat the `.body.Text` path as a convention rather than a contract — pin
-himalaya, or check the shape, if something depends on it.
+`--text` and `--code` do that selection for you, and run an HTML part through
+a small awk pass first — tags out, entities decoded, `<br>` and block tags to
+line breaks, and anchors keeping their target so "click here" survives as
+something you can act on. It is a reading aid, not a browser: senders' layout
+tables come out as prose, and an unrecognised `&entity;` is left as written
+rather than dropped. `--json` is never touched — anything parsing a body gets
+exactly the bytes the sender sent.
+
+Treat those paths as a convention rather than a contract — pin himalaya, or
+check the shape, if something depends on it.
 
 Credentials are a Gmail **app password**, which requires 2-Step Verification on
 the account, stored in gnome-keyring:

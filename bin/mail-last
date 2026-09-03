@@ -81,13 +81,22 @@
 # still gets exactly what the sender sent.
 #
 # What .message looks like in 2.1, observed rather than promised: text_body
-# and html_body are arrays of *indices into* parts, and a part's text lives at
-# .body.Text -- so the plain-text body of the newest message is
+# and html_body are arrays of *indices into* parts, and a part's content sits
+# under a single-key tag naming its variant -- .body.Text or .body.Html.
 #
-#   mail-last | jq -r '.[0].message as $m | $m.parts[$m.text_body[0]].body.Text'
+# The trap is that those two arrays are not a text/html split. An HTML-only
+# mail lists the SAME index in both, and that part is {"Html": ...}, so
+# text_body[0] can name a part that has no .body.Text at all. Select on the
+# variant the part carries, never on which array named it:
 #
-# Treat that path as a convention, not a contract: pin himalaya, or check the
-# shape, if a script depends on it.
+#   mail-last | jq -r '.[0].message as $m
+#     | ($m.text_body + $m.html_body) as $c
+#     | first($c[] | select($m.parts[.].body | has("Text")))
+#       // first($c[] | select($m.parts[.].body | has("Html")))
+#     | $m.parts[.].body | (.Text // .Html)'
+#
+# Treat those paths as a convention, not a contract: pin himalaya, or check
+# the shape, if a script depends on it.
 #
 # Reading does not mark anything as seen: `himalaya message read` only sets
 # the flag when passed --seen, which this never does. Running it is safe to
@@ -333,17 +342,173 @@ tidy_body() {
   '
 }
 
-# The plain-text body of message $1, preferring a text part and falling back
-# to the html one, which after himalaya's part walk is usually readable.
+# Render an HTML body into something readable. himalaya does not do this: its
+# own help says an HTML-only mail gets "its markup printed" and points at w3m
+# or a custom viewer for the rest. Rather than take a dependency for it, this
+# does the reading-aid version -- and a reading aid is all it is, not a
+# browser. The Toggl password-reset mail that prompted it is 10736 bytes of
+# markup around 151 words of text.
+#
+# Blocks whose contents are markup rather than prose go first, wholesale.
+# awk has no lazy quantifier, so cut_block scans pair by pair instead of
+# trying to express "up to the FIRST close tag" as one regex.
+#
+# Note the tag patterns spell out their own delimiters instead of ending in
+# \b. In awk's ERE, \b is a BACKSPACE, not a word boundary -- `<br\b[^>]*>`
+# matches nothing at all, silently, which is a very quiet way for a rule like
+# this to do nothing.
+#
+# The document is accumulated and handled in END rather than read with
+# RS="^$". Tags and blocks span lines, so this has to see the whole thing at
+# once, and appending is portable where the RS trick is a gawk-ism.
+html_to_text() {
+  awk '
+    function cut_block(s, tag,    head, rest) {
+      while (match(s, "<[ \t\r\n]*" tag "([ \t\r\n][^>]*)?>")) {
+        head = substr(s, 1, RSTART - 1)
+        rest = substr(s, RSTART + RLENGTH)
+        if (match(rest, "<[ \t\r\n]*/[ \t\r\n]*" tag "[ \t\r\n]*>"))
+          s = head substr(rest, RSTART + RLENGTH)
+        else
+          s = head
+      }
+      return s
+    }
+
+    # Codepoint to UTF-8. sprintf("%c") is byte-oriented past 127, so the
+    # multi-byte forms are assembled by hand -- otherwise every curly quote in
+    # a marketing mail arrives mangled.
+    function utf8(n,    a, b, c) {
+      if (n < 128)   return sprintf("%c", n)
+      if (n < 2048)  return sprintf("%c%c", 192 + int(n / 64), 128 + (n % 64))
+      if (n < 65536) {
+        a = int(n / 4096); b = int((n % 4096) / 64); c = n % 64
+        return sprintf("%c%c%c", 224 + a, 128 + b, 128 + c)
+      }
+      return "?"
+    }
+
+    function hexval(h,    i, v) {
+      v = 0
+      for (i = 1; i <= length(h); i++)
+        v = v * 16 + index("0123456789abcdef", substr(tolower(h), i, 1)) - 1
+      return v
+    }
+
+    # Named entities worth knowing, plus numeric refs. Deliberately not
+    # exhaustive: an unrecognised &foo; is left as written rather than
+    # deleted, so it shows up as a gap to fill instead of vanishing.
+    function unescape(s,    n) {
+      while (match(s, /&#[0-9]+;/)) {
+        n = substr(s, RSTART + 2, RLENGTH - 3) + 0
+        s = substr(s, 1, RSTART - 1) utf8(n) substr(s, RSTART + RLENGTH)
+      }
+      while (match(s, /&#[xX][0-9A-Fa-f]+;/)) {
+        n = hexval(substr(s, RSTART + 3, RLENGTH - 4))
+        s = substr(s, 1, RSTART - 1) utf8(n) substr(s, RSTART + RLENGTH)
+      }
+      gsub(/&nbsp;/,   " ",   s); gsub(/&lt;/,     "<",   s)
+      gsub(/&gt;/,     ">",   s); gsub(/&quot;/,   "\"",  s)
+      gsub(/&apos;/,   "'"'"'",   s); gsub(/&mdash;/,  "--",  s)
+      gsub(/&ndash;/,  "-",   s); gsub(/&hellip;/, "...", s)
+      gsub(/&rsquo;/,  "'"'"'",   s); gsub(/&lsquo;/,  "'"'"'",   s)
+      gsub(/&rdquo;/,  "\"",  s); gsub(/&ldquo;/,  "\"",  s)
+      gsub(/&zwnj;/,   "",    s); gsub(/&shy;/,    "",    s)
+      gsub(/&amp;/,    "\\&", s)   # last: it can produce the others
+      return s
+    }
+
+    { doc = doc $0 "\n" }
+
+    END {
+      s = doc
+      # The sentinels below stand in for < > around a URL until tag-stripping
+      # is over. Clear any the sender sent, so they cannot be forged.
+      gsub(/[\001\002]/, "", s)
+
+      s = cut_block(s, "script");   s = cut_block(s, "style")
+      s = cut_block(s, "head");     s = cut_block(s, "title")
+      s = cut_block(s, "noscript")
+      gsub(/<!--([^-]|-[^-]|--[^>])*-->/, "", s)
+
+      # Anchors keep their target. "Click here" is the whole point of most
+      # mail, and a bare "here" with the URL discarded is not a readable
+      # message. The URL is dropped when the link text already IS the URL, or
+      # when there is no text at all (an image link), which would otherwise
+      # print it twice or print it bare.
+      out = ""
+      while (match(s, /<[ \t\r\n]*[aA]([ \t\r\n][^>]*)?>/)) {
+        out = out substr(s, 1, RSTART - 1)
+        tag = substr(s, RSTART, RLENGTH)
+        s   = substr(s, RSTART + RLENGTH)
+
+        href = ""
+        if (match(tag, /[hH][rR][eE][fF][ \t\r\n]*=[ \t\r\n]*"[^"]*"/) ||
+            match(tag, /[hH][rR][eE][fF][ \t\r\n]*=[ \t\r\n]*'"'"'[^'"'"']*'"'"'/)) {
+          href = substr(tag, RSTART, RLENGTH)
+          sub(/^[^=]*=[ \t\r\n]*["'"'"']/, "", href)
+          sub(/["'"'"']$/, "", href)
+        }
+
+        if (match(s, /<[ \t\r\n]*\/[ \t\r\n]*[aA][ \t\r\n]*>/)) {
+          inner = substr(s, 1, RSTART - 1)
+          s     = substr(s, RSTART)
+        } else {
+          inner = s; s = ""
+        }
+
+        bare = unescape(inner)
+        gsub(/<[^>]*>/, "", bare)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", bare)
+
+        out = out inner
+        if (href ~ /^(https?|mailto):/ && bare != "" && bare != href)
+          out = out " \001" href "\002"
+      }
+      s = out s
+
+      gsub(/<[ \t\r\n]*\/?[ \t\r\n]*(p|div|br|tr|table|thead|tbody|ul|ol|li|dl|dt|dd|h[1-6]|blockquote|pre|section|header|footer|article|nav|aside|hr|td|th|form|fieldset|figure|figcaption|center|address)([ \t\r\n][^>]*)?\/?[ \t\r\n]*>/, "\n", s)
+      gsub(/<[^>]*>/, "", s)
+      s = unescape(s)
+      gsub(/\001/, "<", s); gsub(/\002/, ">", s)
+
+      gsub(/\r/, "", s)
+      gsub(/[ \t\013\014]+/, " ", s)
+      printf "%s", s
+    }
+  '
+}
+
+# The readable body of message $1.
+#
+# The part is chosen by the variant it CARRIES, not by which array names it.
+# himalaya lists a part index under text_body even when that part is HTML --
+# an HTML-only mail has the same index in text_body and html_body, and its
+# body is {"Html": ...} -- so "text_body is non-empty" was never evidence that
+# a plain-text part exists. The old code read .body.Text off whichever index
+# text_body named and printed jq's `null` for every HTML-only sender. It hit 3
+# of the 8 messages in the inbox it was tested against; the html_body branch
+# read .body.Text too, so it could not have covered for it.
 body_text() {
-  jq -r --argjson i "$1" '
+  local part
+  part=$(jq -c --argjson i "$1" '
     .[$i].message as $m
-    | if $m == null then "(no body)"
-      elif ($m.text_body // []) | length > 0
-        then $m.parts[$m.text_body[0]].body.Text
-      elif ($m.html_body // []) | length > 0
-        then $m.parts[$m.html_body[0]].body.Text
-      else "(no readable body)" end' "$out" | tidy_body
+    | if $m == null then { kind: "unfetched" }
+      else (($m.text_body // []) + ($m.html_body // [])) as $cand
+        | ([ $cand[] | select(($m.parts[.].body // {}) | has("Text")) ] | first) as $t
+        | ([ $cand[] | select(($m.parts[.].body // {}) | has("Html")) ] | first) as $h
+        | if   $t != null then { kind: "Text", text: $m.parts[$t].body.Text }
+          elif $h != null then { kind: "Html", text: $m.parts[$h].body.Html }
+          else { kind: "none" }
+          end
+      end' "$out")
+
+  case $(jq -r '.kind' <<<"$part") in
+    Text)      jq -r '.text' <<<"$part" | tidy_body ;;
+    Html)      jq -r '.text' <<<"$part" | html_to_text | tidy_body ;;
+    unfetched) echo "(no body)" ;;
+    *)         echo "(no readable body)" ;;
+  esac
 }
 bare=false; (( selected == 1 )) && bare=true
 labelw=0
