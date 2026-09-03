@@ -35,3 +35,18 @@ hl.config({
     repeat_delay = 300,
   },
 })
+
+-- Touchpad scroll direction. Stock Omarchy leaves natural_scroll off, which is
+-- the "traditional" direction: two fingers down scrolls the view down, so the
+-- content moves up under them. This flips it to the macOS behaviour, where the
+-- content follows the fingers.
+--
+-- Set in its own hl.config call rather than merged above so the keyboard block
+-- keeps its own comment; Hyprland applies both.
+hl.config({
+  input = {
+    touchpad = {
+      natural_scroll = true,
+    },
+  },
+})
