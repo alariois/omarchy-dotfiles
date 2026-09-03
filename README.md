@@ -135,10 +135,10 @@ xcompose/XCompose                         compose-key expansions (linked)
 xcompose/XCompose.local.seed              template for the private half (seeded)
 hypr-nav/                                 C source for the hypr-nav binary (built)
 himalaya/config.toml                      Gmail over IMAP for scripting (linked)
-bin/mail-last                             newest message(s), as text or JSON (linked)
-bin/mail-code                             one-time code extraction (linked)
-bin/mail-peek                             newest mail in a floating window (linked)
-bin/mail-otp                              login code to clipboard, via toast (linked)
+bin/msgs                                  newest message(s), mail or SMS (linked)
+bin/msg-code                              one-time code extraction (linked)
+bin/msg-peek                              newest message in a floating window (linked)
+bin/msg-otp                               login code to clipboard, via toast (linked)
 setup/targets.sh                          the delta table -- single source of truth
 setup/lib.sh                              freshness checks shared by the two below
 setup/install.sh                          assert every block, link, build, and hook
@@ -340,21 +340,54 @@ host-specific overlay rather than here.
 **`shell.json`** is JSON with no include directive. Keep a `jq` patch in the
 repo and apply it from `install.sh` rather than tracking the whole file.
 
-**Mail.** `himalaya` reads mail over IMAP, for scripting rather than for
-sitting in. Two accounts: `gmail` (the default) and `superhands` (work, hosted
-by Zone.ee). `bin/mail-last` wraps it into the one thing wanted most often:
+**Messages.** `bin/msgs` answers one question — what arrived last — across
+two channels at once. Mail comes over IMAP through `himalaya`, for scripting
+rather than for sitting in, from two accounts: `gmail` (the default) and
+`superhands` (work, hosted by Zone.ee). SMS comes off the phone through the
+KDE Connect daemon. Both are read by default and merged by date, so "the last
+message" means the last one that actually arrived, whichever carried it.
 
 ```bash
-mail-last                  # newest across every account: date, from, subject, body
-mail-last --subject        # just the subject
-mail-last --from --subject # sender and subject
-mail-last --text           # just the body
-mail-last --code           # the one-time code, or NOT FOUND
-mail-last --json           # the full structure
-mail-last -n 5             # five newest overall, merged
-mail-last -a superhands    # one account only
-mail-last -m Junk          # a named mailbox instead of the inbox
+msgs                  # newest of anything: date, from, subject, body
+msgs --subject        # just the subject
+msgs --from --subject # sender and subject
+msgs --text           # just the body
+msgs --code           # the one-time code, or NOT FOUND
+msgs --json           # the full structure
+msgs -n 5             # five newest overall, merged across both channels
+msgs --mail           # mail only
+msgs --sms            # SMS only
+msgs -a superhands    # one mail account (implies --mail)
+msgs -m Junk          # a named mailbox instead of the inbox (mail only)
+msgs -d <device-id>   # a specific phone (`kdeconnect-cli -a --id-only`)
 ```
+
+An SMS has no subject, so `--subject` renders it as `(SMS)`. That is what
+marks the channel when reading: mail output is untouched, and an SMS can never
+be mistaken for a mail whose subject went missing.
+
+```
+Date:    2026-09-03 11:48 (36 minutes ago)
+From:    +37253365468
+Subject: (SMS)
+
+Tellimus 26901000033841 on nüüd valmis ja ootab Teid…
+```
+
+Neither channel can take the other down. If the phone is not paired, not
+reachable, or KDE Connect is not installed, the SMS half steps aside with a
+warning on stderr and mail still answers; an unreachable mail account likewise
+leaves SMS working. Asking for `--sms` by name turns those same conditions
+into an error, because then there is nothing else to return.
+
+SMS is read from the daemon with a single `activeConversations()` DBus call,
+which answers from KDE Connect's own cache — single-digit milliseconds, no
+round trip to the handset. One caveat is invisible in the output and worth
+knowing: that call returns the newest message of each *thread*, not the newest
+messages outright. At the default `-n 1` those are the same thing. At larger
+`-n`, two of the newest messages sitting in one conversation show up as one
+entry. Only received messages are listed, matching the mail half — that reads
+an inbox, so "the last message" should not turn out to be something you sent.
 
 Fields always print in the order date, from, subject, code, text, however the
 flags were typed. Asking for exactly one prints the bare value so it pipes cleanly;
@@ -363,8 +396,10 @@ the scripting one. `--date` renders as `2026-08-28 09:48 (18 minutes ago)` —
 the relative half being the point.
 
 Only `--text`, `--code` and `--json` need a body, so the other fields answer
-from the envelope alone: `mail-last -n 3 --subject` makes 2 `envelope list`
-calls and **zero** `message read` calls, against 3 for `--text`.
+from the envelope alone: `msgs -n 3 --subject --mail` makes 2 `envelope list`
+calls and **zero** `message read` calls, against 3 for `--text`. SMS is free
+either way — the body arrives with the conversation list, so there is no
+second call to skip.
 
 `--text` and `--code` tidy the body for reading: every line loses its leading
 and trailing whitespace, runs of blank lines collapse to a single one, and
@@ -375,17 +410,35 @@ This is awk rather than `cat -s`, which does nothing on its own here: the
 "blank" lines are not empty but full of spaces, so the strip has to happen
 first, and `cat -s` cannot drop the runs at the very start and end.
 
-`--code` extracts one-time codes, and lives in `bin/mail-code` — a separate
-program so it can be tested against awkward mail with no mailbox involved
-(`mail-code --self-test`, 14 cases). It also works on its own: `mail-last
---text | mail-code`.
+`--code` extracts one-time codes, and lives in `bin/msg-code` — a separate
+program so it can be tested against awkward text with no mailbox and no phone
+involved (`msg-code --self-test`, 14 cases). It reads stdin and knows nothing
+about either channel, so it also works on its own: `msgs --text | msg-code`.
+
+Adding SMS mattered most here. One-time codes mostly arrive by text, not by
+mail, so `--code` and the `SUPER + ALT + CTRL + M` binding only now reach
+where the codes actually are:
+
+```console
+$ msgs --sms -n 5 --from --code
+From: Apple
+Code: 530627
+
+From: AMAZON
+Code: 279860
+```
 
 Two Hyprland bindings sit on top of all this:
 
 | Key | What |
 |---|---|
-| `SUPER + ALT + M` | the newest message in a floating window (`bin/mail-peek`) |
-| `SUPER + ALT + CTRL + M` | its login code onto the clipboard, toast only (`bin/mail-otp`) |
+| `SUPER + ALT + M` | the newest message, mail or SMS, in a floating window (`bin/msg-peek`) |
+| `SUPER + ALT + CTRL + M` | its login code onto the clipboard, toast only (`bin/msg-otp`) |
+
+Both act on *the newest message*, whichever channel it came from. That is the
+intended behaviour rather than a limitation — you press the key straight after
+asking a service for a code — but it does mean a newsletter arriving in the
+same minute can shadow a code that came by SMS.
 
 Two shapes for two jobs. Reading wants a window you can scroll and dismiss;
 grabbing a code wants no window at all, because you are mid-login in another
@@ -396,7 +449,7 @@ the stack never holds two.
 The reader opens before the fetch starts — IMAP takes a second or two, and a
 window that appears only afterwards reads as a dropped keypress. Its window
 rule lives beside its binding in `hypr/bindings.lua`, because it is not really
-a window rule, it is half of the binding; `--app-id=mail-peek` is what ties
+a window rule, it is half of the binding; `--app-id=msg-peek` is what ties
 them together, private rather than the terminal's own id so the rule cannot
 catch an ordinary terminal.
 
@@ -411,7 +464,7 @@ window rather than trusting it:
   the *bottom* under a screenful of nothing.
 - **Whitespace.** HTML-to-text converters leave voids — the MongoDB code mail
   is mostly empty screen — and indent everything, so the text drifts
-  rightwards. Tidying now lives in `mail-last` itself rather than the window,
+  rightwards. Tidying now lives in `msgs` itself rather than the window,
   so `--text` and `--code` get it too; see below.
 
 Finding digits is easy; not finding the *wrong* digits is the job. Real mail is
@@ -434,7 +487,7 @@ puts `#333333` right beside the keyword — which made a sign-in *notification*
 with no code in it report one. Declaration-block lines are dropped before
 anything is matched.
 
-To extend it, add to `PATTERNS` or `KEYWORDS` at the top of `bin/mail-code`;
+To extend it, add to `PATTERNS` or `KEYWORDS` at the top of `bin/msg-code`;
 `PATTERNS` is ordered, earlier entries winning ties.
 
 With no `-a` it queries every account and merges by date, so "the last mail I
@@ -481,7 +534,20 @@ breaks on the next release. Reading never marks anything seen: `himalaya
 message read` sets that flag only when passed `--seen`, which the wrapper
 never does.
 
-The shape `.message` actually has in 2.1, observed against a live inbox rather
+`--json` tags every entry with its `source`, `"mail"` or `"sms"`. An SMS also
+carries `sms` (body, addresses, `date_ms`, thread and message ids) and a
+*synthesised* `envelope` — date from `date_ms`, from from the sender, subject
+the literal `(SMS)`, id `sms-<uid>`. That envelope is what lets one sort, one
+de-duplication pass and one renderer serve both channels; `sms.addresses`
+keeps the untouched participant list, and `sms.date_ms` the millisecond
+precision `envelope.date` rounds off.
+
+The sender is `addresses[0]`, not the whole array. A person-to-person thread
+comes back as `[sender, your own number, sender]`, so joining it would repeat
+the sender and print your own number as though it had texted you.
+
+The rest of this applies to mail. The shape `.message` actually has in 2.1,
+observed against a live inbox rather
 than promised anywhere: `text_body` and `html_body` are arrays of *indices
 into* `parts`, and a part's content sits under a single-key tag naming its
 variant — `.body.Text` or `.body.Html`.
@@ -493,14 +559,14 @@ variant the part carries, never on which array named it:
 
 ```bash
 # readable body of the newest message, whichever variant it has
-mail-last | jq -r '.[0].message as $m
+msgs | jq -r '.[0].message as $m
   | ($m.text_body + $m.html_body) as $c
   | first($c[] | select($m.parts[.].body | has("Text")))
     // first($c[] | select($m.parts[.].body | has("Html")))
   | $m.parts[.].body | (.Text // .Html)'
 
 # who has been mailing most, out of the last 20
-mail-last -n 20 | jq -r '.[].envelope.from[0].email' | sort | uniq -c | sort -rn
+msgs -n 20 | jq -r '.[].envelope.from[0].email' | sort | uniq -c | sort -rn
 ```
 
 `--text` and `--code` do that selection for you, and run an HTML part through

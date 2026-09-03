@@ -19,7 +19,7 @@
 #
 # The schema below was read out of himalaya 2.1's own parser rather than from
 # a blog post; `himalaya json-schema <dir>` dumps the JSON shape of every
-# command's output, which is what the mail-last helper is written against.
+# command's output, which is what the msgs helper is written against.
 
 [accounts.gmail]
 default = true

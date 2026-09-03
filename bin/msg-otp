@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# mail-otp -- put the newest login code on the clipboard, and say so.
+# msg-otp -- put the newest login code on the clipboard, and say so.
 #
 # Bound to SUPER + ALT + CTRL + M in hypr/bindings.lua. No window: a
 # "Fetching…" toast goes up immediately and is REPLACED in place by the
@@ -23,15 +23,15 @@ notify() { # title, body, [urgency]
 REPLACE_ID=$(notify-send --app-name="$APP" -p --urgency=low \
   "Fetching login code…" "" 2>/dev/null) || REPLACE_ID=
 
-out=$(mail-last --code --from --date 2>&1)
+out=$(msgs --code --from --date 2>&1)
 rc=$?
 
 if (( rc != 0 )); then
-  notify "Mail unreachable" "Could not fetch the latest message" critical
+  notify "Messages unreachable" "Could not fetch the latest message" critical
   exit 1
 fi
 
-# mail-last labels its fields when more than one is asked for, and always in
+# msgs labels its fields when more than one is asked for, and always in
 # the order date, from, code -- so the labels are the contract here.
 when=$(sed -n 's/^Date: *//p'    <<<"$out" | head -1)
 from=$(sed -n 's/^From: *//p'    <<<"$out" | head -1)
@@ -47,7 +47,7 @@ who=$(sed 's/ *<[^>]*>$//' <<<"$from")
 [[ -n $who ]] || who="unknown sender"
 
 if [[ -z $code || $code == "NOT FOUND" ]]; then
-  notify "No code in latest mail" "$who · $rel" critical
+  notify "No code in latest message" "$who · $rel" critical
   exit 1
 fi
 

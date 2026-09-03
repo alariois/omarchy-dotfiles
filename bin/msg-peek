@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# mail-peek -- show the newest message in a floating window.
+# msg-peek -- show the newest message, mail or SMS, in a floating window.
 #
 # Bound to SUPER + ALT + M in hypr/bindings.lua, which launches a terminal
-# with --app-id=mail-peek and floats it by that id. Not useful on its own,
+# with --app-id=msg-peek and floats it by that id. Not useful on its own,
 # though running it in any terminal works fine.
 #
 # The window opens before the fetch starts, so the keypress always visibly
@@ -19,10 +19,10 @@
 set -uo pipefail
 
 clear
-printf '\n  Fetching mail…\n'
+printf '\n  Fetching messages…\n'
 
-if ! out=$(mail-last --date --from --subject --text 2>&1); then
-  out=$'Could not fetch mail.\n\n'$out
+if ! out=$(msgs --date --from --subject --text 2>&1); then
+  out=$'Could not fetch messages.\n\n'$out
 fi
 
 clear
@@ -37,7 +37,7 @@ clear
 #
 # -~ blanks the tilde column less draws past end of file. A pager showing a
 # file is one thing; a window showing a message should not look like vi.
-# No whitespace tidying here: mail-last --text already strips indentation and
+# No whitespace tidying here: msgs --text already strips indentation and
 # collapses blank runs, so doing it again would only risk the two drifting
 # apart.
 printf '%s\n' "$out" | less -R -c -~ --quit-on-intr -Ps'  q to close '

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-mail-code -- pull a one-time code out of an email body read on stdin.
+msg-code -- pull a one-time code out of an email body read on stdin.
 
 Prints the code, or NOT FOUND (exit 1) if nothing convincing turned up.
-Used by `mail-last --code`; usable on its own for anything that has the
+Used by `msgs --code`; usable on its own for anything that has the
 body already:
 
-    mail-last --text | mail-code
+    msgs --text | msg-code
 
 The hard part is not finding digits, it is not finding the WRONG digits.
 Real mail is full of them: street numbers, ZIP codes, copyright years,
@@ -32,7 +32,7 @@ and lose.
 
 To extend it, add to PATTERNS or KEYWORDS below. PATTERNS is ordered:
 earlier entries win ties, so put the more specific shapes first. Run
-`mail-code --self-test` after changing either.
+`msg-code --self-test` after changing either.
 """
 
 import re

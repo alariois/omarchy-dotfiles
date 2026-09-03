@@ -1,26 +1,46 @@
 #!/usr/bin/env bash
 #
-# mail-last -- the newest message(s) as JSON on stdout, for piping into
-# whatever wants to process them.
+# msgs -- the newest message(s) across every channel, as text or JSON.
 #
-# Linked to ~/.local/bin/mail-last by setup/install.sh; the accounts it uses
-# are in himalaya/config.toml in the same repo.
+# Two sources, one stream: mail over IMAP through himalaya, and SMS from the
+# phone through the KDE Connect daemon. Both are read by default and merged by
+# date, so "the last message" means the last one that actually arrived,
+# whichever channel carried it.
 #
-#   mail-last                 # newest across every configured account
-#   mail-last -n 5            # five newest, still merged across accounts
-#   mail-last -a superhands   # one account only (see `himalaya account list`)
-#   mail-last -m Junk         # a named mailbox instead of the inbox
-#   mail-last --raw           # bodies as raw RFC822 instead of parsed
+# Linked to ~/.local/bin/msgs by setup/install.sh; the mail accounts it uses
+# are in himalaya/config.toml in the same repo, and the phone is whichever
+# device KDE Connect reports as paired and reachable.
+#
+#   msgs                 # newest of anything, mail or SMS
+#   msgs -n 5            # five newest overall, merged across both
+#   msgs --mail          # mail only
+#   msgs --sms           # SMS only
+#   msgs -a superhands   # one mail account (implies --mail)
+#   msgs -m Junk         # a named mailbox instead of the inbox (mail only)
+#   msgs --raw           # bodies as raw RFC822 instead of parsed (mail only)
+#   msgs -d <device-id>  # a specific phone (see `kdeconnect-cli -a --id-only`)
+#
+# An SMS has no subject, so --subject renders it as "(SMS)". That is what
+# marks the channel when reading: mail output is untouched, and an SMS can
+# never be mistaken for a mail whose subject went missing.
+#
+# When SMS is merely implied by the default and the phone is not there -- not
+# paired, not reachable, KDE Connect not installed -- it steps aside with a
+# warning and the mail half still answers. Asking for --sms by name turns the
+# same conditions into an error, because then there is nothing else to return.
+# The reverse holds too: an unreachable mail account does not take the SMS
+# half down with it.
 #
 # By default it prints date, from, subject and body as text. Any subset can be
 # asked for instead, and they always come out in the order date, from, subject,
 # code, text however the flags were typed:
 #
-#   mail-last --subject                 # just the subject
-#   mail-last --from --subject          # sender and subject
-#   mail-last --text                    # just the body
-#   mail-last --code                    # the one-time code, or NOT FOUND
-#   mail-last --json                    # the full structure, below
+#   msgs --subject                 # just the subject
+#   msgs --from --subject          # sender and subject
+#   msgs --text                    # just the body
+#   msgs --code                    # the one-time code, or NOT FOUND
+#   msgs --json                    # the full structure, below
+#   msgs --sms --code              # the code from the newest SMS
 #
 # Asking for exactly one field prints the bare value, so it pipes cleanly. Ask
 # for more and each line is labelled, since that is the reading case rather
@@ -30,17 +50,32 @@
 # point: absolute timestamps make you do the arithmetic yourself.
 #
 # --code digs the one-time code out of the body, printing NOT FOUND when there
-# is none. The work is in bin/mail-code, which is a separate program precisely
+# is none. The work is in bin/msg-code, which is a separate program precisely
 # so it can be tested against awkward mail without a mailbox:
-# `mail-code --self-test`. It is not in the default set -- most mail has no
+# `msg-code --self-test`. It is not in the default set -- most mail has no
 # code, and NOT FOUND on every message would be noise.
 #
 # --json emits a JSON array, newest first, one object per message:
 #
-#   [ { "account":  "gmail",
+#   [ { "source":   "mail",
+#       "account":  "gmail",
 #       "accounts": ["superhands", "gmail"],
 #       "envelope": { id, date, from, to, subject, flags, ... },
 #       "message":  <whatever `himalaya message read --json` emits> } ]
+#
+# and for an SMS:
+#
+#   [ { "source":   "sms",
+#       "account":  "sms",
+#       "device":   "<kdeconnect device id>",
+#       "sms":      { body, addresses, date_ms, type, read, thread_id, uid },
+#       "envelope": { id, date, from, subject } } ]
+#
+# `envelope` on an SMS is synthesised, not reported: date from date_ms, from
+# from the sender, subject the literal "(SMS)", id "sms-<uid>". It exists so
+# that one sort, one de-duplication pass and one renderer can serve both
+# channels. `sms.addresses` keeps the untouched participant list, and
+# `sms.date_ms` the millisecond precision that `envelope.date` rounds off.
 #
 # Only --text and --json need the body, so the other fields answer from the
 # envelope alone and skip a fetch per message entirely.
@@ -89,7 +124,7 @@
 # text_body[0] can name a part that has no .body.Text at all. Select on the
 # variant the part carries, never on which array named it:
 #
-#   mail-last | jq -r '.[0].message as $m
+#   msgs | jq -r '.[0].message as $m
 #     | ($m.text_body + $m.html_body) as $c
 #     | first($c[] | select($m.parts[.].body | has("Text")))
 #       // first($c[] | select($m.parts[.].body | has("Html")))
@@ -108,6 +143,10 @@ count=1
 mailbox=()
 raw=()
 only_account=
+want_mail=true
+want_sms=true
+src_chosen=false
+device=
 want_json=false
 want_date=false
 want_from=false
@@ -116,8 +155,8 @@ want_code=false
 want_text=false
 any_field=false
 
-die()  { echo "mail-last: $*" >&2; exit 1; }
-warn() { echo "mail-last: $*" >&2; }
+die()  { echo "msgs: $*" >&2; exit 1; }
+warn() { echo "msgs: $*" >&2; }
 
 # Help is the header block above, found by "lines 3..N starting with #" rather
 # than a hardcoded range, so editing that header cannot silently truncate it.
@@ -131,6 +170,9 @@ while (($#)); do
     -n|--count)   count=${2:-}       ; shift 2 || die "-n needs a number" ;;
     -m|--mailbox) mailbox=(--mailbox "${2:-}"); shift 2 || die "-m needs a mailbox" ;;
     -a|--account) only_account=${2:-}; shift 2 || die "-a needs an account" ;;
+    -d|--device)  device=${2:-}      ; shift 2 || die "-d needs a device id" ;;
+    --mail)       want_mail=true; want_sms=false; src_chosen=true; shift ;;
+    --sms)        want_sms=true; want_mail=false; src_chosen=true; shift ;;
     --raw)        raw=(--raw)        ; shift ;;
     --json)       want_json=true     ; shift ;;
     --date)       want_date=true   ; any_field=true; shift ;;
@@ -144,6 +186,22 @@ while (($#)); do
 done
 
 [[ $count =~ ^[1-9][0-9]*$ ]] || die "count must be a positive integer, got '$count'"
+
+# -a names a himalaya account, so it only means anything for mail. Saying both
+# is a contradiction rather than a narrowing, so it is an error and not a
+# silent preference.
+if [[ -n $only_account ]]; then
+  $src_chosen && ! $want_mail && die "-a names a mail account, so it cannot be combined with --sms"
+  want_mail=true want_sms=false
+fi
+
+# -m and --raw are likewise mail-only. They are accepted alongside SMS rather
+# than rejected -- a merged run is the normal case, and refusing to look at
+# mail in Junk just because SMS is also in play would be unhelpful -- but they
+# are documented as affecting the mail half only.
+if $want_sms && ! $want_mail && { ((${#mailbox[@]})) || ((${#raw[@]})); }; then
+  warn "-m and --raw only affect mail, and --sms excludes it"
+fi
 
 # --json is a whole other output shape, not a fifth field, so combining it with
 # field flags has no sensible meaning. Say so rather than silently picking one.
@@ -168,50 +226,190 @@ done
 
 # Prefer the copy beside this script over whatever is on PATH, so a checkout
 # always uses its own extractor rather than an older installed one.
-code_tool=$(dirname "$(readlink -f "$0")")/mail-code
-[[ -x $code_tool ]] || code_tool=$(command -v mail-code || true)
+code_tool=$(dirname "$(readlink -f "$0")")/msg-code
+[[ -x $code_tool ]] || code_tool=$(command -v msg-code || true)
 if $want_code && [[ -z $code_tool ]]; then
-  die "--code needs mail-code, which is not installed"
+  die "--code needs msg-code, which is not installed"
 fi
 
-for tool in himalaya jq; do
-  command -v "$tool" >/dev/null 2>&1 || die "$tool is not installed"
-done
+command -v jq >/dev/null 2>&1 || die "jq is not installed"
+$want_mail && ! command -v himalaya >/dev/null 2>&1 && die "himalaya is not installed"
+
+# The SMS half needs KDE Connect. busctl comes with systemd so it is always
+# here; kdeconnect-cli is what may be absent. When SMS was merely implied by
+# the default it steps aside with a warning -- losing mail because a phone is
+# not paired would be a bad trade. When it was asked for by name, it is an
+# error.
+sms_unavailable() {
+  if $src_chosen; then
+    die "$1"
+  else
+    warn "no SMS: $1"
+    want_sms=false
+  fi
+}
+
+if $want_sms; then
+  if ! command -v kdeconnect-cli >/dev/null 2>&1; then
+    sms_unavailable "kdeconnect-cli is not installed"
+  elif ! command -v busctl >/dev/null 2>&1; then
+    sms_unavailable "busctl is not installed"
+  fi
+fi
 
 # One scratch dir for the whole run. Everything large moves through files
 # rather than argv -- see the note by the message loop below.
 work=$(mktemp -d) || die "could not create a temporary directory"
 trap 'rm -rf "$work"' EXIT
 
-if [[ -n $only_account ]]; then
-  accounts=("$only_account")
-else
-  mapfile -t accounts < <(himalaya --json account list 2>/dev/null \
-                            | jq -r '.accounts[].name') \
-    || die "could not read the account list from himalaya"
-  ((${#accounts[@]})) || die "no accounts configured"
-fi
-
-# Collect envelopes from every account, tagging each with where it came from.
-# Fetch `count` from each: the newest overall could all be in one account, so
-# fetching fewer risks missing them.
+# Everything from here on works on one normalised stream, whatever the source.
+# An SMS is given a synthesised `envelope` -- date, from, subject, id -- of the
+# same shape himalaya returns, which is what lets one sort, one de-duplication
+# pass and one renderer serve both. The channel-specific detail stays beside
+# it, under `.message` for mail and `.sms` for SMS.
 envs="$work/envelopes.jsonl"
 : > "$envs"
-reachable=0
-for acct in "${accounts[@]}"; do
-  if ! himalaya --account "$acct" envelope list \
-         "${mailbox[@]}" --page-size "$count" --json \
-         > "$work/list.json" 2>/dev/null; then
-    warn "skipping '$acct': could not list (try: himalaya -a $acct account check)"
-    continue
-  fi
-  reachable=$((reachable + 1))
-  jq -c --arg a "$acct" \
-     '(.envelopes // [])[] | {account: $a, envelope: .}' \
-     "$work/list.json" >> "$envs"
-done
+sources=0
 
-((reachable)) || die "no account could be listed"
+if $want_mail; then
+  if [[ -n $only_account ]]; then
+    accounts=("$only_account")
+  else
+    mapfile -t accounts < <(himalaya --json account list 2>/dev/null \
+                              | jq -r '.accounts[].name') \
+      || die "could not read the account list from himalaya"
+    ((${#accounts[@]})) || die "no accounts configured"
+  fi
+
+  # Collect envelopes from every account, tagging each with where it came from.
+  # Fetch `count` from each: the newest overall could all be in one account, so
+  # fetching fewer risks missing them.
+  reachable=0
+  for acct in "${accounts[@]}"; do
+    if ! himalaya --account "$acct" envelope list \
+           "${mailbox[@]}" --page-size "$count" --json \
+           > "$work/list.json" 2>/dev/null; then
+      warn "skipping '$acct': could not list (try: himalaya -a $acct account check)"
+      continue
+    fi
+    reachable=$((reachable + 1))
+    jq -c --arg a "$acct" \
+       '(.envelopes // [])[] | {source: "mail", account: $a, envelope: .}' \
+       "$work/list.json" >> "$envs"
+  done
+
+  if ((reachable)); then
+    sources=$((sources + 1))
+  elif $want_sms; then
+    warn "no account could be listed; continuing with SMS only"
+  else
+    die "no account could be listed"
+  fi
+fi
+
+# SMS, from the KDE Connect daemon over DBus.
+#
+# activeConversations() answers from the daemon's own cache, which the phone
+# keeps current while it is connected, so this costs single-digit milliseconds
+# and no round trip to the handset. requestAllConversationThreads() is the
+# opposite: it returns immediately and delivers its results later as
+# conversationCreated signals, so it is only worth firing when the cache is
+# empty -- which happens when the daemon has started but nothing has asked it
+# for messages yet.
+#
+# One caveat worth knowing, because it is invisible in the output: the list
+# holds the newest message of each THREAD, not the newest messages outright.
+# For the default -n 1 those are the same thing. At larger -n, two of the
+# newest messages sitting in one conversation will show up as one entry.
+# Per-message granularity means requestConversation() per thread and listening
+# for signals, which is a great deal of machinery for a case this tool does
+# not really serve.
+#
+# Received only, matching the mail half: that lists an inbox, so "the last
+# message" should not turn out to be something you sent yourself. Android's
+# type 1 is inbox, 2 is sent.
+if $want_sms; then
+  if [[ -n $device ]]; then
+    devices=("$device")
+  else
+    mapfile -t devices < <(kdeconnect-cli --list-available --id-only 2>/dev/null) || true
+  fi
+
+  if ((${#devices[@]} == 0)); then
+    sms_unavailable "no paired, reachable device (try: kdeconnect-cli -a)"
+  fi
+fi
+
+if $want_sms; then
+  sms_found=0
+  for dev in "${devices[@]}"; do
+    [[ -n $dev ]] || continue
+    obj="/modules/kdeconnect/devices/$dev"
+    iface=org.kde.kdeconnect.device.conversations
+
+    read_convs() {
+      busctl --user --json=short call org.kde.kdeconnect "$obj" \
+        "$iface" activeConversations > "$work/sms.json" 2>/dev/null
+    }
+
+    if ! read_convs; then
+      warn "skipping device '$dev': could not read conversations"
+      continue
+    fi
+
+    if (( $(jq '(.data[0] // []) | length' "$work/sms.json") == 0 )); then
+      busctl --user call org.kde.kdeconnect "$obj" \
+        "$iface" requestAllConversationThreads >/dev/null 2>&1 || true
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.2
+        read_convs || break
+        (( $(jq '(.data[0] // []) | length' "$work/sms.json") > 0 )) && break
+      done
+    fi
+
+    # Field order in ConversationMessage, read off the signature
+    # (isa(s)xiixixa(xsss)) and confirmed against live data: eventField, body,
+    # addresses, date in ms, type, read, threadID, uID, subID, attachments.
+    jq -c --arg dev "$dev" '
+      (.data[0] // [])
+      | map(.data)
+      | map(select(.[4] == 1))
+      | map(
+          # addresses[0] is the sender of a received message. The rest of
+          # the array lists the participants in that thread, which for a
+          # person-to-person conversation comes back as [sender, your own
+          # number, sender] -- so joining it would both repeat the sender and
+          # print your own number as if it had sent you something. The whole
+          # array is kept in --json.
+          ((.[2] // []) | map(.[0]) | .[0] // "") as $addr
+          | { source: "sms",
+              account: "sms",
+              device: $dev,
+              sms: { body:      .[1],
+                     addresses: ((.[2] // []) | map(.[0])),
+                     date_ms:   .[3],
+                     type:      .[4],
+                     read:      (.[5] == 1),
+                     thread_id: .[6],
+                     uid:       .[7] },
+              envelope: {
+                id:      ("sms-" + (.[7] | tostring)),
+                date:    (.[3] / 1000 | floor | todate),
+                from:    [ { name: "", email: (if $addr == "" then "(unknown)" else $addr end) } ],
+                subject: "(SMS)" } })
+      | .[]' "$work/sms.json" >> "$envs"
+
+    sms_found=$((sms_found + 1))
+  done
+
+  if ((sms_found)); then
+    sources=$((sources + 1))
+  else
+    sms_unavailable "no device could be read"
+  fi
+fi
+
+((sources)) || die "no source could be read"
 
 # Newest first, then fold copies of one message together, then trim to n --
 # in that order. Trimming before folding would let a message displace its own
@@ -290,7 +488,16 @@ human_date() {
 lines="$work/lines.jsonl"
 : > "$lines"
 
-while IFS=$'\t' read -r acct id; do
+while IFS=$'\t' read -r src acct id; do
+  # SMS arrives complete: the body came down with the conversation list, so
+  # there is nothing to fetch and nothing here that can fail.
+  if [[ $src == sms ]]; then
+    jq -c --arg id "$id" \
+       '.[] | select(.source == "sms" and .envelope.id == $id)' \
+       <<<"$top" >> "$lines"
+    continue
+  fi
+
   if $need_body; then
     himalaya --account "$acct" message read "${raw[@]}" \
       "${mailbox[@]}" --json "$id" > "$work/msg.json" \
@@ -300,10 +507,11 @@ while IFS=$'\t' read -r acct id; do
   fi
   jq -c --arg a "$acct" --arg id "$id" --argjson t "$top" \
      '. as $m
-      | ($t[] | select(.account == $a and .envelope.id == $id)
-        | {account: $a, accounts: .accounts, envelope: .envelope, message: $m})' \
+      | ($t[] | select(.source == "mail" and .account == $a and .envelope.id == $id)
+        | {source: "mail", account: $a, accounts: .accounts,
+           envelope: .envelope, message: $m})' \
      "$work/msg.json" >> "$lines"
-done < <(jq -r '.[] | "\(.account)\t\(.envelope.id)"' <<<"$top")
+done < <(jq -r '.[] | "\(.source)\t\(.account)\t\(.envelope.id)"' <<<"$top")
 
 out="$work/out.json"
 jq -s '.' "$lines" > "$out"
@@ -344,10 +552,15 @@ tidy_body() {
 
 # Render an HTML body into something readable. himalaya does not do this: its
 # own help says an HTML-only mail gets "its markup printed" and points at w3m
-# or a custom viewer for the rest. Rather than take a dependency for it, this
-# does the reading-aid version -- and a reading aid is all it is, not a
-# browser. The Toggl password-reset mail that prompted it is 10736 bytes of
-# markup around 151 words of text.
+# or a custom viewer for the rest. This is the reading-aid version, and a
+# reading aid is all it is, not a browser -- the Toggl password-reset mail
+# that prompted it is 10736 bytes of markup around 151 words of text.
+#
+# awk rather than python because tidy_body below is already awk and this is
+# one more pass over the same text, not because python was unavailable:
+# msg-code has a python3 shebang, so the stack already depends on it. The
+# earlier note here claiming otherwise was wrong, and PACKAGES now declares
+# python properly instead of leaving it implied.
 #
 # Blocks whose contents are markup rather than prose go first, wholesale.
 # awk has no lazy quantifier, so cut_block scans pair by pair instead of
@@ -361,8 +574,16 @@ tidy_body() {
 # The document is accumulated and handled in END rather than read with
 # RS="^$". Tags and blocks span lines, so this has to see the whole thing at
 # once, and appending is portable where the RS trick is a gawk-ism.
+#
+# LC_ALL=C is load-bearing, not tidiness. In a UTF-8 locale gawk's %c emits a
+# CHARACTER for a codepoint, so assembling UTF-8 by hand double-encodes it and
+# &#8364; arrives as mojibake instead of a euro sign. Under C it emits a byte,
+# which is what utf8() below is written to produce -- so the output is correct
+# UTF-8 whatever locale the caller happens to have. Everything this pass
+# matches on is ASCII, and multi-byte sequences ride through untouched as
+# bytes, so nothing else is affected by the switch.
 html_to_text() {
-  awk '
+  LC_ALL=C awk '
     function cut_block(s, tag,    head, rest) {
       while (match(s, "<[ \t\r\n]*" tag "([ \t\r\n][^>]*)?>")) {
         head = substr(s, 1, RSTART - 1)
@@ -378,12 +599,17 @@ html_to_text() {
     # Codepoint to UTF-8. sprintf("%c") is byte-oriented past 127, so the
     # multi-byte forms are assembled by hand -- otherwise every curly quote in
     # a marketing mail arrives mangled.
-    function utf8(n,    a, b, c) {
+    function utf8(n,    a, b, c, d) {
       if (n < 128)   return sprintf("%c", n)
       if (n < 2048)  return sprintf("%c%c", 192 + int(n / 64), 128 + (n % 64))
       if (n < 65536) {
         a = int(n / 4096); b = int((n % 4096) / 64); c = n % 64
         return sprintf("%c%c%c", 224 + a, 128 + b, 128 + c)
+      }
+      if (n < 1114112) {
+        a = int(n / 262144); b = int((n % 262144) / 4096)
+        c = int((n % 4096) / 64);  d = n % 64
+        return sprintf("%c%c%c%c", 240 + a, 128 + b, 128 + c, 128 + d)
       }
       return "?"
     }
@@ -414,6 +640,12 @@ html_to_text() {
       gsub(/&rsquo;/,  "'"'"'",   s); gsub(/&lsquo;/,  "'"'"'",   s)
       gsub(/&rdquo;/,  "\"",  s); gsub(/&ldquo;/,  "\"",  s)
       gsub(/&zwnj;/,   "",    s); gsub(/&shy;/,    "",    s)
+      gsub(/&copy;/,   "(c)",         s); gsub(/&reg;/,    "(R)",         s)
+      gsub(/&trade;/,  "(tm)",        s); gsub(/&euro;/,   utf8(8364),    s)
+      gsub(/&pound;/,  utf8(163),     s); gsub(/&deg;/,    utf8(176),     s)
+      gsub(/&middot;/, utf8(183),     s); gsub(/&bull;/,   utf8(8226),    s)
+      gsub(/&times;/,  utf8(215),     s); gsub(/&laquo;/,  utf8(171),     s)
+      gsub(/&raquo;/,  utf8(187),     s)
       gsub(/&amp;/,    "\\&", s)   # last: it can produce the others
       return s
     }
@@ -491,6 +723,15 @@ html_to_text() {
 # read .body.Text too, so it could not have covered for it.
 body_text() {
   local part
+
+  # An SMS body is just text. No parts, no variants, no HTML -- but it goes
+  # through tidy_body all the same, because senders pad shortcodes with
+  # trailing spaces and stray blank lines exactly like mail does.
+  if [[ $(jq -r --argjson i "$1" '.[$i].source' "$out") == sms ]]; then
+    jq -r --argjson i "$1" '.[$i].sms.body' "$out" | tidy_body
+    return
+  fi
+
   part=$(jq -c --argjson i "$1" '
     .[$i].message as $m
     | if $m == null then { kind: "unfetched" }
@@ -542,7 +783,7 @@ for i in $(seq 0 $((msg_count - 1))); do
 
   if $want_code; then
     label Code
-    # Same body extraction as --text; mail-code decides what counts as a code.
+    # Same body extraction as --text; msg-code decides what counts as a code.
     body_text "$i" | "$code_tool" || true
   fi
 

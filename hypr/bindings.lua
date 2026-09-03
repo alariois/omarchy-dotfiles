@@ -56,7 +56,7 @@ o.bind("SUPER + SHIFT + G", "Gmail", { webapp = "https://mail.google.com/", focu
 -- Two shapes for two jobs. Reading wants a window you can scroll and dismiss;
 -- grabbing a code wants no window at all, because you are mid-login in another
 -- app and a window would steal the focus you are about to type into. So the
--- code path only ever raises toasts -- see bin/mail-otp.
+-- code path only ever raises toasts -- see bin/msg-otp.
 --
 -- The window rule lives here rather than in a windows file because it is not
 -- really a window rule: it is half of this binding. --app-id is what ties them
@@ -68,7 +68,7 @@ o.bind("SUPER + SHIFT + G", "Gmail", { webapp = "https://mail.google.com/", focu
 -- Opaque on purpose. Omarchy tags every window with default-opacity, which is
 -- fine for a terminal you are typing in and wrong for one you are reading:
 -- whatever sits behind shows through the message body.
-o.window("^(mail-peek)$", {
+o.window("^(msg-peek)$", {
   float = true,
   center = true,
   size = { 900, 720 },
@@ -76,9 +76,9 @@ o.window("^(mail-peek)$", {
   opacity = "1.0 1.0",
 })
 
-o.bind("SUPER + ALT + M", "Latest mail",
-  "setsid uwsm-app -- xdg-terminal-exec --app-id=mail-peek --title=Mail -e mail-peek")
-o.bind("SUPER + ALT + CTRL + M", "Copy login code", "mail-otp")
+o.bind("SUPER + ALT + M", "Latest message",
+  "setsid uwsm-app -- xdg-terminal-exec --app-id=msg-peek --title=Messages -e msg-peek")
+o.bind("SUPER + ALT + CTRL + M", "Copy login code", "msg-otp")
 
 -- SUPER + SHIFT + S: Slack, in place of Omarchy's Google Maps.
 --

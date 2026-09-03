@@ -56,10 +56,10 @@ LINKS=(
   # session PATH for hypr-nav's sake. No secret is tracked: the config fetches
   # the app password from gnome-keyring at run time.
   "$HOME/.config/himalaya/config.toml|himalaya/config.toml"
-  "$HOME/.local/bin/mail-last|bin/mail-last"
-  "$HOME/.local/bin/mail-code|bin/mail-code"
-  "$HOME/.local/bin/mail-peek|bin/mail-peek"
-  "$HOME/.local/bin/mail-otp|bin/mail-otp"
+  "$HOME/.local/bin/msgs|bin/msgs"
+  "$HOME/.local/bin/msg-code|bin/msg-code"
+  "$HOME/.local/bin/msg-peek|bin/msg-peek"
+  "$HOME/.local/bin/msg-otp|bin/msg-otp"
 
   # Custom xkb options, selected by hypr/input.lua. libxkbcommon searches
   # ~/.config/xkb before the system tree, which is how these work without root.
@@ -104,8 +104,21 @@ BUILDS=(
 # /usr/share/omarchy/install/*.packages and pactree: jq, less, wl-clipboard and
 # xdg-terminal-exec are all on Omarchy's own base list, gawk comes with Arch's
 # `base`, and make/gcc come with base-devel, which Omarchy installs.
+#
+# python is NOT one of those, which this list previously implied by omission.
+# It is not in `base`; it arrives only as a transitive dependency of
+# base-devel (via debugedit and gdb), and msg-code has a python3 shebang -- so
+# --code and the SUPER+ALT+CTRL+M binding both rest on it. Too thin a thread
+# to leave undeclared.
+#
+# kdeconnect is a genuine optional: without it msgs still reads mail and only
+# the SMS half steps aside, with a warning. It is listed because the SMS half
+# is part of the tool now, not a nicety. busctl needs no entry -- it ships
+# with systemd.
 PACKAGES=(
-  "himalaya|himalaya|mail-last, mail-peek, mail-otp -- the whole mail stack"
+  "himalaya|himalaya|msgs and friends -- the mail half of the message stack"
+  "python3|python|msg-code, so --code and msg-otp find one-time codes"
+  "kdeconnect-cli|kdeconnect|msgs --sms -- the SMS half, read over DBus"
 )
 
 # FONTS -- families we ask for that Omarchy does not ship, installed per-user
