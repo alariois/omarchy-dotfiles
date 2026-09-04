@@ -671,8 +671,7 @@ EOF
     note "stdin is not a terminal, booting the base read-write"
   fi
 
-  # Armed before qemu starts, since the prompt arrives seconds into boot.
-  luks_unlock_watch &
+  arm_helpers
 
   local args; mapfile -t args < <(qemu_args)
   qemu-system-x86_64 "${args[@]}" \
@@ -696,14 +695,72 @@ cmd_reset() {
   # purpose; `clean all` is what discards them.
 }
 
+# Bring the clipboard bridge up on its own, once the guest can answer.
+#
+# Started alongside the LUKS watcher rather than by hand, because a clipboard
+# you have to remember to enable is one you will not have when you want it.
+#
+# It has to wait: ssh is not answering for the first minute of a boot, and the
+# bridge needs wl-clipboard reachable at both ends before it can do anything.
+# So this polls, gives up quietly after five minutes, and returns without a
+# word if the guest went away in the meantime -- a background helper that
+# complains about a machine nobody asked it to watch is worse than no helper.
+#
+# `exec` on success, so the bridge replaces this waiter and there is one pid to
+# signal on the way out rather than a chain of them.
+#
+# OMARCHY_VM_CLIPBOARD=0 turns it off, for the case where the sync is in the
+# way -- copying inside the guest while wanting the host clipboard left alone.
+clip_autostart() {
+  if [[ ${OMARCHY_VM_CLIPBOARD:-1} == 0 ]]; then
+    return 0
+  fi
+  command -v wl-paste >/dev/null 2>&1 && command -v wl-copy >/dev/null 2>&1 || return 0
+
+  local i
+  for i in $(seq 1 60); do
+    sleep 5
+    guest_running || return 0
+    if guest_ssh 'command -v wl-copy >/dev/null && command -v wl-paste >/dev/null' 2>/dev/null; then
+      note "clipboard bridge attached"
+      exec "$SELF" clipboard >/dev/null 2>&1
+    fi
+  done
+  return 0
+}
+
+# Everything that has to be running beside a booting guest, and the one trap
+# that takes it all down again. Shared by run/throwaway/base-shell so they
+# cannot drift: a guest booted by one and a guest booted by another should
+# behave the same.
+arm_helpers() {
+  # Armed before qemu starts, since the LUKS prompt arrives seconds into boot.
+  luks_unlock_watch &
+  HELPER_PIDS+=($!)
+  clip_autostart &
+  HELPER_PIDS+=($!)
+
+  # TERM, not KILL: the clipboard bridge has its own cleanup to run, which
+  # removes the watcher it left in the guest.
+  trap disarm_helpers EXIT INT TERM
+}
+
+HELPER_PIDS=()
+disarm_helpers() {
+  local pid
+  for pid in "${HELPER_PIDS[@]:-}"; do
+    [[ -n $pid ]] || continue
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+}
+
 cmd_run() {
   require_host
   require_no_guest
   [[ -f $OVERLAY ]] || die "no overlay yet -- run '$0 install', or '$0 reset' if the base exists"
   ensure_vars
 
-  # Armed before qemu starts, since the prompt arrives seconds into boot.
-  luks_unlock_watch &
+  arm_helpers
 
   local args; mapfile -t args < <(qemu_args)
   note "booting overlay (ssh on localhost:$SSH_PORT) -- changes persist until '$0 reset'"
@@ -720,8 +777,7 @@ cmd_throwaway() {
   [[ -f $BASE ]] || die "no base disk yet -- run '$0 install' first"
   ensure_vars
 
-  # Armed before qemu starts, since the prompt arrives seconds into boot.
-  luks_unlock_watch &
+  arm_helpers
 
   local args; mapfile -t args < <(qemu_args)
   note "booting base read-only -- every change is discarded on shutdown"
@@ -1024,6 +1080,13 @@ cmd_status() {
   fi
   echo "display       $DISPLAY_SPEC"
   echo "guest user    $(guest_user)"
+  if [[ ${OMARCHY_VM_CLIPBOARD:-1} == 0 ]]; then
+    echo "clipboard     disabled (OMARCHY_VM_CLIPBOARD=0)"
+  elif pgrep -f "$SELF clipboard" >/dev/null 2>&1; then
+    echo "clipboard     bridged"
+  else
+    echo "clipboard     armed on boot ('$0 clipboard' to attach to a running guest)"
+  fi
   if [[ -f $LUKS_PASS_FILE ]]; then
     echo "luks          passphrase stored, boots self-unlock"
   else
@@ -1056,6 +1119,7 @@ omarchy-vm -- a disposable Omarchy for testing this repo from nothing
   luks-set            store the base disk's LUKS passphrase, so boots self-unlock
   unlock              answer an unlock prompt a running guest is already waiting on
   clipboard           bridge the host and guest clipboards both ways
+                      (run/throwaway/base-shell start this for you)
   console             attach to the guest serial console (Ctrl-] detaches)
   log                 print this boot's serial output, escape codes stripped
   screenshot [path]   capture the GUEST framebuffer via QMP (not the host screen)
@@ -1076,6 +1140,7 @@ Typical loop:
 Overrides: OMARCHY_VM_MEM=$MEM OMARCHY_VM_CPUS=$CPUS OMARCHY_VM_DISK=$DISK_SIZE
            OMARCHY_VM_SSH_PORT=$SSH_PORT OMARCHY_VM_USER=\$USER
            OMARCHY_ISO_VERSION=$ISO_VERSION OMARCHY_VM_DIR=...
+           OMARCHY_VM_CLIPBOARD=0 to stop boots bridging the clipboard
 EOF
 }
 
