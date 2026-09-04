@@ -43,14 +43,40 @@ source "$DOTFILES/setup/targets.sh"
 source "$DOTFILES/setup/lib.sh"
 
 echo "== Managed include blocks =="
+# Also check WHERE each block points. Nothing stops a second checkout existing
+# -- vm/omarchy-vm push lands one at a different path from a git clone, and
+# then whichever install.sh ran last owns the live files. Reporting only
+# "present" in that state describes another checkout's world as though it were
+# this one: the Symlinks section below duly calls links STALE for pointing at
+# the other copy, which is true and thoroughly misleading.
+foreign=0
 for entry in "${HOOKS[@]}"; do
   IFS='|' read -r target style payload <<< "$entry"
   if grep -qF ">>> $MARKER >>>" "$target" 2>/dev/null; then
-    echo "  present  $(tilde "$target")  ->  $payload"
+    if grep -qF "$DOTFILES/$payload" "$target" 2>/dev/null; then
+      echo "  present  $(tilde "$target")  ->  $payload"
+    else
+      echo "  FOREIGN  $(tilde "$target")   -> block points at another checkout:"
+      # Read the path out of OUR block only. Grepping the whole file matched
+      # Omarchy's own include line in foot.ini and a stray tmux directive,
+      # reporting paths that had nothing to do with us.
+      awk -v m="$MARKER" '
+        index($0, ">>> " m " >>>") { inblock = 1; next }
+        index($0, "<<< " m " <<<") { inblock = 0; next }
+        inblock' "$target" 2>/dev/null | sed 's/^/             /'
+      foreign=$((foreign + 1))
+    fi
   else
     echo "  MISSING  $(tilde "$target")   -> run setup/install.sh"
   fi
 done
+if (( foreign )); then
+  echo
+  echo "  $foreign block(s) point somewhere else. This checkout is $DOTFILES."
+  echo "  Everything below is judged against THIS one, so a second copy will"
+  echo "  make correct links look STALE. Run setup/install.sh from the checkout"
+  echo "  you mean to keep, or delete the other."
+fi
 
 echo
 echo "== Symlinks into this repo =="
