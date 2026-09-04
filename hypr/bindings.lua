@@ -101,3 +101,56 @@ o.bind("SUPER + ALT + CTRL + M", "Copy login code", "msg-otp")
 -- to the class, which is lowercase.
 hl.unbind("SUPER + SHIFT + S")
 o.bind("SUPER + SHIFT + S", "Slack", { launch = "slack.desktop", focus = "^slack$" })
+
+-- SUPER + SHIFT + W: WhatsApp, in place of Omarchy's Omawrite.
+-- SUPER + SHIFT + Q: Messenger. Both open on workspace 5, next to Slack.
+--
+-- W needs the unbind for the same reason as Gmail's and Slack's above:
+-- Omarchy's o.bind() drops the hl.bind() handle, so there is no object to
+-- disable and binding over the key would leave both entries registered. Q
+-- needs none -- stock Omarchy leaves SUPER + SHIFT + Q free (the calculator
+-- is on SUPER + CTRL + Q).
+--
+-- Matched on class rather than through `{ webapp = ..., focus = true }`. That
+-- sugar hands the *description* to omarchy-launch-or-focus-webapp, which tests
+-- it as `\b<pattern>\b`, case-insensitively, against class *and* title -- so
+-- "WhatsApp" or "Messenger" would focus any window merely titled that, and a
+-- browser tab on facebook.com/messages is exactly such a window. Spelling the
+-- command out pins each key to the window Chromium actually creates.
+--
+-- The class comes from Chromium's --app=<url>: `chrome-<host>__<path>-Default`,
+-- with "/" written as "_". Anchoring is left to the `\b` the helper adds; the
+-- pattern stops before `-Default` so it survives a non-default profile.
+hl.unbind("SUPER + SHIFT + W")
+o.bind("SUPER + SHIFT + W", "WhatsApp",
+  "omarchy-launch-or-focus-webapp 'chrome-web\\.whatsapp\\.com__' 'https://web.whatsapp.com/'")
+o.bind("SUPER + SHIFT + Q", "Messenger",
+  "omarchy-launch-or-focus-webapp 'chrome-www\\.facebook\\.com__messages' 'https://www.facebook.com/messages'")
+
+-- Same two classes, as plain regexes this time -- window rules match on their
+-- own, without the helper's `\b` wrapping.
+--
+-- `workspace` is Hyprland's "open here" rule and takes a string. It is not
+-- `pin`, which means "show on every workspace". Deliberately not "5 silent":
+-- pressing the key should land you on the window, and silent would open it out
+-- of sight on a workspace you are not looking at.
+o.window("^chrome-web\\.whatsapp\\.com__.*$", { workspace = "5" })
+o.window("^chrome-www\\.facebook\\.com__messages.*$", { workspace = "5" })
+
+-- SUPER + SHIFT + C: Google Calendar, in place of Omarchy's HEY calendar.
+--
+-- Unbound first for the usual reason (see the Gmail block): Omarchy binds this
+-- key to https://app.hey.com/calendar/weeks/ in
+-- default/hypr/bindings/applications.lua and keeps no handle to disable.
+--
+-- Class-matched rather than by description, for the reason spelled out in the
+-- WhatsApp block above -- "Calendar" is if anything a worse pattern than
+-- "Messenger", since it turns up in the title of any mail or event page.
+--
+-- No workspace rule here, unlike WhatsApp and Messenger. Those are chat and
+-- belong parked with Slack on 5; a calendar is something you glance at from
+-- wherever you already are, and pinning it would drag you off the workspace
+-- you were working on.
+hl.unbind("SUPER + SHIFT + C")
+o.bind("SUPER + SHIFT + C", "Google Calendar",
+  "omarchy-launch-or-focus-webapp 'chrome-calendar\\.google\\.com__calendar' 'https://calendar.google.com/calendar'")
