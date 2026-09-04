@@ -1,0 +1,692 @@
+#!/usr/bin/env bash
+#
+# A disposable Omarchy VM, for testing what this repo does to a machine it has
+# never touched.
+#
+# Why this exists: setup/install.sh can be pointed at an empty HOME, and that
+# proves the plumbing -- but not the part that matters. The HOOKS lane exists
+# to append one managed block to files Omarchy already owns and rewrites, and
+# against an empty HOME those files contain nothing but our own block. Whether
+# our include still wins below Omarchy's stock content, whether an
+# `omarchy update` migration clobbers the block, and whether the post-update
+# hook puts it back, are questions only a real Omarchy can answer.
+#
+# The model is a golden base plus a throwaway overlay:
+#
+#   install -- boot the ISO and install Omarchy by hand. Slow, done once.
+#   reset   -- throw the overlay away and cut a new one off the base. Instant.
+#   run     -- boot the overlay.
+#
+# So "start again from a fresh install" costs a reset, not a reinstall. Nothing
+# writes to the base disk after `install`: a qcow2 overlay holds only the
+# difference from its backing file, so a reset is one unlink and a ~200KB
+# create, and the pristine machine is always exactly one command away.
+
+set -euo pipefail
+
+# Pinned, like the FONTS URL in setup/targets.sh and for the same reason: a
+# "latest" that moves under you means two runs of this harness are not the same
+# test. Bump it deliberately -- and note that a bump invalidates the base disk,
+# since the base IS the installed ISO. `clean base` then `install` re-cuts it.
+ISO_VERSION=${OMARCHY_ISO_VERSION:-4.0.2}
+ISO_URL=${OMARCHY_ISO_URL:-https://iso.omarchy.org/omarchy-$ISO_VERSION.iso}
+
+# Big files, so not under ~/.config and deliberately not in the repo.
+VM_DIR=${OMARCHY_VM_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/omarchy-vm}
+ISO="$VM_DIR/omarchy-$ISO_VERSION.iso"
+BASE="$VM_DIR/base-$ISO_VERSION.qcow2"
+OVERLAY="$VM_DIR/overlay.qcow2"
+VARS="$VM_DIR/OVMF_VARS.fd"
+
+# QMP is how this harness talks to a running guest: screenshot its actual
+# framebuffer, and ask it to power down properly. Both matter for a machine
+# whose whole job is to be booted and thrown away -- SIGTERM on a qcow2 is a
+# way to lose the writes you were testing.
+QMP_SOCK="$VM_DIR/qmp.sock"
+PIDFILE="$VM_DIR/qemu.pid"
+
+# The guest's serial console, as a socket with a logfile alongside: the log
+# answers "what happened", the socket answers "and now let me type at it".
+#
+# A stock Omarchy turns out to run serial-getty@ttyS0 and to put its console
+# output here without any kernel cmdline help -- which was worth discovering,
+# since it makes the serial console the one way into a guest whose screen is
+# black and whose sshd was never enabled.
+#
+# It was a plain `file` chardev first. That logs but cannot be typed at, which
+# is useless precisely when a guest has stopped drawing and the login prompt
+# on the other end of it is the only door left.
+SERIAL_LOG="$VM_DIR/serial.log"
+SERIAL_SOCK="$VM_DIR/serial.sock"
+
+# Overridable because the display is the first thing to suspect when a guest
+# boots but shows nothing: `OMARCHY_VM_DISPLAY=gtk,gl=off` and
+# `OMARCHY_VM_DISPLAY=sdl,gl=on` are the two useful comparisons, and having to
+# edit this file to make them is friction in exactly the wrong place.
+DISPLAY_SPEC=${OMARCHY_VM_DISPLAY:-gtk,gl=on,show-cursor=on,zoom-to-fit=on}
+
+# virtio-vga-gl, and not virtio-gpu-gl, which is the obvious choice and does
+# not work here. Both are the same GL-capable virtio-gpu; the -vga- variant
+# also exposes a legacy VGA framebuffer. With the pure virtio device this
+# guest booted perfectly every time -- a full clean systemd boot with zero
+# failures on the serial console -- and displayed nothing at all, because
+# accelerated scanout never came up, so Hyprland had no surface to draw on.
+#
+# What identified it was QMP screendump flipping behaviour: under
+# virtio-gpu-gl it returned a readable, uniformly black framebuffer (no GL
+# scanout), and under virtio-vga-gl it fails with "no surface" (GL scanout
+# live, in a dmabuf QEMU cannot read back). The second is the healthy one.
+#
+# Symptoms if you ever switch it back: a black screen, and an ACPI power
+# button the guest ignores, while `omarchy-vm console` shows a perfectly
+# healthy login prompt. The exact failure inside the guest was never
+# confirmed -- the machine works, so there was no failed boot left to autopsy.
+#
+# `virtio-vga` (no GL) is the other fallback worth trying if a host ever
+# cannot do GL at all; Hyprland then needs software rendering.
+GPU_DEVICE=${OMARCHY_VM_GPU:-virtio-vga-gl}
+
+DISK_SIZE=${OMARCHY_VM_DISK:-60G}
+MEM=${OMARCHY_VM_MEM:-8G}
+CPUS=${OMARCHY_VM_CPUS:-6}
+SSH_PORT=${OMARCHY_VM_SSH_PORT:-2222}
+
+DOTFILES=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)
+
+die() { echo "omarchy-vm: $*" >&2; exit 1; }
+note() { echo "==> $*"; }
+
+# ── Host prerequisites ────────────────────────────────────────────────
+#
+# Checked rather than installed: this needs sudo, and a tool that reaches for
+# root on its own is a tool you cannot read before it runs. The message names
+# the exact command instead, the same bargain setup/install.sh makes for
+# PACKAGES.
+require_host() {
+  local missing=()
+  command -v qemu-system-x86_64 >/dev/null || missing+=(qemu-desktop)
+  ovmf_code >/dev/null 2>&1 || missing+=(edk2-ovmf)
+
+  if (( ${#missing[@]} )); then
+    echo "omarchy-vm: missing host packages: ${missing[*]}" >&2
+    echo "  sudo pacman -S --needed ${missing[*]}" >&2
+    echo >&2
+    echo "qemu-desktop pulls qemu-hw-display-virtio-gpu-gl, which pulls" >&2
+    echo "virglrenderer -- that is what gives the guest real GL, without which" >&2
+    echo "Hyprland will not start. edk2-ovmf is the UEFI firmware; Omarchy" >&2
+    echo "boots with limine and has no BIOS path." >&2
+    exit 1
+  fi
+
+  [[ -w /dev/kvm ]] || die "/dev/kvm is not writable -- add yourself to the kvm group and log back in"
+}
+
+# OVMF has been renamed more than once (OVMF_CODE.fd, then the 4m variants,
+# then a move under x64/). Discover it rather than hardcoding whichever this
+# machine happens to have.
+ovmf_code() {
+  local c
+  for c in /usr/share/edk2/x64/OVMF_CODE.4m.fd \
+           /usr/share/edk2/x64/OVMF_CODE.fd \
+           /usr/share/edk2-ovmf/x64/OVMF_CODE.fd \
+           /usr/share/ovmf/x64/OVMF_CODE.fd; do
+    [[ -f $c ]] && { echo "$c"; return 0; }
+  done
+  return 1
+}
+
+ovmf_vars_template() {
+  local v
+  for v in /usr/share/edk2/x64/OVMF_VARS.4m.fd \
+           /usr/share/edk2/x64/OVMF_VARS.fd \
+           /usr/share/edk2-ovmf/x64/OVMF_VARS.fd \
+           /usr/share/ovmf/x64/OVMF_VARS.fd; do
+    [[ -f $v ]] && { echo "$v"; return 0; }
+  done
+  return 1
+}
+
+# Per-VM copy, because this is where UEFI keeps its boot entries. Sharing the
+# package's read-only template would leave limine's entry nowhere to live, and
+# the guest would install fine and then boot to a UEFI shell.
+ensure_vars() {
+  [[ -f $VARS ]] && return 0
+  mkdir -p "$VM_DIR"
+  cp "$(ovmf_vars_template)" "$VARS"
+  chmod 644 "$VARS"
+}
+
+# ── QEMU invocation ───────────────────────────────────────────────────
+#
+# One function so `install` and `run` cannot drift apart in the ways that
+# matter -- same machine type, same firmware, same GPU. A guest that installs
+# under one set of hardware and boots under another is a debugging session
+# nobody asked for.
+qemu_args() {
+  printf '%s\n' \
+    -name "omarchy-vm" \
+    -machine q35,accel=kvm \
+    -cpu host \
+    -smp "$CPUS" \
+    -m "$MEM" \
+    -drive "if=pflash,format=raw,readonly=on,file=$(ovmf_code)" \
+    -drive "if=pflash,format=raw,file=$VARS" \
+    -device "$GPU_DEVICE" \
+    -display "$DISPLAY_SPEC" \
+    -qmp "unix:$QMP_SOCK,server=on,wait=off" \
+    -pidfile "$PIDFILE" \
+    -chardev "socket,id=serial0,path=$SERIAL_SOCK,server=on,wait=off,logfile=$SERIAL_LOG,logappend=off" \
+    -serial chardev:serial0 \
+    -device virtio-tablet-pci \
+    -device virtio-keyboard-pci \
+    -audiodev "pipewire,id=snd0" \
+    -device intel-hda -device "hda-output,audiodev=snd0" \
+    -object "rng-random,filename=/dev/urandom,id=rng0" \
+    -device "virtio-rng-pci,rng=rng0" \
+    -nic "user,model=virtio-net-pci,hostfwd=tcp::$SSH_PORT-:22"
+  # virtio-tablet rather than the default USB mouse: it reports absolute
+  # coordinates, so the pointer lines up with the host's without a grab. A
+  # relative mouse under Wayland means the guest cursor drifts away from yours.
+}
+
+# ── Talking to a running guest ────────────────────────────────────────
+#
+# QMP is a JSON protocol over a unix socket: greeting, then a mandatory
+# qmp_capabilities handshake, then commands. Done in python because the repo
+# already declares python3 (setup/targets.sh PACKAGES) and doing it in bash
+# would mean hand-rolling framing over socat.
+
+guest_running() {
+  local pid
+  [[ -f $PIDFILE ]] || return 1
+  pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+  [[ -n $pid ]] || return 1
+  # /proc, not pgrep: `pgrep -f qemu.*omarchy-vm` also matches any shell whose
+  # own command line happens to contain that pattern -- including the one
+  # asking the question, which made `status` claim a guest was running when
+  # none was.
+  [[ -d /proc/$pid ]] || return 1
+  grep -qa qemu-system "/proc/$pid/cmdline" 2>/dev/null
+}
+
+qmp() {
+  local cmd=$1 args=${2:-'{}'}
+  guest_running || die "no guest running"
+  python3 -c '
+import json, socket, sys
+sock, cmd, args = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(15)
+s.connect(sock)
+f = s.makefile("rwb")
+f.readline()                                    # the greeting
+def call(c, a=None):
+    f.write((json.dumps({"execute": c, **({"arguments": a} if a else {})}) + "\n").encode())
+    f.flush()
+    while True:                                 # skip async events
+        line = json.loads(f.readline())
+        if "return" in line or "error" in line:
+            return line
+call("qmp_capabilities")
+r = call(cmd, args or None)
+if "error" in r:
+    print(r["error"].get("desc", r["error"]), file=sys.stderr)
+    sys.exit(1)
+print(json.dumps(r["return"]))
+' "$QMP_SOCK" "$cmd" "$args"
+}
+
+# The guest's own framebuffer, straight out of QEMU -- which is the point.
+# Grabbing the host screen and cropping the QEMU window cannot tell a guest
+# that is showing nothing from a host window that has stopped drawing, and
+# that was exactly the question when the first boot came up black.
+cmd_screenshot() {
+  local out=${1:-$VM_DIR/screenshot.png} geo
+
+  # QMP first. It captures the guest rather than the host, which is the whole
+  # point -- it cannot confuse "the guest is showing nothing" with "the host
+  # window stopped drawing".
+  #
+  # But it only works while the scanout is a plain surface. A healthy
+  # GL-accelerated guest hands QEMU a dmabuf instead, and screendump answers
+  # "no surface" -- so on this setup the QMP path succeeds mainly when
+  # something is wrong. Hence the fallback rather than a hard failure.
+  #
+  # QEMU has taken a `format` argument since 7.1; without it this writes PPM,
+  # which nothing round here displays.
+  if qmp screendump "$(printf '{"filename":"%s","format":"png"}' "$out")" >/dev/null 2>&1; then
+    note "wrote $out (guest framebuffer, via QMP)"
+    return 0
+  fi
+
+  # Falling back to the host window is only reasonable because the host is
+  # itself Hyprland -- which this repo already assumes everywhere else.
+  command -v grim >/dev/null || die "QMP screendump failed and grim is not installed"
+  geo=$(hyprctl clients -j 2>/dev/null | python3 -c '
+import json, sys
+for c in json.load(sys.stdin):
+    if c["class"] == "qemu":
+        print(f"{c["at"][0]},{c["at"][1]} {c["size"][0]}x{c["size"][1]}")
+        break
+') || true
+  [[ -n ${geo:-} ]] || die "QMP screendump failed and no qemu window found to capture"
+  grim -g "$geo" "$out"
+  note "wrote $out (host window; QMP said \"no surface\", i.e. GL scanout is live)"
+}
+
+# Shut the guest down. Deliberately NOT via QMP system_powerdown, which is
+# the obvious call and does nothing on Omarchy: logind ships
+# HandlePowerKey=ignore, and Hyprland binds XF86PowerOff to the Omarchy power
+# *menu* (default/hypr/bindings/utilities.lua). So an ACPI power button opens
+# a dialog nobody is there to click. Verified: the guest sat happily through
+# 60s of it, twice, once with a black screen and once with a healthy desktop.
+#
+# So: ask the guest over ssh, which is a real shutdown. Failing that, say so
+# rather than pretending -- `--force` is a separate, explicit decision,
+# because it is the equivalent of pulling the plug.
+cmd_stop() {
+  local force=false
+  [[ ${1:-} == --force ]] && force=true
+
+  guest_running || { note "no guest running"; return 0; }
+
+  if ! $force; then
+    if guest_ssh true 2>/dev/null; then
+      note "asking the guest to power off over ssh"
+      # The connection dies under us as the guest goes down; that is success.
+      guest_ssh "sudo systemctl poweroff" 2>/dev/null || true
+      local i
+      for i in $(seq 1 60); do
+        guest_running || { note "guest is down"; return 0; }
+        sleep 1
+      done
+      die "still up after 60s -- '$0 stop --force' to pull the plug"
+    fi
+
+    die "cannot reach the guest over ssh, and Omarchy ignores the ACPI power
+  button by design (logind HandlePowerKey=ignore, and Hyprland binds
+  XF86PowerOff to the power menu).
+
+  Either shut it down from inside the guest, enable sshd in it:
+    sudo systemctl enable --now sshd
+  or discard it outright, which for an overlay costs nothing:
+    $0 stop --force && $0 reset"
+  fi
+
+  # The honest version of a hard stop. Safe for an overlay by construction --
+  # a reset throws it away anyway -- and never something to do to a base disk
+  # mid-install.
+  note "forcing the guest off (unclean, as though power was cut)"
+  qmp quit >/dev/null 2>&1 || true
+  local i
+  for i in $(seq 1 20); do
+    guest_running || { note "guest is down"; return 0; }
+    sleep 1
+  done
+  kill -TERM "$(cat "$PIDFILE")" 2>/dev/null || true
+  note "sent SIGTERM as a last resort"
+}
+
+# ── Commands ──────────────────────────────────────────────────────────
+
+cmd_iso() {
+  mkdir -p "$VM_DIR"
+
+  # The stamp records WHICH digest was verified, not merely that something was
+  # -- so a bumped ISO_VERSION or a replaced file cannot inherit an older
+  # file's blessing. It does not save the re-hash: the check below hashes the
+  # ISO and compares, which is the point, since the failure worth catching is
+  # a file that was fine when it landed and is not fine now. That costs about
+  # 3s warm and under a minute cold on 6GB, against `install` booting from a
+  # corrupt image, so it is not a trade worth optimising.
+  local stamp="$ISO.verified"
+
+  if [[ -f $ISO && -f $stamp ]] && [[ $(cat "$stamp") == "$(iso_digest)" ]]; then
+    note "ISO present and verified: $ISO ($(du -h "$ISO" | cut -f1))"
+    return 0
+  fi
+
+  if [[ ! -f $ISO ]]; then
+    note "fetching $ISO_URL"
+  else
+    note "resuming $ISO_URL"
+  fi
+  # --continue-at so a dropped transfer resumes instead of restarting, and
+  # --retry so one dropped connection does not end the whole thing. Both earn
+  # their place: the first attempt at this ISO died at 51.6% with
+  # "curl: (56) Recv failure: Connection timed out", six gigabytes being long
+  # enough for that to be the expected case rather than bad luck.
+  #
+  # --retry-all-errors because plain --retry ignores exactly the class of
+  # failure that happened -- a mid-transfer connection drop is not one of the
+  # "transient" HTTP statuses curl retries by default.
+  #
+  # This is also why the checksum below is not optional paranoia: a resumed
+  # transfer is precisely the case that can leave a plausible-looking file
+  # which is not the ISO.
+  curl -fL --continue-at - --progress-bar \
+       --retry 5 --retry-delay 3 --retry-all-errors \
+       --speed-limit 1024 --speed-time 60 \
+       -o "$ISO" "$ISO_URL" \
+    || die "download failed -- re-run 'iso' to resume from where it stopped"
+
+  iso_verify "$stamp"
+  note "got $(du -h "$ISO" | cut -f1)"
+}
+
+iso_digest() { sha256sum "$ISO" | cut -d' ' -f1; }
+
+# Omarchy publishes <iso>.sha256 beside the image. Verify against it, because
+# the alternative is discovering a bad download partway through an install.
+#
+# A missing checksum warns and continues -- it is one more network dependency,
+# and the same trade ensure_font makes. A checksum that is present and does NOT
+# match is fatal, and takes the file with it: leaving a known-bad 6GB ISO on
+# disk only invites the next run to "resume" it into the same place.
+iso_verify() {
+  local stamp=$1 want got
+  want=$(curl -fsSL --max-time 30 "$ISO_URL.sha256" 2>/dev/null | awk 'NR==1{print $1}')
+
+  if [[ -z $want ]]; then
+    note "WARNING: no published checksum reachable -- ISO not verified"
+    rm -f "$stamp"
+    return 0
+  fi
+
+  note "verifying against published sha256"
+  got=$(iso_digest)
+  if [[ $got != "$want" ]]; then
+    rm -f "$ISO" "$stamp"
+    die "checksum mismatch -- deleted the download
+  published $want
+  got       $got
+  Re-run '$0 iso' to fetch it again."
+  fi
+  printf '%s\n' "$got" > "$stamp"
+  note "checksum ok"
+}
+
+cmd_install() {
+  require_host
+  cmd_iso
+  ensure_vars
+
+  if [[ -f $BASE ]]; then
+    die "base disk already exists: $BASE
+  To rebuild it from scratch:  $0 clean base && $0 install
+  To get a fresh machine off it (what you usually want):  $0 reset"
+  fi
+
+  note "creating base disk ($DISK_SIZE, sparse)"
+  qemu-img create -f qcow2 "$BASE" "$DISK_SIZE" >/dev/null
+
+  cat <<'EOF'
+
+  Booting the installer. Do the Omarchy install as you would on metal, then
+  shut the guest down -- this disk becomes the golden base and is never
+  written to again.
+
+  Two things to do inside the guest before you shut down, because they become
+  part of every fresh machine you cut off this base:
+
+    1. sudo systemctl enable --now sshd
+       That is how `omarchy-vm push` gets this repo in. It is a deliberate
+       deviation from stock -- worth knowing when a test result surprises you.
+
+    2. Nothing else. In particular do NOT install this repo yet: an untouched
+       Omarchy is the whole point of the base.
+
+EOF
+  # Only pause when there is somebody to pause for. With stdin not a terminal
+  # -- run from an agent, a pipe, a CI job -- `read` hits EOF and returns 1,
+  # which under `set -e` would abort here rather than boot anything.
+  if [[ -t 0 ]]; then
+    read -rp "  Press Enter to boot the installer... " _ || true
+  else
+    note "stdin is not a terminal, booting straight into the installer"
+  fi
+
+  local args; mapfile -t args < <(qemu_args)
+  qemu-system-x86_64 "${args[@]}" \
+    -drive "file=$BASE,if=virtio,format=qcow2,cache=writeback,discard=unmap" \
+    -drive "file=$ISO,media=cdrom,readonly=on" \
+    -boot order=d
+
+  note "installer exited"
+  if [[ ! -f $OVERLAY ]]; then
+    note "cutting the first overlay"
+    cmd_reset
+  fi
+}
+
+# Boot the BASE disk read-write, to change what every fresh machine starts
+# from. The one command here that can damage something you cannot cheaply
+# rebuild, hence the noise.
+#
+# It exists because the overlay model has a hole: enabling sshd is exactly the
+# kind of change that has to live in the base, since `push` needs it and a
+# reset would throw it away. Doing it in an overlay means doing it again after
+# every reset, which defeats the point.
+cmd_base_shell() {
+  require_host
+  [[ -f $BASE ]] || die "no base disk yet -- run '$0 install' first"
+  ensure_vars
+
+  cat <<EOF
+
+  This boots the GOLDEN BASE read-write. Changes here become part of every
+  machine '$0 reset' hands you from now on.
+
+  What belongs in here:
+    sudo systemctl enable --now sshd     # so '$0 push' can reach the guest
+
+  What does not: this repo. An untouched Omarchy is what makes the base
+  worth having.
+
+  Shut down from inside the guest when you are done -- Omarchy ignores the
+  ACPI power button, so '$0 stop' cannot do it for you unless sshd is up.
+
+EOF
+  if [[ -t 0 ]]; then
+    read -rp "  Press Enter to boot the base read-write, Ctrl-C to bail... " _ || true
+  else
+    note "stdin is not a terminal, booting the base read-write"
+  fi
+
+  local args; mapfile -t args < <(qemu_args)
+  qemu-system-x86_64 "${args[@]}" \
+    -drive "file=$BASE,if=virtio,format=qcow2,cache=writeback,discard=unmap"
+
+  note "base disk closed -- '$0 reset' to cut a fresh overlay off the new state"
+}
+
+cmd_reset() {
+  require_host
+  [[ -f $BASE ]] || die "no base disk yet -- run '$0 install' first"
+
+  rm -f "$OVERLAY"
+  # -b with -F: qcow2 refuses to guess a backing file's format, and a wrong
+  # guess here would be a silently corrupt overlay rather than an error.
+  qemu-img create -f qcow2 -b "$BASE" -F qcow2 "$OVERLAY" >/dev/null
+  note "fresh overlay off $(basename "$BASE") -- $(du -h "$OVERLAY" | cut -f1)"
+
+  # The firmware vars carry the boot entry the install wrote, so they are part
+  # of the installed state and must NOT be reset with the disk. Left alone on
+  # purpose; `clean all` is what discards them.
+}
+
+cmd_run() {
+  require_host
+  [[ -f $OVERLAY ]] || die "no overlay yet -- run '$0 install', or '$0 reset' if the base exists"
+  ensure_vars
+
+  local args; mapfile -t args < <(qemu_args)
+  note "booting overlay (ssh on localhost:$SSH_PORT) -- changes persist until '$0 reset'"
+  qemu-system-x86_64 "${args[@]}" \
+    -drive "file=$OVERLAY,if=virtio,format=qcow2,cache=writeback,discard=unmap"
+}
+
+# Boot the base directly with -snapshot: every write goes to a temp file QEMU
+# discards on exit. Nothing to reset afterwards, and the base cannot be
+# damaged even by a guest that tries.
+cmd_throwaway() {
+  require_host
+  [[ -f $BASE ]] || die "no base disk yet -- run '$0 install' first"
+  ensure_vars
+
+  local args; mapfile -t args < <(qemu_args)
+  note "booting base read-only -- every change is discarded on shutdown"
+  qemu-system-x86_64 "${args[@]}" \
+    -drive "file=$BASE,if=virtio,format=qcow2,cache=writeback" \
+    -snapshot
+}
+
+guest_ssh() {
+  local user=${OMARCHY_VM_USER:-$USER}
+  ssh -p "$SSH_PORT" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR \
+      "$user@localhost" "$@"
+}
+
+cmd_ssh() { guest_ssh "$@"; }
+
+# Push the working tree, uncommitted changes and all. The point is to test the
+# repo as it is right now, not as it was at the last push to GitHub -- a clone
+# in the guest can only ever see what has been committed.
+cmd_push() {
+  local user=${OMARCHY_VM_USER:-$USER}
+  local dest="/home/$user/projects/omarchy-dotfiles"
+
+  command -v rsync >/dev/null || die "rsync not installed on the host"
+  guest_ssh true 2>/dev/null \
+    || die "cannot ssh to the guest on port $SSH_PORT
+  Is it running ('$0 run'), and was sshd enabled inside it?
+    sudo systemctl enable --now sshd"
+
+  note "pushing $DOTFILES -> $user@guest:$dest"
+  guest_ssh "mkdir -p $(dirname "$dest")"
+  # --delete so a file removed here disappears there too; the guest copy is a
+  # mirror of the working tree, not an accumulation of every version of it.
+  # .git goes along, because setup/doctor.sh and the hooks are happier in a
+  # real checkout, and it costs little.
+  rsync -a --delete --info=stats1 \
+        -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+        "$DOTFILES/" "$user@localhost:$dest/"
+  echo
+  note "now, in the guest:  cd ${dest/#\/home\/$user/\~} && ./setup/install.sh"
+}
+
+# Attach to the guest's serial console. This is the door that stays open when
+# the screen is black and sshd was never enabled -- a stock Omarchy runs
+# serial-getty@ttyS0, so there is a login prompt waiting on the other side.
+#
+# Ctrl-] to detach, chosen because socat's raw mode passes Ctrl-C straight
+# through to the guest, where it belongs.
+cmd_console() {
+  guest_running || die "no guest running -- '$0 run' first"
+  [[ -S $SERIAL_SOCK ]] || die "no serial socket at $SERIAL_SOCK"
+  command -v socat >/dev/null || die "socat not installed (pacman -S socat)"
+  echo "==> attaching to the guest serial console; Ctrl-] to detach"
+  echo
+  socat -,raw,echo=0,escape=0x1d "unix-connect:$SERIAL_SOCK"
+  echo
+  note "detached"
+}
+
+# Everything the guest said this boot, without attaching. Escape sequences
+# stripped, because a systemd boot log is more colour codes than text.
+cmd_log() {
+  [[ -f $SERIAL_LOG ]] || die "no serial log yet"
+  sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r//g' "$SERIAL_LOG"
+}
+
+cmd_status() {
+  echo "iso version   $ISO_VERSION"
+  echo "vm dir        $VM_DIR"
+  local f
+  for f in "$ISO" "$BASE" "$OVERLAY" "$VARS"; do
+    if [[ -f $f ]]; then
+      printf '  %-14s %s\n' "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+    else
+      printf '  %-14s -\n' "$(basename "$f")"
+    fi
+  done
+  echo
+  if command -v qemu-system-x86_64 >/dev/null; then
+    echo "qemu          $(qemu-system-x86_64 --version | head -1)"
+  else
+    echo "qemu          not installed"
+  fi
+  echo "ovmf          $(ovmf_code 2>/dev/null || echo 'not found')"
+  echo "kvm           $([[ -w /dev/kvm ]] && echo writable || echo 'NOT writable')"
+  if guest_running; then
+    echo "guest         running, pid $(cat "$PIDFILE") (ssh localhost:$SSH_PORT)"
+  else
+    echo "guest         not running"
+  fi
+  echo "display       $DISPLAY_SPEC"
+}
+
+cmd_clean() {
+  case ${1:-} in
+    overlay) rm -f "$OVERLAY"; note "overlay removed -- '$0 reset' cuts a new one" ;;
+    base)    rm -f "$BASE" "$OVERLAY" "$VARS"; note "base, overlay and firmware vars removed (ISO kept)" ;;
+    iso)     rm -f "$ISO" "$ISO.verified"; note "ISO and its checksum stamp removed" ;;
+    all)     rm -rf "$VM_DIR"; note "$VM_DIR removed" ;;
+    *)       die "clean what? one of: overlay, base, iso, all" ;;
+  esac
+}
+
+usage() {
+  cat <<EOF
+omarchy-vm -- a disposable Omarchy for testing this repo from nothing
+
+  iso                 download the pinned Omarchy ISO ($ISO_VERSION), resumable
+  install             create the base disk and boot the installer (once, slow)
+  reset               discard the overlay, cut a fresh one off the base (instant)
+  base-shell          boot the BASE read-write, to change what every reset gives you
+  run                 boot the overlay; changes persist until the next reset
+  throwaway           boot the base read-only; changes discarded on shutdown
+  push                rsync this working tree into the guest over ssh
+  ssh [cmd...]        ssh into the guest
+  console             attach to the guest serial console (Ctrl-] detaches)
+  log                 print this boot's serial output, escape codes stripped
+  screenshot [path]   capture the GUEST framebuffer via QMP (not the host screen)
+  stop [--force]      shut the guest down over ssh; --force pulls the plug
+  status              what exists, and whether the host can run any of it
+  clean <what>        overlay | base | iso | all
+
+Typical loop:
+
+  ./vm/omarchy-vm install          # once
+  ./vm/omarchy-vm reset            # fresh machine, instant
+  ./vm/omarchy-vm run &            # boot it
+  ./vm/omarchy-vm push             # this working tree, uncommitted and all
+  ./vm/omarchy-vm ssh              # then: cd projects/omarchy-dotfiles && ./setup/install.sh
+
+Overrides: OMARCHY_VM_MEM=$MEM OMARCHY_VM_CPUS=$CPUS OMARCHY_VM_DISK=$DISK_SIZE
+           OMARCHY_VM_SSH_PORT=$SSH_PORT OMARCHY_VM_USER=\$USER
+           OMARCHY_ISO_VERSION=$ISO_VERSION OMARCHY_VM_DIR=...
+EOF
+}
+
+case ${1:-} in
+  iso)       shift; cmd_iso "$@" ;;
+  install)   shift; cmd_install "$@" ;;
+  reset)     shift; cmd_reset "$@" ;;
+  base-shell) shift; cmd_base_shell "$@" ;;
+  run)       shift; cmd_run "$@" ;;
+  throwaway) shift; cmd_throwaway "$@" ;;
+  push)      shift; cmd_push "$@" ;;
+  ssh)       shift; cmd_ssh "$@" ;;
+  console)   shift; cmd_console "$@" ;;
+  log)       shift; cmd_log "$@" ;;
+  screenshot) shift; cmd_screenshot "$@" ;;
+  stop)      shift; cmd_stop "$@" ;;
+  status)    shift; cmd_status "$@" ;;
+  clean)     shift; cmd_clean "$@" ;;
+  ""|-h|--help|help) usage ;;
+  *)         usage; exit 1 ;;
+esac
