@@ -197,6 +197,33 @@ else
 fi
 
 echo
+echo "== Web apps =="
+webapp_count=0
+[[ -n ${WEBAPPS+x} ]] && webapp_count=${#WEBAPPS[@]}
+if (( webapp_count == 0 )); then
+  echo "  none declared"
+else
+  for entry in "${WEBAPPS[@]}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r name url icon_ref <<< "$entry"
+    icon=$(webapp_icon_for "$name" "$icon_ref")
+    desktop=$(webapp_desktop_file "$name")
+    if [[ ! -f $desktop ]]; then
+      echo "  MISSING  $(tilde "$desktop")   -> run setup/install.sh"
+    elif ! webapp_desktop_is_current "$name" "$url" "$icon"; then
+      echo "  STALE    $(tilde "$desktop")   -> not what targets.sh declares, run setup/install.sh"
+    else
+      echo "  ok       $name  ->  $url"
+    fi
+    # Checked apart from the entry: an unresolvable Icon= still launches the
+    # app, it just shows a blank tile, so nothing else ever reports it.
+    if ! webapp_icon_installed "$icon"; then
+      echo "           WARNING: no icon '$icon' in any theme -- blank launcher tile"
+    fi
+  done
+fi
+
+echo
 echo "== Hyprland =="
 # The files Hyprland watches only dofile() a path in this repo, so an edit here
 # is invisible to the running session until something reloads it. install.sh

@@ -139,3 +139,38 @@ PACKAGES=(
 FONTS=(
   "JetBrainsMonoNL Nerd Font Mono|https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/JetBrainsMono.tar.xz|JetBrainsMonoNLNerdFontMono-Regular.ttf JetBrainsMonoNLNerdFontMono-Bold.ttf JetBrainsMonoNLNerdFontMono-Italic.ttf JetBrainsMonoNLNerdFontMono-BoldItalic.ttf"
 )
+
+# WEBAPPS -- sites we want in the app launcher as their own windows, rather
+# than as a tab in the browser.
+#
+#   <name>|<url>|<icon name already on the system, or an https URL>
+#
+# Declared, not tracked. A .desktop file for a web app is six lines of
+# boilerplate wrapped around this triple, so install.sh writes it -- and
+# writing it from one declaration is the point: the launcher entry and the
+# keybinding in hypr/bindings.lua would otherwise each carry their own copy of
+# the URL and be free to disagree.
+#
+# The icon is why this is not a LINKS lane. It is a third-party logo and this
+# repo is public, so the URL is pinned and fetched into
+# ~/.local/share/icons on first install -- the same trade FONTS makes, for the
+# same reason. A bare name instead of a URL resolves against the icon themes
+# already installed, which is enough for anything Omarchy ships an icon for
+# (`whatsapp`, say, from omarchy-settings).
+#
+# Icon URLs point at each vendor's own branding CDN where one exists, and at
+# Google's favicon service otherwise, because both return a real PNG.
+# Deliberately not each site's apple-touch-icon, which is what
+# omarchy-webapp-install guesses first: facebook.com answers that with a WebP,
+# and a WebP saved as "messenger.png" is a file the icon theme spec has no
+# entry for, so the launcher tile silently comes up blank.
+#
+# Only web apps Omarchy does not already ship belong here. WhatsApp and the
+# four Google entries arrive with `omarchy refresh applications`, and keeping
+# our own copy of an Omarchy-owned file is the one thing this repo never does.
+# slack.desktop stays out too: that one is a native app whose entry exists to
+# carry Electron flags, not a web app.
+WEBAPPS=(
+  "Messenger|https://www.facebook.com/messages|https://www.google.com/s2/favicons?domain=messenger.com&sz=256"
+  "Google Calendar|https://calendar.google.com/calendar|https://www.gstatic.com/images/branding/product/1x/calendar_512dp.png"
+)

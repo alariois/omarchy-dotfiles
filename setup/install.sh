@@ -286,6 +286,88 @@ ensure_font() {
   repaired=$((repaired + 1))
 }
 
+# Write a web app's launcher entry and fetch the icon it names.
+#
+# The entry is generated rather than tracked, because it is boilerplate around
+# the triple in targets.sh -- and generating it from that one declaration is
+# what keeps the launcher entry and the keybinding in hypr/bindings.lua from
+# each holding their own copy of the URL.
+#
+# Note what does NOT depend on this lane: the keybindings call
+# omarchy-launch-or-focus-webapp with the URL directly, so every SUPER+SHIFT
+# key works on a machine where this has never run. What is missing there is the
+# launcher entry, which is why a failure here warns rather than conflicting --
+# that, and the fact that it is network-dependent and runs unattended from the
+# post-update hook, exactly as with ensure_font.
+ensure_webapp() {
+  local name=$1 url=$2 icon_ref=$3
+  local desktop icon body mime ext tmp
+
+  desktop=$(webapp_desktop_file "$name")
+  icon=$(webapp_icon_for "$name" "$icon_ref")
+  body=$(webapp_desktop_body "$name" "$url" "$icon")
+
+  if webapp_desktop_is_current "$name" "$url" "$icon"; then
+    say "  ok       ${desktop/#"$HOME"/\~}"
+  else
+    mkdir -p "$(dirname "$desktop")"
+    printf '%s\n' "$body" > "$desktop"
+    chmod +x "$desktop"
+    changed "  webapp   ${desktop/#"$HOME"/\~}  ->  $url"
+    repaired=$((repaired + 1))
+  fi
+
+  if webapp_icon_installed "$icon"; then
+    say "  ok       icon $icon"
+    return 0
+  fi
+
+  # A bare name we cannot resolve is a declaration error, not a fetch we can
+  # retry: there is no URL to go and get.
+  if [[ $icon_ref != https://* ]]; then
+    changed "  no icon  $name  ->  nothing named '$icon' in any icon theme"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    changed "  no icon  $name  ->  curl not installed"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+
+  tmp=$(mktemp)
+  if ! curl -fsSL --retry 2 --max-time 30 -o "$tmp" "$icon_ref"; then
+    rm -f "$tmp"
+    changed "  no icon  $name  ->  download failed, re-run when online"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+
+  # Ask what actually arrived rather than trusting the URL to have served what
+  # its name suggests. omarchy-webapp-install saves whatever it gets as
+  # "<app>.png"; facebook.com answers an icon request with a WebP, and a WebP
+  # called .png is a format the icon theme spec has no entry for -- the tile
+  # then renders blank and nothing anywhere says why.
+  mime=$(file -b --mime-type "$tmp" 2>/dev/null)
+  case $mime in
+    image/png)  ext=png ;;
+    image/svg*) ext=svg ;;
+    *) rm -f "$tmp"
+       changed "  no icon  $name  ->  served $mime, which hicolor cannot use"
+       warnings=$((warnings + 1))
+       return 0 ;;
+  esac
+
+  mkdir -p "$WEBAPP_ICON_DIR"
+  # mktemp is 0600; an icon has to be world-readable like any other.
+  mv "$tmp" "$WEBAPP_ICON_DIR/$icon.$ext"
+  chmod 644 "$WEBAPP_ICON_DIR/$icon.$ext"
+  gtk-update-icon-cache "$HOME/.local/share/icons/hicolor" >/dev/null 2>&1 || true
+  changed "  icon     $icon.$ext  <-  $name"
+  repaired=$((repaired + 1))
+}
+
 ensure_omarchy_hooks() {
   local src dest
   for src in "$DOTFILES"/hooks/*.d/*.hook; do
@@ -352,6 +434,13 @@ for entry in "${FONTS[@]:-}"; do
   [[ -n $entry ]] || continue
   IFS='|' read -r family url members <<< "$entry"
   ensure_font "$family" "$url" "$members"
+done
+
+say "Web apps:"
+for entry in "${WEBAPPS[@]:-}"; do
+  [[ -n $entry ]] || continue
+  IFS='|' read -r name url icon_ref <<< "$entry"
+  ensure_webapp "$name" "$url" "$icon_ref"
 done
 
 say "Omarchy hooks:"
