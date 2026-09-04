@@ -75,6 +75,12 @@ SERIAL_SOCK="$VM_DIR/serial.sock"
 # passphrase here that unlocks anything that matters.
 LUKS_PASS_FILE="$VM_DIR/luks-passphrase"
 
+# The guest's account name, which is whatever was typed into the installer and
+# so is not knowable from here. Remembered in a file rather than demanded as an
+# environment variable on every invocation -- and it defaults to $USER only
+# because that is the least surprising guess, not because it is likely right.
+GUEST_USER_FILE="$VM_DIR/guest-user"
+
 # What cryptsetup writes when it wants the passphrase. Matched as a substring,
 # because the line accumulates an asterisk per character typed.
 LUKS_PROMPT="A password is required to access the root volume"
@@ -315,7 +321,17 @@ for c in json.load(sys.stdin):
 # because it is the equivalent of pulling the plug.
 cmd_stop() {
   local force=false
-  [[ ${1:-} == --force ]] && force=true
+  # Rejected rather than ignored. `stop base-shell` is a natural thing to type
+  # when base-shell is what you actually want, and silently treating the extra
+  # word as noise answers "no guest running" to a question that was never
+  # asked -- which reads like the tool disagreeing with you about the state of
+  # the world.
+  case ${1:-} in
+    --force) force=true ;;
+    "")      ;;
+    *)       die "unknown argument: $1
+  stop takes only --force. Did you mean:  $0 $1" ;;
+  esac
 
   guest_running || { note "no guest running"; return 0; }
 
@@ -533,13 +549,37 @@ cmd_install() {
        harness exists to avoid. The disk holds a stock Omarchy and a public
        dotfiles repo; there is nothing here to protect.
 
-    2. Install openssh and enable it:
+    2. Install openssh and enable it, in this order:
+         omarchy update                     # syncs databases, the Omarchy way
          sudo pacman -S --needed openssh
          sudo systemctl enable --now sshd
-       Omarchy does not ship openssh in its package lists -- it appears only
-       as a transitive dependency of gcr, with sshd.service disabled -- so
-       `systemctl enable sshd` alone can fail with nothing obviously wrong.
-       Check it took: `systemctl is-active sshd` should say "active".
+         sudo ufw allow 22/tcp              # or nothing gets in
+         systemctl is-active sshd           # must print: active
+
+       Every one of these steps earns its place:
+
+       `omarchy update` first, because a freshly installed Omarchy has never
+       synced a package database -- plain `pacman -S` fails with "target not
+       found: openssh" under a pile of "database file for 'core' does not
+       exist". And it rather than `pacman -Syu`, because Omarchy installs a
+       pre-transaction hook that refuses direct system upgrades ("Woah
+       partner...") and offers OMARCHY_ALLOW_DIRECT_PACMAN=1 as a bypass. Do
+       not take the bypass: on a limine+snapper machine it skips the snapshot,
+       keyring and migration steps that hook exists to run.
+
+       openssh at all, because Omarchy does not ship it in its package lists;
+       it arrives only as a transitive dependency of gcr, with sshd.service
+       disabled -- so `systemctl enable sshd` alone can fail with nothing
+       obviously wrong. `pacman -Q openssh` first to skip a download.
+
+       And the ufw rule, because Omarchy ships a firewall and turns it on:
+       install/config/firewall.sh sets "default deny incoming" and opens only
+       LocalSend's 53317 and Docker's DNS. So a perfectly healthy sshd is
+       simply unreachable until port 22 is opened. The giveaway is the failure
+       mode -- ufw DROPs rather than rejects, so ssh hangs with "Connection
+       timed out during banner exchange" instead of "connection refused",
+       which is what a port with nothing behind it would say.
+
        This is what `omarchy-vm push` connects to.
 
     3. Nothing else. In particular do NOT install this repo: an untouched
@@ -662,14 +702,73 @@ cmd_throwaway() {
     -snapshot
 }
 
-guest_ssh() {
-  local user=${OMARCHY_VM_USER:-$USER}
-  ssh -p "$SSH_PORT" \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      -o LogLevel=ERROR \
-      "$user@localhost" "$@"
+guest_user() {
+  if [[ -n ${OMARCHY_VM_USER:-} ]]; then
+    printf '%s\n' "$OMARCHY_VM_USER"
+  elif [[ -f $GUEST_USER_FILE ]]; then
+    < "$GUEST_USER_FILE" tr -d '[:space:]'
+  else
+    printf '%s\n' "$USER"
+  fi
 }
+
+cmd_user() {
+  [[ -n ${1:-} ]] || die "usage: $0 user <name>   (currently: $(guest_user))"
+  mkdir -p "$VM_DIR"
+  printf '%s\n' "$1" > "$GUEST_USER_FILE"
+  note "guest account set to '$1'"
+}
+
+# Shared ssh options. StrictHostKeyChecking is off and known_hosts is
+# /dev/null because a reset hands back a machine with the same address and a
+# different host key every time -- the warning would be right and useless.
+#
+# ControlMaster matters more than it looks: without it `push` authenticates
+# twice, once for its reachability check and again for rsync, so a
+# password-authenticated push asks for the password twice in a row. With it
+# the first connection is reused, and a run of pushes costs one prompt.
+#
+# ControlPersist is 10 minutes rather than seconds because the useful unit of
+# work here is a whole session -- push, run install.sh, read doctor.sh, poke at
+# what it did -- and a password prompt in the middle of that is friction for no
+# security: the socket is mode 0600 in VM_DIR, and the machine on the far end
+# is one `reset` away from not existing.
+ssh_opts() {
+  printf '%s\n' \
+    -p "$SSH_PORT" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
+    -o ControlMaster=auto \
+    -o "ControlPath=$VM_DIR/ssh-%C" \
+    -o ControlPersist=600
+}
+
+guest_ssh() {
+  local user opts; user=$(guest_user); mapfile -t opts < <(ssh_opts)
+  ssh "${opts[@]}" "$user@localhost" "$@"
+}
+
+# Install the host's public key in the guest, so ssh and push stop asking for
+# a password. Only worth doing against `base-shell`, since anything written to
+# an overlay dies at the next reset -- which is why this says so rather than
+# quietly succeeding into a machine that is about to be discarded.
+cmd_authorize() {
+  local user opts; user=$(guest_user); mapfile -t opts < <(ssh_opts)
+  guest_running || die "no guest running"
+  command -v ssh-copy-id >/dev/null || die "ssh-copy-id not installed"
+
+  if ! tr '\0' '\n' < "/proc/$(cat "$PIDFILE")/cmdline" 2>/dev/null | grep -q "$(basename "$BASE")"; then
+    note "WARNING: this guest is running the overlay, not the base."
+    note "         An authorized key written here is gone at the next reset."
+    note "         Use '$0 base-shell' if you want it to persist."
+  fi
+
+  ssh-copy-id "${opts[@]}" "$user@localhost"
+  note "key installed; ssh and push should no longer ask for a password"
+}
+
+
 
 cmd_ssh() { guest_ssh "$@"; }
 
@@ -677,7 +776,7 @@ cmd_ssh() { guest_ssh "$@"; }
 # repo as it is right now, not as it was at the last push to GitHub -- a clone
 # in the guest can only ever see what has been committed.
 cmd_push() {
-  local user=${OMARCHY_VM_USER:-$USER}
+  local user; user=$(guest_user)
   local dest="/home/$user/projects/omarchy-dotfiles"
 
   command -v rsync >/dev/null || die "rsync not installed on the host"
@@ -692,8 +791,9 @@ cmd_push() {
   # mirror of the working tree, not an accumulation of every version of it.
   # .git goes along, because setup/doctor.sh and the hooks are happier in a
   # real checkout, and it costs little.
+  local opts; mapfile -t opts < <(ssh_opts)
   rsync -a --delete --info=stats1 \
-        -e "ssh -p $SSH_PORT -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR" \
+        -e "ssh ${opts[*]}" \
         "$DOTFILES/" "$user@localhost:$dest/"
   echo
   note "now, in the guest:  cd ${dest/#\/home\/$user/\~} && ./setup/install.sh"
@@ -748,6 +848,7 @@ cmd_status() {
     echo "guest         not running"
   fi
   echo "display       $DISPLAY_SPEC"
+  echo "guest user    $(guest_user)"
   if [[ -f $LUKS_PASS_FILE ]]; then
     echo "luks          passphrase stored, boots self-unlock"
   else
@@ -783,6 +884,8 @@ omarchy-vm -- a disposable Omarchy for testing this repo from nothing
   log                 print this boot's serial output, escape codes stripped
   screenshot [path]   capture the GUEST framebuffer via QMP (not the host screen)
   stop [--force]      shut the guest down over ssh; --force pulls the plug
+  user <name>         remember the guest's account name, used by ssh and push
+  authorize           install your ssh key in the guest (do it in base-shell)
   status              what exists, and whether the host can run any of it
   clean <what>        overlay | base | iso | all
 
@@ -815,6 +918,8 @@ case ${1:-} in
   log)       shift; cmd_log "$@" ;;
   screenshot) shift; cmd_screenshot "$@" ;;
   stop)      shift; cmd_stop "$@" ;;
+  user)      shift; cmd_user "$@" ;;
+  authorize) shift; cmd_authorize "$@" ;;
   status)    shift; cmd_status "$@" ;;
   clean)     shift; cmd_clean "$@" ;;
   ""|-h|--help|help) usage ;;
