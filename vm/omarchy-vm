@@ -59,6 +59,26 @@ PIDFILE="$VM_DIR/qemu.pid"
 SERIAL_LOG="$VM_DIR/serial.log"
 SERIAL_SOCK="$VM_DIR/serial.sock"
 
+# The LUKS passphrase for the base disk, if it has one.
+#
+# Omarchy's installer produces an encrypted root, and its unlock prompt goes
+# to the SERIAL console at a point where the graphical output is not yet
+# active -- so in the QEMU window the machine looks dead, and clicking at it
+# does nothing. That is the entire "asks for a password for root access, then
+# unable to continue booting and the screen goes blank" symptom: it was always
+# a live machine waiting on a prompt nobody could see.
+#
+# Kept in plaintext, mode 0600, under VM_DIR -- deliberately outside this repo,
+# so no .gitignore stands between it and a commit. That is a real trade, and it
+# is only defensible because this disk holds a stock Omarchy and a checkout of
+# a public dotfiles repo: there is nothing on it worth protecting. Do not put a
+# passphrase here that unlocks anything that matters.
+LUKS_PASS_FILE="$VM_DIR/luks-passphrase"
+
+# What cryptsetup writes when it wants the passphrase. Matched as a substring,
+# because the line accumulates an asterisk per character typed.
+LUKS_PROMPT="A password is required to access the root volume"
+
 # Overridable because the display is the first thing to suspect when a guest
 # boots but shows nothing: `OMARCHY_VM_DISPLAY=gtk,gl=off` and
 # `OMARCHY_VM_DISPLAY=sdl,gl=on` are the two useful comparisons, and having to
@@ -177,16 +197,25 @@ qemu_args() {
     -pidfile "$PIDFILE" \
     -chardev "socket,id=serial0,path=$SERIAL_SOCK,server=on,wait=off,logfile=$SERIAL_LOG,logappend=off" \
     -serial chardev:serial0 \
-    -device virtio-tablet-pci \
-    -device virtio-keyboard-pci \
+    -device qemu-xhci,id=usb \
+    -device usb-kbd \
+    -device usb-tablet \
     -audiodev "pipewire,id=snd0" \
     -device intel-hda -device "hda-output,audiodev=snd0" \
     -object "rng-random,filename=/dev/urandom,id=rng0" \
     -device "virtio-rng-pci,rng=rng0" \
     -nic "user,model=virtio-net-pci,hostfwd=tcp::$SSH_PORT-:22"
-  # virtio-tablet rather than the default USB mouse: it reports absolute
-  # coordinates, so the pointer lines up with the host's without a grab. A
-  # relative mouse under Wayland means the guest cursor drifts away from yours.
+  # USB HID, not virtio-keyboard-pci/virtio-tablet-pci, which is what this
+  # used to be and is why the LUKS prompt could not be answered: virtio input
+  # devices need the guest's virtio_input driver, which is not in Omarchy's
+  # initramfs, so at the passphrase prompt there is no keyboard at all. Typing
+  # into the window produced nothing -- verified from the serial log, where the
+  # prompt accumulated exactly zero of the asterisks it prints per keypress.
+  #
+  # usb-kbd and usb-tablet are driven by generic HID, present at every stage
+  # including initramfs. usb-tablet is also absolute-positioned, which is what
+  # virtio-tablet was chosen for: the pointer tracks the host's without a grab,
+  # where a relative mouse under Wayland drifts away from it.
 }
 
 # ── Talking to a running guest ────────────────────────────────────────
@@ -329,6 +358,73 @@ cmd_stop() {
 
 # ── Commands ──────────────────────────────────────────────────────────
 
+# Refuse to start a second guest. QEMU already half-enforces this by locking
+# the -pidfile, but it does so with "cannot create PID file: Cannot lock pid
+# file: Resource temporarily unavailable", which says nothing about why you
+# should care -- and the reason is not the pidfile at all. Two guests would
+# share this VM_DIR's QMP socket, serial socket and firmware vars, and worse,
+# `base-shell` while an overlay is live writes that overlay's backing file
+# from underneath it, which is how a qcow2 chain gets corrupted.
+# Answer the LUKS prompt on the guest's behalf, once per boot.
+#
+# Waits for the prompt rather than firing blind: a passphrase typed into
+# limine's menu or a getty would be useless at best, and echoed into the serial
+# log at worst. One shot on purpose -- if the passphrase is wrong the guest
+# asks again, and a watcher that answered every time would sit there feeding a
+# bad passphrase to a retry loop.
+luks_unlock_watch() {
+  local pass i
+  [[ -f $LUKS_PASS_FILE ]] || return 0
+  pass=$(< "$LUKS_PASS_FILE")
+  [[ -n $pass ]] || return 0
+  command -v socat >/dev/null || return 0
+
+  for i in $(seq 1 180); do
+    sleep 1
+    [[ -S $SERIAL_SOCK ]] || continue
+    grep -qa "$LUKS_PROMPT" "$SERIAL_LOG" 2>/dev/null || continue
+    printf '%s\n' "$pass" | socat -u - "unix-connect:$SERIAL_SOCK" 2>/dev/null || true
+    return 0
+  done
+}
+
+
+# Store the passphrase without it passing through the shell's history or this
+# terminal's scrollback -- which is why it is read here rather than taken as an
+# argument.
+cmd_luks_set() {
+  local pass
+  mkdir -p "$VM_DIR"
+  [[ -t 0 ]] || die "run this from a terminal -- it reads the passphrase interactively"
+  read -rsp "  LUKS passphrase for the VM base disk: " pass; echo
+  [[ -n $pass ]] || die "empty passphrase, nothing written"
+  # umask before the write, so the file is never briefly world-readable.
+  ( umask 077; printf '%s\n' "$pass" > "$LUKS_PASS_FILE" )
+  note "stored in $LUKS_PASS_FILE (mode $(stat -c%a "$LUKS_PASS_FILE"))"
+  note "boots will now answer the unlock prompt themselves"
+}
+
+# Answer a prompt that is already waiting, for a guest booted before the
+# passphrase was configured.
+cmd_unlock() {
+  guest_running || die "no guest running"
+  [[ -f $LUKS_PASS_FILE ]] || die "no passphrase stored -- run '$0 luks-set' first"
+  [[ -S $SERIAL_SOCK ]] || die "no serial socket"
+  grep -qa "$LUKS_PROMPT" "$SERIAL_LOG" 2>/dev/null \
+    || die "the guest is not asking for a passphrase (nothing matching in $SERIAL_LOG)"
+  printf '%s\n' "$(< "$LUKS_PASS_FILE")" | socat -u - "unix-connect:$SERIAL_SOCK"
+  note "passphrase sent"
+}
+
+require_no_guest() {
+  guest_running || return 0
+  die "a guest is already running (pid $(cat "$PIDFILE"))
+
+  Shut it down first:
+    $0 stop            # over ssh, when sshd is up in the guest
+    $0 stop --force    # discard it outright; costs nothing for an overlay"
+}
+
 cmd_iso() {
   mkdir -p "$VM_DIR"
 
@@ -408,6 +504,7 @@ iso_verify() {
 
 cmd_install() {
   require_host
+  require_no_guest
   cmd_iso
   ensure_vars
 
@@ -426,14 +523,26 @@ cmd_install() {
   shut the guest down -- this disk becomes the golden base and is never
   written to again.
 
-  Two things to do inside the guest before you shut down, because they become
-  part of every fresh machine you cut off this base:
+  Three things, because they become part of every fresh machine cut off this
+  base and are painful to add later:
 
-    1. sudo systemctl enable --now sshd
-       That is how `omarchy-vm push` gets this repo in. It is a deliberate
-       deviation from stock -- worth knowing when a test result surprises you.
+    1. Turn disk encryption OFF.
+       Omarchy toggles it with Ctrl+C at the "Password>" prompt in the ISO
+       configurator. On an encrypted disk every single reset+boot stops dead
+       waiting for a passphrase typed by hand, which is the one thing this
+       harness exists to avoid. The disk holds a stock Omarchy and a public
+       dotfiles repo; there is nothing here to protect.
 
-    2. Nothing else. In particular do NOT install this repo yet: an untouched
+    2. Install openssh and enable it:
+         sudo pacman -S --needed openssh
+         sudo systemctl enable --now sshd
+       Omarchy does not ship openssh in its package lists -- it appears only
+       as a transitive dependency of gcr, with sshd.service disabled -- so
+       `systemctl enable sshd` alone can fail with nothing obviously wrong.
+       Check it took: `systemctl is-active sshd` should say "active".
+       This is what `omarchy-vm push` connects to.
+
+    3. Nothing else. In particular do NOT install this repo: an untouched
        Omarchy is the whole point of the base.
 
 EOF
@@ -469,6 +578,7 @@ EOF
 # every reset, which defeats the point.
 cmd_base_shell() {
   require_host
+  require_no_guest
   [[ -f $BASE ]] || die "no base disk yet -- run '$0 install' first"
   ensure_vars
 
@@ -492,6 +602,9 @@ EOF
   else
     note "stdin is not a terminal, booting the base read-write"
   fi
+
+  # Armed before qemu starts, since the prompt arrives seconds into boot.
+  luks_unlock_watch &
 
   local args; mapfile -t args < <(qemu_args)
   qemu-system-x86_64 "${args[@]}" \
@@ -517,8 +630,12 @@ cmd_reset() {
 
 cmd_run() {
   require_host
+  require_no_guest
   [[ -f $OVERLAY ]] || die "no overlay yet -- run '$0 install', or '$0 reset' if the base exists"
   ensure_vars
+
+  # Armed before qemu starts, since the prompt arrives seconds into boot.
+  luks_unlock_watch &
 
   local args; mapfile -t args < <(qemu_args)
   note "booting overlay (ssh on localhost:$SSH_PORT) -- changes persist until '$0 reset'"
@@ -531,8 +648,12 @@ cmd_run() {
 # damaged even by a guest that tries.
 cmd_throwaway() {
   require_host
+  require_no_guest
   [[ -f $BASE ]] || die "no base disk yet -- run '$0 install' first"
   ensure_vars
+
+  # Armed before qemu starts, since the prompt arrives seconds into boot.
+  luks_unlock_watch &
 
   local args; mapfile -t args < <(qemu_args)
   note "booting base read-only -- every change is discarded on shutdown"
@@ -627,6 +748,11 @@ cmd_status() {
     echo "guest         not running"
   fi
   echo "display       $DISPLAY_SPEC"
+  if [[ -f $LUKS_PASS_FILE ]]; then
+    echo "luks          passphrase stored, boots self-unlock"
+  else
+    echo "luks          no passphrase stored ('$0 luks-set' if the disk is encrypted)"
+  fi
 }
 
 cmd_clean() {
@@ -651,6 +777,8 @@ omarchy-vm -- a disposable Omarchy for testing this repo from nothing
   throwaway           boot the base read-only; changes discarded on shutdown
   push                rsync this working tree into the guest over ssh
   ssh [cmd...]        ssh into the guest
+  luks-set            store the base disk's LUKS passphrase, so boots self-unlock
+  unlock              answer an unlock prompt a running guest is already waiting on
   console             attach to the guest serial console (Ctrl-] detaches)
   log                 print this boot's serial output, escape codes stripped
   screenshot [path]   capture the GUEST framebuffer via QMP (not the host screen)
@@ -682,6 +810,8 @@ case ${1:-} in
   push)      shift; cmd_push "$@" ;;
   ssh)       shift; cmd_ssh "$@" ;;
   console)   shift; cmd_console "$@" ;;
+  luks-set)  shift; cmd_luks_set "$@" ;;
+  unlock)    shift; cmd_unlock "$@" ;;
   log)       shift; cmd_log "$@" ;;
   screenshot) shift; cmd_screenshot "$@" ;;
   stop)      shift; cmd_stop "$@" ;;
