@@ -86,21 +86,29 @@ o.bind("SUPER + ALT + CTRL + M", "Copy login code", "msg-otp")
 -- o.bind() drops the hl.bind() handle, so there is no object to disable and
 -- binding over the key would leave both entries registered.
 --
--- `launch = "slack.desktop"` rather than `"slack"`, because the flags matter.
--- ~/.local/share/applications/slack.desktop adds --ozone-platform-hint=auto
--- and --enable-wayland-ime, without which Electron falls back to XWayland:
--- blurry text on a scaled display and no compose-key input. uwsm-app takes a
--- Desktop Entry ID as readily as an executable and honours its Exec line, so
--- the flags live in one place instead of being copied into this file.
+-- Goes through bin/slack-launch rather than launching a Desktop Entry ID,
+-- because Slack is the only thing on this row that has to be *installed*: it
+-- is a native app and slack-desktop is AUR-only. A VM install answered this
+-- key with "slack does not exist" and left it there. The script is shaped like
+-- omarchy-launch-spotify, which is what SUPER+SHIFT+M does: focus a window if
+-- one is open, launch if the app is present, and otherwise ask -- with gum, in
+-- a floating terminal, where sudo can also be answered.
 --
--- The pattern is anchored because omarchy-launch-or-focus tests it against
--- both .class and .title, case-insensitively, and picks the first hit. Slack
--- puts "Slack" in its own title, so a bare `slack` also matches any window
--- merely *about* Slack -- a browser tab, or a terminal with it in the prompt --
--- and there is no ordering guarantee about which one wins. `^slack$` pins it
--- to the class, which is lowercase.
+-- The window match lives in that script and is still anchored to `^slack$`,
+-- for the reason it always was: Slack puts "Slack" in its own window titles,
+-- so an unanchored pattern matches any window merely *about* Slack -- a
+-- browser tab, or a terminal with it in the prompt -- with no ordering
+-- guarantee about which wins. The class is lowercase.
+--
+-- The flags still live in a Desktop Entry, now tracked as slack/slack.desktop
+-- and linked over ~/.local/share/applications/slack.desktop, so a launch from
+-- the app menu gets them too. --enable-wayland-ime is the load-bearing one:
+-- without it the Compose key does nothing inside Slack. Contrary to what this
+-- comment said before, --ozone-platform-hint=auto is not what keeps Electron
+-- off XWayland -- Omarchy sets ELECTRON_OZONE_PLATFORM_HINT=wayland globally
+-- in default/hypr/envs.lua, which is stronger.
 hl.unbind("SUPER + SHIFT + S")
-o.bind("SUPER + SHIFT + S", "Slack", { launch = "slack.desktop", focus = "^slack$" })
+o.bind("SUPER + SHIFT + S", "Slack", "slack-launch")
 
 -- SUPER + SHIFT + W: WhatsApp, in place of Omarchy's Omawrite.
 -- SUPER + SHIFT + Q: Messenger. Both open on workspace 5, next to Slack.

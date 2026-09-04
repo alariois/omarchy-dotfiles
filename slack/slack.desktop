@@ -1,0 +1,33 @@
+# Slack, with the flags the AUR package's own entry does not set.
+#
+# Linked over ~/.local/share/applications/slack.desktop by setup/install.sh,
+# which shadows /usr/share/applications/slack.desktop from slack-desktop. The
+# only difference from that file is three flags on Exec.
+#
+# --enable-wayland-ime is the one that earns its place. It is what lets an
+# input method reach Slack, and without it the Compose key does nothing there
+# -- so every expansion in xcompose/XCompose, Estonian letters included, is
+# dead in the one app most of them get typed into. There is no environment
+# variable for it; Slack bundles its own Electron and reads none of Arch's
+# electron-flags.conf.
+#
+# --ozone-platform-hint=auto is redundant on a current Omarchy, which sets
+# ELECTRON_OZONE_PLATFORM_HINT=wayland and OZONE_PLATFORM=wayland globally in
+# default/hypr/envs.lua -- a stronger setting than "auto". Kept because it
+# costs nothing and makes the entry correct on a machine without those envs.
+# The comment this file replaces claimed that flag was what kept Electron off
+# XWayland; that has not been true since Omarchy started setting the env.
+#
+# --enable-features=WaylandWindowDecorations is cosmetic: server-side
+# decorations, so the window matches everything else.
+[Desktop Entry]
+Name=Slack
+StartupWMClass=Slack
+Comment=Slack Desktop
+GenericName=Slack Client for Linux
+Exec=/usr/bin/slack --ozone-platform-hint=auto --enable-wayland-ime --enable-features=WaylandWindowDecorations --gtk-version=3 -s %U
+Icon=slack
+Type=Application
+StartupNotify=true
+Categories=GNOME;GTK;Network;InstantMessaging;
+MimeType=x-scheme-handler/slack;

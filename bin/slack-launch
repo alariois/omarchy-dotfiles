@@ -1,0 +1,50 @@
+#!/bin/bash
+#
+# Launch Slack, or offer to install it -- the shape Omarchy uses for Spotify
+# (omarchy-launch-spotify, bound to SUPER+SHIFT+M): focus a window if one is
+# open, launch if the app is there, and otherwise put the installer in a
+# floating terminal where it can ask for a password.
+#
+# This exists because Slack, unlike everything else on the SUPER+SHIFT row, is
+# a native app that has to be installed. A fresh machine used to answer
+# SUPER+SHIFT+S with "slack does not exist" and leave you to work out what to
+# do about it -- which is exactly what a VM install turned up.
+#
+# Why a script here rather than a package in setup/targets.sh PACKAGES: that
+# lane only ever reports, never installs, because setup/install.sh has no sudo
+# anywhere and runs unattended from the post-update hook, where a password
+# prompt would hang an `omarchy update`. A keybinding has the opposite
+# property -- somebody is definitely sitting there -- so the install belongs
+# on this side of the line, not in install.sh.
+
+set -e
+
+# Anchored to the class, for the reason spelled out in hypr/bindings.lua:
+# Slack puts "Slack" in its own window titles, so an unanchored pattern also
+# matches any window merely *about* Slack. The class is lowercase.
+address=$(hyprctl clients -j |
+  jq -r '.[] | select(.class | test("^slack$"; "i")) | .address' | head -n1)
+
+if [[ -n $address ]]; then
+  hyprctl dispatch "hl.dsp.focus({ window = \"address:$address\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch focuswindow "address:$address"
+  exit 0
+fi
+
+if [[ -x /usr/bin/slack ]]; then
+  # The Desktop Entry ID, not the executable: ~/.local/share/applications/
+  # slack.desktop carries --enable-wayland-ime, without which the Compose key
+  # is dead inside Slack. uwsm-app honours an entry's Exec line, so the flags
+  # live in one place -- see slack/slack.desktop.
+  exec setsid uwsm-app -- slack.desktop
+fi
+
+# slack-desktop is AUR-only -- it is in no configured pacman repo -- so this
+# goes through omarchy-pkg-aur-add, which is yay under a missing-package check.
+#
+# gum confirm rather than installing unprompted: this is a keybinding, and a
+# mistyped SUPER+SHIFT+S should not start pulling an AUR package. gum is
+# Omarchy's own prompt tool, already on every machine, and the floating
+# terminal is what makes both the question and sudo's password prompt visible.
+exec omarchy-launch-floating-terminal-with-presentation \
+  "gum confirm 'Slack is not installed. Install slack-desktop from the AUR?' && omarchy-pkg-aur-add slack-desktop && (setsid uwsm-app -- gtk-launch slack.desktop >/dev/null 2>&1 &) || echo 'Left Slack uninstalled.'"

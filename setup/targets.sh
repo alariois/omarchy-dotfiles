@@ -75,6 +75,19 @@ LINKS=(
   "$HOME/.local/bin/msg-peek|bin/msg-peek"
   "$HOME/.local/bin/msg-otp|bin/msg-otp"
 
+  # Slack, which is the only thing on the SUPER+SHIFT row that has to be
+  # installed rather than just launched -- it is a native app, and
+  # slack-desktop is AUR-only. bin/slack-launch does what
+  # omarchy-launch-spotify does for Spotify: focus, else launch, else offer to
+  # install it in a floating terminal. It is not in PACKAGES because that lane
+  # only reports; install.sh has no sudo and must not acquire any.
+  #
+  # The .desktop shadows /usr/share/applications/slack.desktop from the AUR
+  # package, adding --enable-wayland-ime so the Compose key works inside
+  # Slack. Omarchy writes nothing at this path, so a link is safe.
+  "$HOME/.local/bin/slack-launch|bin/slack-launch"
+  "$HOME/.local/share/applications/slack.desktop|slack/slack.desktop"
+
   # Custom xkb options, selected by hypr/input.lua. libxkbcommon searches
   # ~/.config/xkb before the system tree, which is how these work without root.
   # Omarchy puts nothing here, so the whole directory is safe to link.
