@@ -118,6 +118,10 @@ CPUS=${OMARCHY_VM_CPUS:-6}
 SSH_PORT=${OMARCHY_VM_SSH_PORT:-2222}
 
 DOTFILES=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)
+SELF=$(realpath "${BASH_SOURCE[0]}")
+
+# One hash: the last value synced in either direction. See clip_is_echo.
+CLIP_STATE="$VM_DIR/clip-last"
 
 die() { echo "omarchy-vm: $*" >&2; exit 1; }
 note() { echo "==> $*"; }
@@ -210,7 +214,16 @@ qemu_args() {
     -device intel-hda -device "hda-output,audiodev=snd0" \
     -object "rng-random,filename=/dev/urandom,id=rng0" \
     -device "virtio-rng-pci,rng=rng0" \
-    -nic "user,model=virtio-net-pci,hostfwd=tcp::$SSH_PORT-:22"
+    -nic "user,model=virtio-net-pci,hostfwd=tcp::$SSH_PORT-:22" \
+    -device virtio-serial-pci \
+    -chardev "qemu-vdagent,id=vdagent,name=vdagent,clipboard=on" \
+    -device "virtserialport,chardev=vdagent,name=com.redhat.spice.0"
+  # Clipboard sharing, host <-> guest. `qemu-vdagent` is QEMU's own host-side
+  # implementation of the SPICE agent protocol, so this needs no SPICE server
+  # and no separate viewer -- it works with the plain gtk display above. The
+  # guest half is the spice-vdagent package, and without it these three lines
+  # are inert rather than harmful.
+  #
   # USB HID, not virtio-keyboard-pci/virtio-tablet-pci, which is what this
   # used to be and is why the LUKS prompt could not be answered: virtio input
   # devices need the guest's virtio_input driver, which is not in Omarchy's
@@ -337,9 +350,24 @@ cmd_stop() {
 
   if ! $force; then
     if guest_ssh true 2>/dev/null; then
+      # Passwordless first, since it needs no terminal and usually is not
+      # available: Omarchy grants the user no NOPASSWD sudo, and plain
+      # `systemctl poweroff` over ssh is refused by polkit with "requires
+      # interactive authentication". So this used to claim it was asking the
+      # guest to shut down while sudo silently waited for a password that
+      # could never arrive, and then blamed the guest for still being up.
       note "asking the guest to power off over ssh"
-      # The connection dies under us as the guest goes down; that is success.
-      guest_ssh "sudo systemctl poweroff" 2>/dev/null || true
+      if ! guest_ssh "sudo -n systemctl poweroff" 2>/dev/null; then
+        if [[ -t 0 ]]; then
+          # A terminal means sudo can ask. -t gives it one.
+          note "the guest needs your password for sudo"
+          guest_ssh -t "sudo systemctl poweroff" 2>/dev/null || true
+        else
+          die "the guest's sudo needs a password and there is no terminal to type it in.
+  Run this from a terminal, shut it down from inside the guest, or -- for an
+  overlay, where nothing is lost -- '$0 stop --force'."
+        fi
+      fi
       local i
       for i in $(seq 1 60); do
         guest_running || { note "guest is down"; return 0; }
@@ -823,6 +851,153 @@ cmd_log() {
   sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r//g' "$SERIAL_LOG"
 }
 
+# ── Clipboard ─────────────────────────────────────────────────────────
+#
+# Bridged with wl-clipboard on both ends rather than through spice-vdagent,
+# which is the conventional answer and a worse fit here. vdagent needs a
+# package installed in the guest -- so a base-shell trip, or it dies at the
+# next reset -- plus a session agent Hyprland does not autostart, and its
+# clipboard support is historically X11-based, which on a wlroots compositor
+# means depending on XWayland to bridge selections. wl-clipboard is already
+# present on a stock Omarchy at both ends and is native on both.
+#
+# The qemu-vdagent channel in qemu_args stays regardless: it costs nothing,
+# and it leaves the conventional path available to anyone who does install the
+# guest package.
+
+# wl-clipboard has to find the compositor, and an ssh shell has neither
+# XDG_RUNTIME_DIR nor WAYLAND_DISPLAY -- so `guest_ssh wl-copy` silently did
+# nothing at all. Discovered rather than hardcoded: this guest happens to land
+# on wayland-1, which is not a promise.
+#
+# Single-quoted on purpose. The $(...) inside must run in the guest.
+GUEST_WL_ENV='export XDG_RUNTIME_DIR=/run/user/$(id -u); export WAYLAND_DISPLAY=$(ls -1 "$XDG_RUNTIME_DIR" | grep -E "^wayland-[0-9]+$" | head -1);'
+
+# True when this content is the echo of something just synced the other way.
+#
+# Without it the two watchers feed each other forever: a host copy sets the
+# guest clipboard, the guest's watcher sees a new selection and sends it back,
+# that sets the host clipboard, the host's watcher sees a new selection... One
+# hash is enough, because a round trip is the only thing that produces the
+# same value twice in a row.
+clip_is_echo() {
+  local file=$1 h
+  h=$(sha256sum < "$file" | cut -d' ' -f1)
+  if [[ -f $CLIP_STATE ]] && [[ $(cat "$CLIP_STATE" 2>/dev/null) == "$h" ]]; then
+    return 0
+  fi
+  mkdir -p "$VM_DIR"
+  printf '%s\n' "$h" > "$CLIP_STATE"
+  return 1
+}
+
+# Invoked by `wl-paste --watch` on the host, with the new clipboard on stdin.
+# A separate entry point because --watch takes a command, not a shell snippet.
+clip_to_guest() {
+  local tmp; tmp=$(mktemp)
+  cat > "$tmp"
+  if ! clip_is_echo "$tmp"; then
+    # The content lands in a file in the guest before wl-copy is launched, and
+    # wl-copy is detached from the ssh session.
+    #
+    # Both halves are needed. wl-copy does not exit -- it stays alive to serve
+    # the selection it now owns -- so running it in the foreground wedges the
+    # ssh channel until something replaces the clipboard. And backgrounding it
+    # alone does not work either: ssh tears the channel down when the
+    # foreground command returns, so a detached wl-copy reading ssh's stdin
+    # gets nothing. Verified both failures before settling on this.
+    #
+    # A fixed path rather than mktemp, so nothing accumulates. Overwriting it
+    # under a live wl-copy is harmless: it has already read the content.
+    guest_ssh "$GUEST_WL_ENV"' f="$XDG_RUNTIME_DIR/omarchy-vm-clip"; cat > "$f"; (setsid wl-copy < "$f" >/dev/null 2>&1 &)' \
+      < "$tmp" 2>/dev/null || true
+  fi
+  rm -f "$tmp"
+}
+
+# Tidy up after the bridge. At top level, with globals and :- guards, because
+# nested inside cmd_clipboard it read that function's locals -- and a trap can
+# fire in a context where they are unset, which under `set -u` turned a clean
+# shutdown into "host_watch: unbound variable" after the work was already done.
+CLIP_HOST_PID=""
+CLIP_GUEST_PID=""
+CLIP_CLEANED=""
+clip_cleanup() {
+  # Once only. The trap is on INT and TERM as well as EXIT, and a Ctrl-C fires
+  # both -- which printed "clipboard bridge stopped" twice and re-ran the
+  # remote pkill for no reason.
+  #
+  # An `if`, not `[[ -n $CLIP_CLEANED ]] && return 0`: with the flag unset that
+  # AND-list evaluates to false, and under `set -e` a failing list as the last
+  # thing a trap handler runs takes the handler down with it. The first version
+  # of this guard silently skipped the entire cleanup -- same trap the comment
+  # at the end of setup/install.sh describes.
+  if [[ -n $CLIP_CLEANED ]]; then
+    return 0
+  fi
+  CLIP_CLEANED=1
+
+  kill "${CLIP_HOST_PID:-}" "${CLIP_GUEST_PID:-}" 2>/dev/null || true
+
+  # The guest-side `wl-paste --watch` outlives its ssh channel, so killing the
+  # local end is not enough -- without this, every run leaks another watcher
+  # into the guest.
+  #
+  # Matched on the emitter path, NOT on "wl-paste --watch". Omarchy runs two
+  # watchers of its own for the shell's clipboard-history plugin
+  # (shell/plugins/clipboard/capture.sh, one for text and one for images), and
+  # the broader pattern killed those too -- quietly breaking a guest feature on
+  # the way out of a command whose whole job at that point is to tidy up.
+  guest_ssh "pkill -f omarchy-vm-clip-emit >/dev/null 2>&1" 2>/dev/null || true
+  note "clipboard bridge stopped"
+}
+
+cmd_clipboard() {
+  local tmp
+  guest_running || die "no guest running"
+  command -v wl-paste >/dev/null && command -v wl-copy >/dev/null \
+    || die "wl-clipboard is not installed on the host"
+  guest_ssh 'command -v wl-copy >/dev/null && command -v wl-paste >/dev/null' 2>/dev/null \
+    || die "cannot reach the guest over ssh, or wl-clipboard is missing there"
+
+  # Start clean: a hash left over from a previous run would swallow the first
+  # copy of this one.
+  rm -f "$CLIP_STATE"
+  note "clipboard bridged both ways -- Ctrl-C to stop"
+
+  wl-paste --watch "$SELF" _clip-to-guest &
+  CLIP_HOST_PID=$!
+
+  # NUL-terminated, so the reader can tell one value from the next.
+  # `wl-paste --watch cat` alone concatenates them into a stream nothing can
+  # split again.
+  #
+  # The emitter is a file in the guest rather than an inline `sh -c`, because
+  # inline lost the escaping: the command crosses ssh's login shell and then
+  # the inner sh, and `printf \\000` arrived as `printf 000` -- which
+  # dutifully wrote the three characters 0, 0, 0 between values instead of a
+  # NUL byte, so the reader below blocked forever waiting for a delimiter that
+  # never came. A file has no quoting to get wrong.
+  guest_ssh "$GUEST_WL_ENV"' cat > "$XDG_RUNTIME_DIR/omarchy-vm-clip-emit"; chmod +x "$XDG_RUNTIME_DIR/omarchy-vm-clip-emit"' <<'EMITTER' 2>/dev/null || die "could not install the clipboard emitter in the guest"
+#!/bin/sh
+# Print one clipboard value, NUL-terminated. Called by wl-paste --watch.
+cat
+printf '\000'
+EMITTER
+
+  guest_ssh "$GUEST_WL_ENV"' wl-paste --watch "$XDG_RUNTIME_DIR/omarchy-vm-clip-emit"' 2>/dev/null |
+    while IFS= read -r -d '' value; do
+      tmp=$(mktemp)
+      printf '%s' "$value" > "$tmp"
+      clip_is_echo "$tmp" || wl-copy < "$tmp"
+      rm -f "$tmp"
+    done &
+  CLIP_GUEST_PID=$!
+
+  trap clip_cleanup EXIT INT TERM
+  wait
+}
+
 cmd_status() {
   echo "iso version   $ISO_VERSION"
   echo "vm dir        $VM_DIR"
@@ -880,6 +1055,7 @@ omarchy-vm -- a disposable Omarchy for testing this repo from nothing
   ssh [cmd...]        ssh into the guest
   luks-set            store the base disk's LUKS passphrase, so boots self-unlock
   unlock              answer an unlock prompt a running guest is already waiting on
+  clipboard           bridge the host and guest clipboards both ways
   console             attach to the guest serial console (Ctrl-] detaches)
   log                 print this boot's serial output, escape codes stripped
   screenshot [path]   capture the GUEST framebuffer via QMP (not the host screen)
@@ -919,6 +1095,9 @@ case ${1:-} in
   screenshot) shift; cmd_screenshot "$@" ;;
   stop)      shift; cmd_stop "$@" ;;
   user)      shift; cmd_user "$@" ;;
+  clipboard) shift; cmd_clipboard "$@" ;;
+  # Internal: the handler `wl-paste --watch` calls, not for humans.
+  _clip-to-guest) shift; clip_to_guest "$@" ;;
   authorize) shift; cmd_authorize "$@" ;;
   status)    shift; cmd_status "$@" ;;
   clean)     shift; cmd_clean "$@" ;;
