@@ -237,7 +237,7 @@ ensure_hypr_live() {
     return 0
   fi
 
-  if ! hyprctl reload >/dev/null 2>&1; then
+  if ! hypr_ctl reload >/dev/null 2>&1; then
     changed "  FAILED   hyprctl reload"
     conflicts=$((conflicts + 1))
     return 0

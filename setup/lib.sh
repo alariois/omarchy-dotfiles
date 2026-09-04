@@ -112,8 +112,50 @@ hypr_config_is_live() {
   [[ $(cat "$stamp") == "$(hypr_config_hash)" ]]
 }
 
+# Hyprland's control socket is findable without HYPRLAND_INSTANCE_SIGNATURE,
+# but only if we go and look. An ssh session has no such variable -- and ssh is
+# how this repo gets installed onto a test VM -- so hyprctl answers "is
+# hyprland running?" about a session that is running perfectly well, and
+# install.sh then skips the reload the Hyprland half of this repo depends on.
+#
+# That skip is not cosmetic. Hyprland's own file watcher auto-reloads the
+# moment ensure_hook rewrites input.lua, which happens in the HOOKS pass --
+# before the LINKS pass creates ~/.config/xkb. So that reload compiles a keymap
+# naming custom:* options which do not resolve yet, and xkb fails those
+# silently: kb_options reads back correctly while no remapping is in effect.
+# The reload at the END of install.sh is what fixes that, so it has to run.
+hypr_signature() {
+  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+    printf '%s\n' "$HYPRLAND_INSTANCE_SIGNATURE"
+    return 0
+  fi
+  local dir sig
+  dir="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/hypr"
+  [[ -d $dir ]] || return 1
+  # Newest first: a crashed session leaves its directory behind, and picking a
+  # stale one means talking to a socket nobody is listening on.
+  for sig in $(ls -1t "$dir" 2>/dev/null); do
+    if [[ -S "$dir/$sig/.socket.sock" ]]; then
+      printf '%s\n' "$sig"
+      return 0
+    fi
+  done
+  return 1
+}
+
 hyprland_running() {
-  command -v hyprctl >/dev/null 2>&1 && hyprctl version >/dev/null 2>&1
+  command -v hyprctl >/dev/null 2>&1 || return 1
+  local sig
+  sig=$(hypr_signature) || return 1
+  HYPRLAND_INSTANCE_SIGNATURE="$sig" hyprctl version >/dev/null 2>&1
+}
+
+# Every hyprctl call goes through this, so none of them can forget the
+# signature the way the bare `hyprctl reload` in install.sh used to.
+hypr_ctl() {
+  local sig
+  sig=$(hypr_signature) || return 1
+  HYPRLAND_INSTANCE_SIGNATURE="$sig" hyprctl "$@"
 }
 
 # ── FONTS ─────────────────────────────────────────────────────────────
