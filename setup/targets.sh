@@ -12,6 +12,7 @@
 #   tmux -> `#`  comments, `source-file "<path>"`
 #   lua  -> `--` comments, `dofile("<path>")`
 #   ini  -> `#`  comments, `[main]` + `include=<path>` (foot)
+#   xcompose -> `#` comments, `include "<path>"` (X Compose)
 #
 # The block is appended last, so an include that reassigns a setting the stock
 # file above it already set wins. That is how nvim/options.lua overrides
@@ -35,6 +36,21 @@ HOOKS=(
   "$HOME/.config/hypr/input.lua|lua|hypr/input.lua"
   "$HOME/.config/hypr/looknfeel.lua|lua|hypr/looknfeel.lua"
   "$HOME/.config/foot/foot.ini|ini|foot/foot.ini"
+
+  # A hook, not a link, though it was a link until a fresh 4.0.2 machine said
+  # otherwise. install/user/xcompose.sh does `tee ~/.XCompose` during the
+  # Omarchy install, writing an emoji include plus <space> <n>/<e> identity
+  # expansions from the installer's own answers -- so on every new machine this
+  # file exists and is Omarchy's, and the LINKS lane reported a CONFLICT
+  # forever. It only ever worked here because that tee runs at install and not
+  # on update, so an existing symlink survived and hid the problem.
+  #
+  # Appending is exactly right rather than merely tolerable: our block lands
+  # below Omarchy's, and a later Compose definition wins, so our <space> <n>
+  # overrides theirs. Verified -- `xkbcli compile-compose` on the hooked shape
+  # exits 0 with no warnings, and dumping the table shows <space> <n> resolving
+  # to ours, not the value Omarchy wrote.
+  "$HOME/.XCompose|xcompose|xcompose/XCompose"
 )
 
 LINKS=(
@@ -48,8 +64,6 @@ LINKS=(
   "$HOME/.config/nvim/lua/plugins/hypr-nav.lua|nvim/plugins/hypr-nav.lua"
   "$HOME/.config/nvim/lua/plugins/telescope-find-all.lua|nvim/plugins/telescope-find-all.lua"
 
-  # Ours outright: Omarchy ships no .XCompose.
-  "$HOME/.XCompose|xcompose/XCompose"
 
   # Gmail over IMAP for scripting, plus the helper that reads it. Omarchy
   # ships nothing under ~/.config/himalaya, and ~/.local/bin is already on the

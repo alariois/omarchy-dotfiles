@@ -1,14 +1,25 @@
 # Personal Compose-key expansions.
 #
-# Linked to ~/.XCompose by setup/install.sh. Omarchy ships no .XCompose of its
-# own, so this file is ours outright -- a link, not a hook.
+# Included from ~/.XCompose by a managed block setup/install.sh appends there.
+# A hook, not a link: Omarchy's own installer writes that file
+# (install/user/xcompose.sh does `tee ~/.XCompose`), so it is Omarchy's and a
+# symlink over it conflicts on every fresh machine. This file used to claim
+# Omarchy shipped no .XCompose; a 4.0.2 VM proved otherwise.
+#
+# Our block is appended below Omarchy's content, and for Compose the later
+# definition wins -- so the <space> <n> and <space> <e> below override the ones
+# Omarchy generates from the installer's answers, which is the point.
 #
 # Apply changes with `omarchy-restart-xcompose`. Already-running applications
 # only pick them up when they restart.
 
-# Omarchy's fast emoji access. This is 4.x's path; 3.x shipped it under
-# %H/.local/share/omarchy, which is why the copy on `main` points somewhere
-# that no longer exists.
+# Omarchy's fast emoji access. Its generated ~/.XCompose includes this too, so
+# on a current machine this line is redundant -- kept because it costs nothing
+# (verified: the doubled include compiles with no warning) and because a
+# machine whose ~/.XCompose predates that include still needs it.
+#
+# This is 4.x's path; 3.x shipped it under %H/.local/share/omarchy, which is
+# why the copy on `main` points somewhere that no longer exists.
 include "/usr/share/omarchy/default/xcompose"
 
 # Identification

@@ -73,8 +73,27 @@ ensure_hook() {
           # `foot --check-config`.
     ini)  open="# >>> $MARKER >>>";  close="# <<< $MARKER <<<"
           include=$'[main]\ninclude='"$abs" ;;
+          # X Compose syntax: the path is quoted, and %H expansion is not
+          # wanted here because $abs is already absolute.
+    xcompose) open="# >>> $MARKER >>>";  close="# <<< $MARKER <<<"
+          include="include \"$abs\"" ;;
     *)    echo "unknown comment style: $style" >&2; return 1 ;;
   esac
+
+  # A hook target that is a symlink into this repo is a target that used to be
+  # in LINKS. The cp below writes THROUGH a symlink on purpose, so proceeding
+  # would append an include of the payload to the payload itself -- a Compose
+  # file that includes itself, and the repo file overwritten with it. Refuse,
+  # and say what to do, rather than corrupt the thing being installed.
+  if [[ -L $target && $(readlink -f "$target") == "$DOTFILES"/* ]]; then
+    changed "  CONFLICT ${target/#"$HOME"/\~}   -> symlink into this repo, but this target is a hook now"
+    changed "           it was in LINKS before. Remove the link and re-run:"
+    changed "             rm ${target/#"$HOME"/\~}"
+    changed "           Nothing is lost: the payload is unchanged, and the block"
+    changed "           this writes instead just includes it."
+    conflicts=$((conflicts + 1))
+    return 0
+  fi
 
   tmp=$(mktemp)
   # Drop any previous block, keep everything else verbatim.
