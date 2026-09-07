@@ -162,3 +162,18 @@ o.window("^chrome-www\\.facebook\\.com__messages.*$", { workspace = "5" })
 hl.unbind("SUPER + SHIFT + C")
 o.bind("SUPER + SHIFT + C", "Google Calendar",
   "omarchy-launch-or-focus-webapp 'chrome-calendar\\.google\\.com__calendar' 'https://calendar.google.com/calendar'")
+
+-- YouTube (SUPER + SHIFT + Y, Omarchy's own binding) opens on workspace 6.
+--
+-- No bind or unbind here: Omarchy's default already launches and focuses the
+-- web app, and this repo wants only the workspace. Video is the one thing that
+-- should never share a workspace with what you are working on -- it is either
+-- what you are watching or it is in the way -- so it gets a workspace of its
+-- own, one past the chat corner on 5.
+--
+-- Matched with Omarchy's own pattern for this window rather than the
+-- `^chrome-...` shape used above, since default/hypr/apps/browser.lua already
+-- catches it as `^.+-youtube\.com__.*$` -- browser-agnostic, so it still holds
+-- if the default browser stops being Chromium. Not "6 silent", for the reason
+-- given in the WhatsApp block: pressing the key should take you to the video.
+o.window("^.+-youtube\\.com__.*$", { workspace = "6" })
