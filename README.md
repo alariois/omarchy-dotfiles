@@ -140,6 +140,8 @@ bin/msg-code                              one-time code extraction (linked)
 bin/msg-peek                              newest message in a floating window (linked)
 bin/msg-otp                               login code to clipboard, via toast (linked)
 bin/term-here                             SUPER+RETURN, file-manager aware (linked)
+bin/files-here                            SUPER+SHIFT+F, the mirror of it (linked)
+bin/tmux-cwd                              the pane on screen, for both (linked)
 nautilus/term-here.py                     the Nautilus half of it (linked)
 setup/targets.sh                          the delta table -- single source of truth
 setup/lib.sh                              freshness checks shared by the two below
@@ -293,38 +295,51 @@ one, so the same binary works against Omarchy 3 and 4.
 `make -C hypr-nav test` runs 46 unit tests; `make -C hypr-nav test-integration`
 drives a real tmux session for 14 more.
 
-**term-here.** SUPER+RETURN, extended to the file manager. Stock Omarchy binds
-the key to `omarchy-launch-terminal`, which opens the new terminal in the
-focused *terminal's* cwd and falls back to `$HOME` for every other window — a
-file manager included, though that is the one other window where "the directory
-I am looking at" is a real answer. `bin/term-here` answers it, and hands every
-other case straight back to `omarchy-launch-terminal`, so the key is unchanged
-everywhere else. With a file selected it also pre-types the path, relative to
+**term-here.** SUPER+RETURN and SUPER+SHIFT+F both mean "here", so both have to
+know where "here" is. Stock Omarchy asks `omarchy-cmd-terminal-cwd`, which
+reads the cwd of the focused *terminal's* child process and falls back to
+`$HOME` for everything else. That is right for a plain terminal and wrong for
+the two windows that come up most: a file manager, which is the one other
+window where "the directory I am looking at" is a real answer, and a terminal
+running tmux, whose child is the tmux client — not a shell, so the reading is
+discarded, and its directory is wherever tmux was first started anyway rather
+than the pane on screen.
+
+So `bin/term-here` answers those two and hands every other case straight back
+to `omarchy-launch-terminal`, and `bin/files-here` does the same for the file
+manager. With a file selected the terminal also pre-types the path, relative to
 the folder it is about to open:
 
-| Focused window | New terminal opens in | Pre-typed |
+| Focused window | Opens in | Pre-typed |
 |---|---|---|
 | Nautilus, nothing selected | the folder that window shows | — |
 | Nautilus, `env.yaml` selected | that folder | ` ./env.yaml`, cursor at column 0 |
+| a terminal running tmux | the active pane's cwd | — |
 | a terminal | that terminal's cwd (stock) | — |
 | anything else | `$HOME` (stock) | — |
 
-SUPER+SHIFT+F is the mirror of it, and needed nothing written: Omarchy already
-ships `omarchy-launch-nautilus-cwd` — `nautilus --new-window "$(omarchy-cmd-terminal-cwd)"`
-— parked on SUPER+ALT+SHIFT+F while the plain key opens `$HOME`.
-`hypr/bindings.lua` swaps which of the two sits on the key that gets pressed.
-No fallback is needed for a window that is not a terminal:
-`omarchy-cmd-terminal-cwd` answers `$HOME` for anything it cannot read a cwd
-from, which is what the key did before.
+The Nautilus rows apply to SUPER+RETURN only: SUPER+SHIFT+F over a file manager
+still opens `$HOME`, as it always did, since a second window on the same folder
+is not what the key is for.
 
-Three pieces, because neither half of it is reachable from where the keybinding
-sits:
+SUPER+SHIFT+F needed almost nothing written. Omarchy ships the launch as
+`omarchy-launch-nautilus-cwd` — `nautilus --new-window "$(omarchy-cmd-terminal-cwd)"`
+— parked on SUPER+ALT+SHIFT+F while the plain key opens `$HOME`, so
+`hypr/bindings.lua` only had to swap which of the two sits on the key that gets
+pressed. tmux is the one thing that command cannot answer, so `bin/files-here`
+runs it with `bin/tmux-cwd`'s directory when there is one and Omarchy's own
+answer otherwise. Omarchy's SUPER+ALT+SHIFT+F is left alone and now differs
+from the plain key only inside tmux.
+
+Four pieces, because none of what the keys need is reachable from where a
+keybinding sits:
 
 | Piece | Lane | Where |
 |---|---|---|
-| the binding | `HOOKS` | `hypr/bindings.lua` |
-| the launcher | `LINKS` | `bin/term-here` → `~/.local/bin/term-here` |
-| the location, and the pre-typed line | `LINKS` | `nautilus/term-here.py`, `shell/bashrc` |
+| the bindings | `HOOKS` | `hypr/bindings.lua` |
+| the launchers | `LINKS` | `bin/term-here`, `bin/files-here` → `~/.local/bin/` |
+| the tmux pane on screen | `LINKS` | `bin/tmux-cwd` |
+| the Nautilus location, and the pre-typed line | `LINKS` | `nautilus/term-here.py`, `shell/bashrc` |
 
 **Why an extension.** Nautilus publishes its location nowhere a keybinding can
 reach. Its D-Bus surface is `org.freedesktop.FileManager1` (`ShowItems`,
@@ -346,6 +361,54 @@ window would answer with the first one's directory.
 `nautilus-python` needs no `PACKAGES` entry — it is on Omarchy's own base list,
 right below `nautilus`. Nautilus loads extensions at startup, so the first
 install needs one `nautilus -q`.
+
+**Why the tmux server has to be asked.** A pane's directory exists nowhere a
+keybinding can read it either. `/proc` knows only the client's cwd, which is
+where tmux was started and never changes; the server holds the pane's, and only
+the server can be asked for it. The bridge from a Hyprland window to a tmux
+pane is the client process: the server knows every client's pid and session, a
+client's pid is a descendant of the terminal window's pid, and a session's
+current pane is the one its clients are showing. So `bin/tmux-cwd` asks each
+server for its clients and keeps the ones whose ancestry reaches the focused
+window — walking *up* from each client rather than down from the window, since
+there are a handful of clients and no reason to enumerate every process on the
+machine.
+
+Three details that are not obvious:
+
+- **The client's session by id, not by name.** `display-message -t "$session_id"`
+  resolves to that session's current window's active pane. A name would be
+  matched as a pattern; `$0` cannot be anything but the session it is.
+- **Not `display-message -c <client tty>`,** which looks like the more direct
+  question and is not: `-c` picks which client the message is *displayed* to and
+  leaves the format expanded against the most recently used client. On tmux
+  3.7c, with two clients attached to two sessions, both ttys answered with the
+  second session's pane. This was written that way first, and the two-client
+  test is what caught it.
+- **Every socket in the default directory,** so a server on `tmux -L name` is
+  found as well as the plain one. A server on `-S /some/other/path` is out of
+  reach and falls back to Omarchy's answer.
+
+When one window pid holds several clients that disagree — kitty shares a single
+pid across all of its windows, and so does `foot --server` — it refuses to
+guess and the caller falls back to Omarchy's answer, wrong in a predictable way
+rather than confidently wrong about which pane you are looking at. Clients on
+one session always agree, which is the common case for two panes of the same
+terminal.
+
+`tmux` needs no `PACKAGES` entry either — also on Omarchy's base list — and on
+a machine without it `bin/tmux-cwd` finds no socket directory to scan, so both
+keys are stock.
+
+Verified with `hl.dsp.exec_cmd`, which is what the binds run. From a foot
+window whose tmux pane was in `~/projects/superspotmono`, SUPER+RETURN gave a
+terminal there and SUPER+SHIFT+F a Nautilus window on the same folder; from a
+foot window without tmux and from a Chromium window, both keys landed exactly
+where `omarchy-cmd-terminal-cwd` said, unchanged. The resolver itself was
+checked against a throwaway server on its own socket: it follows the visible
+window, follows the active pane within it, follows a `cd` inside that pane, and
+exits 1 for a window with no client, a pid that does not exist, and two clients
+that disagree.
 
 **Why the terminal types to itself.** bash takes no argument for "start with
 this on the prompt": the only way to set the line is `READLINE_LINE`, and the

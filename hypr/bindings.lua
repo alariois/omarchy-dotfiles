@@ -181,9 +181,11 @@ o.window("^.+-youtube\\.com__.*$", { workspace = "6" })
 -- SUPER + RETURN: a terminal in the directory you are looking at.
 --
 -- Stock Omarchy already opens the new terminal in the focused *terminal's*
--- cwd. bin/term-here adds the one other window where "the directory I am
--- looking at" means something -- the file manager -- and hands every other
--- case straight back to omarchy-launch-terminal, so the key is unchanged
+-- cwd. bin/term-here adds the two windows where it gets that wrong: a file
+-- manager, where "the directory I am looking at" means something and Omarchy
+-- answers $HOME, and a terminal running tmux, where it answers the directory
+-- tmux was started in rather than the pane's. Every other case is handed
+-- straight back to omarchy-launch-terminal, so the key is unchanged
 -- everywhere else. With a file selected it also pre-types the relative path.
 --
 -- The unbind is required, not tidiness, for the same reason as the Gmail block
@@ -203,11 +205,14 @@ o.bind("SUPER + RETURN", "Terminal", "term-here")
 
 -- SUPER + SHIFT + F: the file manager, in the directory you are looking at.
 --
--- The mirror of SUPER+RETURN above, and the one case where nothing had to be
--- written: Omarchy already ships this as omarchy-launch-nautilus-cwd, which is
--- `nautilus --new-window "$(omarchy-cmd-terminal-cwd)"`. It is simply parked on
--- SUPER+ALT+SHIFT+F ("File manager (cwd)") while the plain key opens $HOME. All
--- this does is swap which of the two is on the key that gets pressed.
+-- The mirror of SUPER+RETURN above. Omarchy ships most of it as
+-- omarchy-launch-nautilus-cwd -- `nautilus --new-window
+-- "$(omarchy-cmd-terminal-cwd)"` -- parked on SUPER+ALT+SHIFT+F ("File manager
+-- (cwd)") while the plain key opens $HOME, so this block used to do nothing
+-- but swap which of the two sat on the key that gets pressed. tmux is what it
+-- cannot do: omarchy-cmd-terminal-cwd cannot see inside a pane, so bin/tmux-cwd
+-- answers that case and bin/files-here runs Omarchy's exact command on
+-- whichever of the two directories applies.
 --
 -- No fallback is needed for a window that is not a terminal:
 -- omarchy-cmd-terminal-cwd answers $HOME for anything it cannot read a cwd
@@ -216,7 +221,11 @@ o.bind("SUPER + RETURN", "Terminal", "term-here")
 -- The unbind is required for the usual reason -- see the Gmail block above --
 -- and the description stays "File manager" for the same reason SUPER+RETURN
 -- stays "Terminal": it says what the key is for, not how it works out the
--- directory. Omarchy's own SUPER+ALT+SHIFT+F is left alone, so it now runs the
--- same command; a duplicate, not a contradiction.
+-- directory. A bare command string for the reason given above, too: the script
+-- does its own `setsid uwsm-app --`.
+--
+-- Omarchy's own SUPER+ALT+SHIFT+F is left alone, and now differs from this key
+-- only inside tmux -- which is the one place to reach for if this ever answers
+-- a directory that looks wrong.
 hl.unbind("SUPER + SHIFT + F")
-o.bind("SUPER + SHIFT + F", "File manager", { omarchy = "nautilus-cwd" })
+o.bind("SUPER + SHIFT + F", "File manager", "files-here")

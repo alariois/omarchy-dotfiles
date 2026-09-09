@@ -1,0 +1,22 @@
+#!/bin/bash
+#
+# SUPER+SHIFT+F: the file manager in the directory you are looking at.
+#
+# This key needed no script of its own until tmux: Omarchy already ships
+# omarchy-launch-nautilus-cwd, which is
+# `nautilus --new-window "$(omarchy-cmd-terminal-cwd)"`, and hypr/bindings.lua
+# only had to move it from SUPER+ALT+SHIFT+F onto the plain key. But
+# omarchy-cmd-terminal-cwd cannot see inside tmux -- see bin/tmux-cwd for why
+# -- so a terminal running tmux fell through to $HOME, which is almost never
+# the directory on screen.
+#
+# So: the pane's directory when there is one, and otherwise the exact command
+# Omarchy's launcher runs, on the answer Omarchy's own reader gives. Every
+# window that is not a terminal with tmux in it is therefore unchanged,
+# $HOME included.
+
+set -euo pipefail
+
+dir=$(tmux-cwd) || dir=$(omarchy-cmd-terminal-cwd)
+
+exec setsid uwsm-app -- nautilus --new-window "$dir"

@@ -108,6 +108,19 @@ LINKS=(
   # so the first install of this needs one `nautilus -q` to take effect.
   "$HOME/.local/share/nautilus-python/extensions/term-here.py|nautilus/term-here.py"
   "$HOME/.local/bin/term-here|bin/term-here"
+
+  # The same question asked of tmux, which omarchy-cmd-terminal-cwd cannot see
+  # into: the child of a terminal running tmux is the tmux client, not a shell,
+  # so its reading is discarded and the answer falls back to $HOME.
+  # bin/tmux-cwd asks the tmux server instead, and both keys consult it first
+  # -- SUPER+RETURN through term-here, SUPER+SHIFT+F through files-here, which
+  # exists only because tmux is more than Omarchy's own launcher can answer.
+  #
+  # tmux needs no PACKAGES entry: it is on Omarchy's own base list, and
+  # bin/tmux-cwd is a no-op on a machine without it (no socket directory, so
+  # nothing to scan, so the answer is Omarchy's).
+  "$HOME/.local/bin/tmux-cwd|bin/tmux-cwd"
+  "$HOME/.local/bin/files-here|bin/files-here"
 )
 
 # SEEDS -- machine-local files this repo deliberately does not own. install.sh

@@ -17,6 +17,11 @@
 #
 # Nautilus cannot be asked where it is -- see nautilus/term-here.py for the
 # dead ends -- so that extension records it and this reads the record.
+#
+# A terminal running tmux cannot be asked either, for its own reasons: Omarchy
+# reads the cwd of the terminal's child process, and inside tmux that child is
+# the tmux client, whose directory is wherever tmux was first started rather
+# than where the pane on screen is. bin/tmux-cwd answers that case.
 
 set -euo pipefail
 
@@ -33,6 +38,13 @@ fi
 # window merely *about* Nautilus, which is the trap hypr/bindings.lua spells
 # out for Slack.
 if [[ $class != org.gnome.Nautilus ]]; then
+  # A terminal with tmux in it: the same launch omarchy-launch-terminal does,
+  # with the pane's directory instead of the one it works out for itself.
+  # Nothing is pre-typed -- the selected-file line is a file manager idea, and
+  # a pane already has a prompt of its own to type on.
+  if dir=$(tmux-cwd); then
+    exec setsid uwsm-app -- xdg-terminal-exec --dir="$dir" "$@"
+  fi
   exec omarchy-launch-terminal "$@"
 fi
 

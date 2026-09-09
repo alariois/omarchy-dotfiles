@@ -1,0 +1,125 @@
+#!/bin/bash
+#
+# Print the working directory of the tmux pane the focused window is showing.
+#
+# Exits 1 with nothing on stdout when the question has no answer here: the
+# focused window is not a terminal, or it holds no attached tmux client, or it
+# holds several that disagree. Every caller treats that as "ask Omarchy
+# instead", which is what makes SUPER+RETURN and SUPER+SHIFT+F unchanged
+# outside tmux.
+#
+# Why this is needed at all: omarchy-cmd-terminal-cwd reads
+# /proc/<child>/cwd of the terminal's last child and only trusts it if that
+# child's exe is listed in /etc/shells. Inside tmux the child is
+# `tmux: client`, which is not a shell, so the reading is discarded and the
+# answer becomes $HOME. Dropping the /etc/shells check would not help: a
+# client's own cwd is wherever tmux was first started from, which is not the
+# pane you are looking at and does not change when you switch panes. The
+# pane's directory lives in the tmux server, and only the server can be asked.
+#
+# The bridge from a Hyprland window to a tmux pane is the client process. The
+# server knows every client's pid and which session it is attached to; a
+# client's pid is a descendant of the terminal window's pid; and a session's
+# current pane is the one that session's clients are showing. So ask each
+# server for its clients and keep the ones whose ancestry reaches this window.
+#
+# Usage: tmux-cwd [terminal-pid]
+#
+# The pid argument exists so this can be checked against a window other than
+# the focused one, which is the only way to test it without pressing the key.
+
+set -euo pipefail
+
+pid=${1:-}
+if [[ -z $pid ]]; then
+  if active=$(hyprctl activewindow -j 2>/dev/null); then
+    pid=$(jq -r '.pid // empty' <<<"$active" 2>/dev/null) || pid=""
+  fi
+fi
+# Hyprland reports -1 for a window it has no pid for, and an empty object when
+# nothing is focused.
+[[ $pid =~ ^[0-9]+$ ]] && ((pid > 1)) || exit 1
+
+# Sets $parent to the parent of $1; fails if there is no such process. Reading
+# /proc/<pid>/stat rather than running `ps -o ppid=`, and assigning rather than
+# printing, so a walk up the tree costs no process at all.
+#
+# The fields are counted from the closing parenthesis rather than from the
+# start, because the comm field in between is unquoted and can hold spaces.
+# "tmux: client" is exactly such a name, so `awk '{print $4}'` on this file
+# would read the wrong column for the one process this script cares about most.
+parent_of() {
+  local stat rest state
+  read -r stat < "/proc/$1/stat" 2>/dev/null || return 1
+  rest=${stat#*') '}
+  read -r state parent _ <<<"$rest"
+  [[ ${parent:-} =~ ^[0-9]+$ ]]
+}
+
+# Does $1 sit under $2 in the process tree? Walking up from the client is
+# cheaper than walking down from the window: there are a handful of clients and
+# no need to enumerate every process on the machine. The hop limit is a cycle
+# guard rather than a real depth -- a terminal is two or three levels above its
+# client (foot -> bash -> tmux), and /proc cannot loop unless it is being read
+# while pids are reused underneath.
+descends_from() {
+  local p=$1 want=$2 hops=0
+  while [[ $p != "$want" ]]; do
+    ((hops++ < 64)) || return 1
+    parent_of "$p" || return 1
+    p=$parent
+    ((p > 1)) || return 1
+  done
+}
+
+# Every socket in the default directory, so a server on `tmux -L name` is
+# found as well as the plain one. A server on `-S /some/other/path` is not
+# reachable from here and falls back to Omarchy's answer; nothing in this
+# setup starts one. TMUX_TMPDIR is read for correctness rather than effect --
+# a keybinding runs with the session environment, where it is unset, and so is
+# the shell that starts tmux.
+socket_dir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
+
+shopt -s nullglob
+answers=()
+for socket in "$socket_dir"/*; do
+  [[ -S $socket ]] || continue
+
+  # A stale socket left by a dead server makes list-clients fail; the process
+  # substitution then yields no lines, which is the right outcome.
+  while read -r client_pid session_id; do
+    [[ $client_pid =~ ^[0-9]+$ && -n $session_id ]] || continue
+    descends_from "$client_pid" "$pid" || continue
+
+    # The client's session by id rather than by name, because a target is
+    # matched as a pattern and a session name is free text -- `$0` cannot be
+    # anything but the session it is. As a target-pane, a session resolves to
+    # its current window's active pane, which is the pane on screen.
+    # pane_current_path is the server's own live reading of that pane's
+    # directory -- the same value `new-window -c "#{pane_current_path}"` uses,
+    # and it follows a `cd` inside the pane.
+    #
+    # Deliberately not `display-message -c <client tty>`, which looks like the
+    # more direct question and is not: -c picks which client the message is
+    # displayed to, and leaves the format expanded against the most recently
+    # used client instead. On tmux 3.7c, with two clients attached to two
+    # sessions, both ttys answered with the second session's pane.
+    path=$(tmux -S "$socket" display-message -p -t "$session_id" '#{pane_current_path}' 2>/dev/null) || continue
+    [[ -d $path ]] || continue
+    answers+=("$path")
+  done < <(tmux -S "$socket" list-clients -F '#{client_pid} #{session_id}' 2>/dev/null)
+done
+
+((${#answers[@]})) || exit 1
+
+# One window can legitimately hold several clients -- two panes of the same
+# terminal each attached, say -- and they agree whenever they are on one
+# session, which is the common case. When they do not agree, the window pid
+# cannot tell them apart: kitty shares a single pid across all of its windows,
+# and so does `foot --server`. Refusing to guess leaves the caller with
+# Omarchy's answer, which is wrong in a predictable way rather than confidently
+# wrong about which pane you are looking at.
+mapfile -t unique < <(printf '%s\n' "${answers[@]}" | sort -u)
+((${#unique[@]} == 1)) || exit 1
+
+printf '%s\n' "${unique[0]}"
