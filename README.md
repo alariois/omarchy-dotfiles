@@ -139,6 +139,8 @@ bin/msgs                                  newest message(s), mail or SMS (linked
 bin/msg-code                              one-time code extraction (linked)
 bin/msg-peek                              newest message in a floating window (linked)
 bin/msg-otp                               login code to clipboard, via toast (linked)
+bin/term-here                             SUPER+RETURN, file-manager aware (linked)
+nautilus/term-here.py                     the Nautilus half of it (linked)
 setup/targets.sh                          the delta table -- single source of truth
 setup/lib.sh                              freshness checks shared by the two below
 setup/install.sh                          assert every block, link, build, and hook
@@ -290,6 +292,78 @@ one, so the same binary works against Omarchy 3 and 4.
 
 `make -C hypr-nav test` runs 46 unit tests; `make -C hypr-nav test-integration`
 drives a real tmux session for 14 more.
+
+**term-here.** SUPER+RETURN, extended to the file manager. Stock Omarchy binds
+the key to `omarchy-launch-terminal`, which opens the new terminal in the
+focused *terminal's* cwd and falls back to `$HOME` for every other window — a
+file manager included, though that is the one other window where "the directory
+I am looking at" is a real answer. `bin/term-here` answers it, and hands every
+other case straight back to `omarchy-launch-terminal`, so the key is unchanged
+everywhere else. With a file selected it also pre-types the path, relative to
+the folder it is about to open:
+
+| Focused window | New terminal opens in | Pre-typed |
+|---|---|---|
+| Nautilus, nothing selected | the folder that window shows | — |
+| Nautilus, `env.yaml` selected | that folder | ` ./env.yaml`, cursor at column 0 |
+| a terminal | that terminal's cwd (stock) | — |
+| anything else | `$HOME` (stock) | — |
+
+SUPER+SHIFT+F is the mirror of it, and needed nothing written: Omarchy already
+ships `omarchy-launch-nautilus-cwd` — `nautilus --new-window "$(omarchy-cmd-terminal-cwd)"`
+— parked on SUPER+ALT+SHIFT+F while the plain key opens `$HOME`.
+`hypr/bindings.lua` swaps which of the two sits on the key that gets pressed.
+No fallback is needed for a window that is not a terminal:
+`omarchy-cmd-terminal-cwd` answers `$HOME` for anything it cannot read a cwd
+from, which is what the key did before.
+
+Three pieces, because neither half of it is reachable from where the keybinding
+sits:
+
+| Piece | Lane | Where |
+|---|---|---|
+| the binding | `HOOKS` | `hypr/bindings.lua` |
+| the launcher | `LINKS` | `bin/term-here` → `~/.local/bin/term-here` |
+| the location, and the pre-typed line | `LINKS` | `nautilus/term-here.py`, `shell/bashrc` |
+
+**Why an extension.** Nautilus publishes its location nowhere a keybinding can
+reach. Its D-Bus surface is `org.freedesktop.FileManager1` (`ShowItems`,
+`ShowFolders` — all setters) plus `org.gtk.Actions`, whose window action states
+carry navigation commands and no path; the window title is the folder's display
+name, not a path. So the location has to come from inside the process.
+`nautilus/term-here.py` keeps no menu items and exists only for the callbacks:
+Nautilus rebuilds extension menus *eagerly*, on every selection change and
+every navigation rather than when a context menu opens, which makes
+`MenuProvider` a usable notification hook — and in Nautilus 50 the only one
+left, since `LocationWidgetProvider` is gone from the 4.1 API. It records to
+`$XDG_RUNTIME_DIR/omarchy-dotfiles/nautilus-location.json`, keyed by window
+title, which is the one identifier both sides can see: the callbacks carry no
+window handle, but `Gtk.Window.list_toplevels()` finds the active window from
+in-process and its title is byte-identical to the `title` Hyprland reports.
+Focus changes alone do not fire the callbacks, so without that key a second
+window would answer with the first one's directory.
+
+`nautilus-python` needs no `PACKAGES` entry — it is on Omarchy's own base list,
+right below `nautilus`. Nautilus loads extensions at startup, so the first
+install needs one `nautilus -q`.
+
+**Why the terminal types to itself.** bash takes no argument for "start with
+this on the prompt": the only way to set the line is `READLINE_LINE`, and the
+only way to reach `READLINE_LINE` is from inside a `bind -x` command — which
+means a key has to be pressed. So `shell/bashrc` has the terminal press it.
+`\e[5n` is a status request; the terminal answers `\e[0n` on the shell's own
+*input*, exactly as if it had been typed, and readline dispatches it like any
+other key sequence. The handler sets the line, puts the cursor at column 0, and
+unbinds itself so a later status reply cannot overwrite a command you are
+typing. The reply lands before the first prompt, while the tty is still echoing,
+so it arrives on screen as a literal `^[[0n` — hence the `\e7` before the
+request and `\e8\e[J` in the handler, which erase it and the prompt drawn under
+it while leaving anything printed above alone.
+
+The line reaches the new shell as an environment variable set *on the exec
+inside the terminal*, not exported by `term-here`: `uwsm-app` starts the
+terminal from the systemd user manager's environment, so anything exported
+outside is dropped on the way.
 
 **XCompose.** Split across two files because the repo is public. The tracked
 `xcompose/XCompose` holds the emoji include, the name/email/repo expansions,

@@ -177,3 +177,46 @@ o.bind("SUPER + SHIFT + C", "Google Calendar",
 -- if the default browser stops being Chromium. Not "6 silent", for the reason
 -- given in the WhatsApp block: pressing the key should take you to the video.
 o.window("^.+-youtube\\.com__.*$", { workspace = "6" })
+
+-- SUPER + RETURN: a terminal in the directory you are looking at.
+--
+-- Stock Omarchy already opens the new terminal in the focused *terminal's*
+-- cwd. bin/term-here adds the one other window where "the directory I am
+-- looking at" means something -- the file manager -- and hands every other
+-- case straight back to omarchy-launch-terminal, so the key is unchanged
+-- everywhere else. With a file selected it also pre-types the relative path.
+--
+-- The unbind is required, not tidiness, for the same reason as the Gmail block
+-- above: Omarchy binds this key in default/hypr/bindings/applications.lua and
+-- its o.bind() throws away the handle hl.bind() returns, so there is no object
+-- to call :set_enabled(false) on. Binding over it would leave *both*
+-- registered, and `hyprctl binds` would list two commands on SUPER+RETURN.
+--
+-- A bare command string rather than `{ launch = ... }`: the script does its own
+-- `setsid uwsm-app --`, exactly as omarchy-launch-terminal does, so wrapping it
+-- again here would nest one scope inside another.
+--
+-- Description kept as "Terminal" so `omarchy menu keybindings` reads the same
+-- as it always did.
+hl.unbind("SUPER + RETURN")
+o.bind("SUPER + RETURN", "Terminal", "term-here")
+
+-- SUPER + SHIFT + F: the file manager, in the directory you are looking at.
+--
+-- The mirror of SUPER+RETURN above, and the one case where nothing had to be
+-- written: Omarchy already ships this as omarchy-launch-nautilus-cwd, which is
+-- `nautilus --new-window "$(omarchy-cmd-terminal-cwd)"`. It is simply parked on
+-- SUPER+ALT+SHIFT+F ("File manager (cwd)") while the plain key opens $HOME. All
+-- this does is swap which of the two is on the key that gets pressed.
+--
+-- No fallback is needed for a window that is not a terminal:
+-- omarchy-cmd-terminal-cwd answers $HOME for anything it cannot read a cwd
+-- from, which is exactly what SUPER+SHIFT+F did before.
+--
+-- The unbind is required for the usual reason -- see the Gmail block above --
+-- and the description stays "File manager" for the same reason SUPER+RETURN
+-- stays "Terminal": it says what the key is for, not how it works out the
+-- directory. Omarchy's own SUPER+ALT+SHIFT+F is left alone, so it now runs the
+-- same command; a duplicate, not a contradiction.
+hl.unbind("SUPER + SHIFT + F")
+o.bind("SUPER + SHIFT + F", "File manager", { omarchy = "nautilus-cwd" })

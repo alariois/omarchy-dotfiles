@@ -92,6 +92,22 @@ LINKS=(
   # ~/.config/xkb before the system tree, which is how these work without root.
   # Omarchy puts nothing here, so the whole directory is safe to link.
   "$HOME/.config/xkb|xkb"
+
+  # SUPER+RETURN over a file manager: a terminal in the folder that window is
+  # showing, with the selected file pre-typed. Two halves, because Nautilus
+  # publishes its location nowhere a keybinding can reach -- the extension
+  # records it from in-process, the script reads the record.
+  #
+  # The extension dir is shared, not ours: Omarchy ships defaults for it in
+  # default/nautilus-python/extensions and two of them (localsend.py,
+  # transcode.py) are already installed here. So link the file, never the
+  # directory -- the same call as nvim/plugins/*.lua above.
+  #
+  # nautilus-python needs no PACKAGES entry: it is on Omarchy's own base list,
+  # right below nautilus itself. Nautilus loads extensions at startup though,
+  # so the first install of this needs one `nautilus -q` to take effect.
+  "$HOME/.local/share/nautilus-python/extensions/term-here.py|nautilus/term-here.py"
+  "$HOME/.local/bin/term-here|bin/term-here"
 )
 
 # SEEDS -- machine-local files this repo deliberately does not own. install.sh

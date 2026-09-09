@@ -10,3 +10,53 @@ set -o vi
 # The standalone config in nvim-chad/, linked to ~/.config/nvim-chad. Plain
 # `nvim` stays on Omarchy's LazyVim.
 alias nv="NVIM_APPNAME='nvim-chad' nvim"
+
+# Pre-typed command line, for the terminals bin/term-here opens.
+#
+# SUPER+RETURN over a file manager with a file selected should come up with
+# ` ./env.yaml` already on the prompt and the cursor at the start of the line,
+# so the command goes in front of it. bash takes no argument for that: the only
+# way to set the line is READLINE_LINE, and the only way to reach READLINE_LINE
+# is from inside a `bind -x` command -- which means a key has to be pressed.
+#
+# So we have the terminal press it. `\e[5n` is a status request (DSR); the
+# terminal answers `\e[0n` on this shell's *input*, exactly as if it had been
+# typed, and readline dispatches it like any other key sequence.
+#
+# The reply lands in the gap between here and the first prompt, while the tty
+# is still echoing, so it arrives on screen as a literal `^[[0n` -- and that is
+# what `\e7` here and `\e8\e[J` in the handler are for: save the cursor before
+# asking, then put it back and erase forward, which wipes the echo and the
+# prompt readline drew under it and leaves anything printed *above* alone. The
+# redisplay after the handler then draws the prompt where it should have been.
+# Only the reply that beats readline needs this; once readline is running, echo
+# is off and a later reply would not show at all.
+#
+# Bound in vi-insert because `set -o vi` above puts readline there for a fresh
+# line, and in emacs so this does not quietly stop working if that ever goes.
+# READLINE_POINT=0 is the cursor-at-the-start half; the leading space in the
+# line is bin/term-here's, and is what the cursor lands on. Vi insert mode is
+# already where a new line starts, so nothing has to switch modes.
+#
+# The binding removes itself once it has fired. Leaving it would mean any later
+# program that asks this terminal for its status gets its reply turned into an
+# overwritten command line.
+if [[ -n ${TERM_HERE_LINE-} ]]; then
+  __term_here_prefill() {
+    printf '\e8\e[J'
+    READLINE_LINE=$TERM_HERE_LINE
+    READLINE_POINT=0
+    local keymap
+    for keymap in vi-insert emacs; do
+      bind -m "$keymap" -r '"\e[0n"' 2>/dev/null
+    done
+    unset -v TERM_HERE_LINE
+  }
+
+  for __term_here_keymap in vi-insert emacs; do
+    bind -m "$__term_here_keymap" -x '"\e[0n": __term_here_prefill'
+  done
+  unset -v __term_here_keymap
+
+  printf '\e7\e[5n'
+fi

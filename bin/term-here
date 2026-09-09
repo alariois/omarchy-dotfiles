@@ -1,0 +1,89 @@
+#!/bin/bash
+#
+# SUPER+RETURN: a terminal in the directory you are looking at.
+#
+# Stock Omarchy binds the key to omarchy-launch-terminal, which opens the new
+# terminal in the *focused terminal's* cwd (omarchy-cmd-terminal-cwd reads
+# /proc/<shell>/cwd) and falls back to $HOME for anything else -- including a
+# file manager, which is the one other window where "the directory I am
+# looking at" is a real answer. This adds that case and delegates every other
+# one back to Omarchy, so the key keeps doing exactly what it did before
+# everywhere else.
+#
+# With a file selected it also pre-types the path, so the terminal comes up on
+# ` ./env.yaml` with the cursor at the start of the line, ready for the command
+# to put in front of it. See shell/bashrc for how the line gets there; the
+# leading space is deliberate, and is what the cursor sits on.
+#
+# Nautilus cannot be asked where it is -- see nautilus/term-here.py for the
+# dead ends -- so that extension records it and this reads the record.
+
+set -euo pipefail
+
+STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-dotfiles/nautilus-location.json"
+
+class=""
+title=""
+if active=$(hyprctl activewindow -j 2>/dev/null); then
+  class=$(jq -r '.class // empty' <<<"$active" 2>/dev/null) || class=""
+  title=$(jq -r '.title // empty' <<<"$active" 2>/dev/null) || title=""
+fi
+
+# Anchored on the class Nautilus actually sets. Unanchored would also catch a
+# window merely *about* Nautilus, which is the trap hypr/bindings.lua spells
+# out for Slack.
+if [[ $class != org.gnome.Nautilus ]]; then
+  exec omarchy-launch-terminal "$@"
+fi
+
+folder=""
+selection=()
+if [[ -r $STATE ]]; then
+  folder=$(jq -r --arg t "$title" '.windows[$t].folder // empty' "$STATE" 2>/dev/null) || folder=""
+  if [[ -n $folder ]]; then
+    mapfile -t selection < <(jq -r --arg t "$title" '.windows[$t].selection[]?' "$STATE" 2>/dev/null)
+  fi
+fi
+
+# No record for this window means the extension has not seen it: Nautilus was
+# already running when the extension was installed, or the folder is a URI with
+# no path (trash:///, a search on a remote mount). Hand back to Omarchy rather
+# than guessing -- its fallback for a non-terminal window is $HOME, which is
+# the same answer, arrived at honestly.
+if [[ ! -d $folder ]]; then
+  exec omarchy-launch-terminal "$@"
+fi
+
+# Relative to the folder we are about to cd into, which is what makes the
+# pre-typed path useful; anything outside it (a search hit from elsewhere)
+# keeps its absolute path. printf %q so a name with a space in it survives
+# being a shell word.
+line=""
+prefix=$folder
+[[ $prefix == / ]] || prefix="$folder/"
+for path in ${selection[@]+"${selection[@]}"}; do
+  case $path in
+    "$prefix"*) path="./${path#"$prefix"}" ;;
+  esac
+  line+=" $(printf %q "$path")"
+done
+
+if [[ -z $line ]]; then
+  # Same launch as omarchy-launch-terminal, with our directory instead of the
+  # one it works out for itself. setsid + uwsm-app keeps the window in its own
+  # systemd scope rather than parented to Hyprland, as every Omarchy launcher
+  # does.
+  exec setsid uwsm-app -- xdg-terminal-exec --dir="$folder"
+fi
+
+# The line reaches the new shell as an environment variable rather than an
+# argument, because ~/.bashrc is what has to see it and a shell takes no
+# argument for "start with this typed in". It cannot simply be exported here:
+# uwsm-app starts the terminal from the systemd user manager's environment, not
+# from this process's, so anything set out here is dropped on the way. Setting
+# it on the exec inside the terminal is what survives -- and `exec bash` with
+# no arguments and a tty on stdin is an ordinary interactive login-less shell,
+# so it reads ~/.bashrc and stays the direct child of the terminal (which is
+# what keeps omarchy-cmd-terminal-cwd working *from* this window).
+exec setsid uwsm-app -- xdg-terminal-exec --dir="$folder" -- \
+  bash -c 'TERM_HERE_LINE=$1 exec bash' term-here "$line"
