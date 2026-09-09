@@ -121,6 +121,26 @@ LINKS=(
   # nothing to scan, so the answer is Omarchy's).
   "$HOME/.local/bin/tmux-cwd|bin/tmux-cwd"
   "$HOME/.local/bin/files-here|bin/files-here"
+
+  # The workspace indicators in the bar, made monitor-aware. A clone of
+  # Omarchy's omarchy.workspaces, which is how the shell wants built-in widgets
+  # customised -- the packaged copy under $OMARCHY_PATH/shell/plugins is never
+  # to be edited, and a user plugin cannot shadow a built-in id
+  # (omarchy-plugin-catalog does `unique_by(.id)` over built-ins first, so the
+  # packaged one would win and ours be ignored). Hence the new id.
+  #
+  # ~/.config/omarchy/plugins is the user plugin dir and Omarchy writes nothing
+  # into it, so the whole directory is safe to link. omarchy-plugin-catalog
+  # walks it with `find -L`, so it follows the link.
+  #
+  # The other half of this cannot be tracked: the bar layout in
+  # ~/.config/omarchy/shell.json has to name alari.workspaces instead of
+  # omarchy.workspaces, and shell.json is Omarchy-owned JSON with no include
+  # mechanism, so it stays drift -- as it already is for the clock and
+  # omalink.phone. `omarchy refresh shell` resets it, and the bar then falls
+  # back to the packaged widget. Put it back with:
+  #   omarchy-plugin-enable alari.workspaces
+  "$HOME/.config/omarchy/plugins/alari.workspaces|omarchy-shell/workspaces"
 )
 
 # SEEDS -- machine-local files this repo deliberately does not own. install.sh

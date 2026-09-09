@@ -143,6 +143,7 @@ bin/term-here                             SUPER+RETURN, file-manager aware (link
 bin/files-here                            SUPER+SHIFT+F, the mirror of it (linked)
 bin/tmux-cwd                              the pane on screen, for both (linked)
 nautilus/term-here.py                     the Nautilus half of it (linked)
+omarchy-shell/workspaces/                 monitor-aware bar workspace markers (linked)
 setup/targets.sh                          the delta table -- single source of truth
 setup/lib.sh                              freshness checks shared by the two below
 setup/install.sh                          assert every block, link, build, and hook
@@ -427,6 +428,75 @@ The line reaches the new shell as an environment variable set *on the exec
 inside the terminal*, not exported by `term-here`: `uwsm-app` starts the
 terminal from the systemd user manager's environment, so anything exported
 outside is dropped on the way.
+
+**Bar workspaces.** Stock `omarchy.workspaces` renders one marker, on
+`Hyprland.focusedWorkspace` — a single global value — so every bar on a
+multi-monitor desk draws the identical row. The laptop bar claims the workspace
+focused on the external monitor is the current one, and says nothing about the
+workspace the laptop is actually showing. A bar surface exists per monitor, so
+`omarchy-shell/workspaces/` answers for its own screen instead:
+
+Three orthogonal channels carry three independent facts:
+
+| Channel | Says | How |
+|---|---|---|
+| shape | what is on screen | filled square = this monitor is showing it; outline square = another monitor is; plain digit = not on screen anywhere |
+| colour | where the keyboard is | accent = this monitor's workspace, and this monitor has focus |
+| opacity | which monitor owns it | full = this monitor's; faint = another monitor's; faintest = does not exist yet |
+
+Ownership is the third one because Hyprland binds a workspace to the output it
+was created on, and that is what decides where pressing the number takes you —
+worth saying on every bar, not just on the one that owns it. So on a desk where
+1 and 4 live on the external monitor and 2, 3, 5, 6, 7 on the laptop, the laptop
+bar shows 2/3/5/6/7 bright and 1/4 faint, and the external bar is its exact
+complement. A glance at either says which workspaces live on that screen, which
+one it is showing, which the others are showing, and which of them has the
+keyboard.
+
+The three opacity steps are named properties at the top of the file
+(`ownOpacity`, `foreignOpacity`, `ownerlessOpacity`) — `foreignOpacity` is the
+one worth tuning by eye. Foreign sits brighter than ownerless on purpose: a
+workspace another screen is holding is more real than one that does not exist,
+and the other way round reads as though an empty slot mattered more than a
+screenful of windows.
+
+On a single monitor it reduces to stock plus the accent — nothing is foreign,
+so nothing is dimmed for ownership.
+
+Nothing in the widget counts or names monitors, so a monitor plugged in later
+needs no restart: the bar host instantiates a surface per `Quickshell.screens`
+entry, and every lookup is a scan of Hyprland's own live monitor list. Verified
+with `hyprctl output create headless` — the new bar came up with its own marker
+and both existing bars grew a second outline marker for it, live.
+
+The monitor comes from `Hyprland.monitorFor(QsWindow.window.screen)` —
+`QsWindow.window` being the panel window the widget was instantiated into. If
+that cannot be resolved (before Hyprland reports its outputs, or a screen it
+does not know) the widget falls back to `Hyprland.focusedWorkspace`, which is
+stock behaviour and the right thing to degrade to. Accent is `Color.accent`,
+loaded from the theme's `colors.toml` and rebound on a theme switch;
+deliberately not `Color.bar.active`, which is shell.toml's "modules calling
+attention to themselves" colour (recording, alerts, updates) and red in most
+themes.
+
+**Why a clone.** The packaged widget under `$OMARCHY_PATH/shell/plugins` is
+never to be edited, and a user plugin cannot shadow a built-in id —
+`omarchy-plugin-catalog` does `unique_by(.id)` with built-ins first, so the
+packaged one wins and ours would be ignored. `omarchy plugin clone
+omarchy.workspaces` produces `alari.workspaces`, which is linked back into the
+repo. `moduleName` inside the QML stays `omarchy.workspaces`, as the clone
+leaves it, so the shell can route the widget's IPC through the manifest's
+`clonedFrom`.
+
+Two things this lane cannot do. The bar layout in
+`~/.config/omarchy/shell.json` has to name `alari.workspaces`, and shell.json
+is Omarchy-owned JSON with no include mechanism — so it stays drift, as it
+already is for the clock and `omalink.phone`. `omarchy refresh shell` resets
+it and the bar falls back to the packaged widget; put it back with
+`omarchy-plugin-enable alari.workspaces`. And because the live directory is a
+symlink into the repo, the shell's plugin watcher never sees writes through it:
+editing the QML does not hot-reload, and `omarchy-shell shell rescanPlugins` is
+not enough either. Run `omarchy restart shell`.
 
 **XCompose.** Split across two files because the repo is public. The tracked
 `xcompose/XCompose` holds the emoji include, the name/email/repo expansions,
