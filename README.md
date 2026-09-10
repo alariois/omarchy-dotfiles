@@ -294,7 +294,35 @@ dispatch` onto Lua, so the old `hyprctl dispatch movefocus l` string now parses
 as Lua and fails. `hypr-nav` emits the Lua form and falls back to the string
 one, so the same binary works against Omarchy 3 and 4.
 
-`make -C hypr-nav test` runs 46 unit tests; `make -C hypr-nav test-integration`
+**The pointer follows the pane.** Hyprland already warps to the centre of a
+window it focuses (`cursor:no_warps`), but it cannot see inside one — so a
+four-pane terminal left the pointer in the middle of the *window*, which is
+some other pane's territory. Wherever a motion lands in a tmux pane,
+`hypr-nav` corrects that to the centre of the pane: after a pane move inside
+one window, and after a window move that turns out to land on a terminal
+running tmux. The vim branch is deliberately excluded — that motion may be
+consumed by vim moving between its own splits, which is not a pane change and
+not something the pointer should follow. Vim calls back with `--from-vim` when
+it is at its edge, and that path warps.
+
+The mapping from cells to pixels is proportional, not pixels-per-cell: the
+pane's centre as a fraction of the terminal grid, applied to the window
+rectangle Hyprland reports. The terminal's padding and exact cell size never
+enter into it, so nothing here knows anything about foot, kitty or ghostty. The
+cost is being off by up to the padding — a few pixels — which does not matter
+for putting the pointer inside a pane. Two details that do matter: the grid is
+the *client's* rather than the window's, because a tmux window can be smaller
+than the client drawing it; and the status line's rows are subtracted, then
+added back only when `status-position` is `top`, which is what stops every
+pane being reported one row high.
+
+Landing in a window needs one more thing than landing in a pane: tmux's
+`focused` flag does not arrive until the terminal has processed its focus-in
+and told the server. That was measured at about 20 ms here, so the post-move
+lookup polls ten times at 20 ms and gives up quietly — the pointer then stays
+where Hyprland put it, which is the old behaviour rather than a wrong one.
+
+`make -C hypr-nav test` runs 56 unit tests; `make -C hypr-nav test-integration`
 drives a real tmux session for 14 more.
 
 **term-here.** SUPER+RETURN and SUPER+SHIFT+F both mean "here", so both have to

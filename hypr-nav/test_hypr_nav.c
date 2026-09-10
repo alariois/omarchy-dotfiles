@@ -158,6 +158,17 @@ static void test_parse_window_full(void)
     assert(w.pid == 2479196);
     assert(strcmp(w.class, "com.mitchellh.ghostty") == 0);
     assert(strcmp(w.addr, "0x562c07644c10") == 0);
+    assert(w.x == 6 && w.y == 6);
+    assert(w.w == 1188 && w.h == 663);
+}
+
+static void test_parse_window_missing_geometry(void)
+{
+    /* No at/size: navigation still works, the pointer just stays put. */
+    const char *json = "{\"pid\":42,\"class\":\"foot\"}";
+    WinInfo w;
+    assert(parse_active_window(json, &w) == 0);
+    assert(w.x == 0 && w.y == 0 && w.w == 0 && w.h == 0);
 }
 
 static void test_parse_window_missing_pid(void)
@@ -194,6 +205,115 @@ static void test_parse_window_large_pid(void)
     assert(w.pid == 9999999999L);
 }
 
+/* ── pane_center tests ─────────────────────────────────────────────── */
+
+/* The window this was measured against: foot at 1206,32 sized 1188x1312,
+ * showing a 154x79 grid whose tmux window is 78 rows under a status line at
+ * the top. Warping to these coordinates was checked against a screenshot. */
+static WinInfo measured_window(void)
+{
+    WinInfo w = { 0 };
+    w.x = 1206; w.y = 32; w.w = 1188; w.h = 1312;
+    return w;
+}
+
+static PaneGeom measured_geom(int left, int top, int cols, int rows)
+{
+    PaneGeom g = { 0 };
+    g.client_cols = 154; g.client_rows = 79; g.win_rows = 78;
+    g.pane_left = left; g.pane_top = top; g.pane_cols = cols; g.pane_rows = rows;
+    g.status_top = 1;
+    return g;
+}
+
+static void test_pane_center_bottom_right(void)
+{
+    WinInfo w = measured_window();
+    PaneGeom g = measured_geom(54, 39, 100, 39);
+    int x, y;
+    assert(pane_center(&w, &g, &x, &y) == 0);
+    assert(x == 2008 && y == 1020);
+}
+
+static void test_pane_center_top_left(void)
+{
+    WinInfo w = measured_window();
+    PaneGeom g = measured_geom(0, 0, 53, 36);
+    int x, y;
+    assert(pane_center(&w, &g, &x, &y) == 0);
+    /* Left of centre and in the top half — the pane it describes. */
+    assert(x > w.x && x < w.x + w.w / 2);
+    assert(y > w.y && y < w.y + w.h / 2);
+}
+
+static void test_pane_center_status_position_shifts_down(void)
+{
+    WinInfo w = measured_window();
+    PaneGeom top = measured_geom(0, 0, 154, 78);
+    PaneGeom bottom = top;
+    bottom.status_top = 0;
+    int tx, ty, bx, by;
+    assert(pane_center(&w, &top, &tx, &ty) == 0);
+    assert(pane_center(&w, &bottom, &bx, &by) == 0);
+    assert(tx == bx);           /* the status line costs rows, never columns */
+    assert(ty > by);            /* a status line on top pushes the pane down */
+}
+
+static void test_pane_center_single_pane_is_near_middle(void)
+{
+    WinInfo w = measured_window();
+    PaneGeom g = measured_geom(0, 0, 154, 78);
+    int x, y;
+    assert(pane_center(&w, &g, &x, &y) == 0);
+    /* One pane fills the window, so its centre is the window's, give or take
+     * the status line's single row. */
+    assert(x == w.x + w.w / 2);
+    assert(y > w.y + w.h / 2 - 20 && y < w.y + w.h / 2 + 20);
+}
+
+static void test_pane_center_rejects_nonsense(void)
+{
+    WinInfo w = measured_window();
+    PaneGeom g = measured_geom(0, 0, 154, 78);
+    int x, y;
+
+    PaneGeom no_grid = g; no_grid.client_cols = 0;
+    assert(pane_center(&w, &no_grid, &x, &y) == -1);
+
+    PaneGeom no_pane = g; no_pane.pane_rows = 0;
+    assert(pane_center(&w, &no_pane, &x, &y) == -1);
+
+    PaneGeom negative = g; negative.pane_left = -1;
+    assert(pane_center(&w, &negative, &x, &y) == -1);
+
+    WinInfo unmeasured = { 0 };   /* a window Hyprland reported no size for */
+    assert(pane_center(&unmeasured, &g, &x, &y) == -1);
+}
+
+static void test_pane_center_clamps_inside_the_window(void)
+{
+    /* A pane reported past the edge of its own grid is a reading we have
+     * misunderstood; the pointer must still land on this window. */
+    WinInfo w = measured_window();
+    PaneGeom g = measured_geom(500, 500, 100, 39);
+    int x, y;
+    assert(pane_center(&w, &g, &x, &y) == 0);
+    assert(x >= w.x && x <= w.x + w.w);
+    assert(y >= w.y && y <= w.y + w.h);
+}
+
+static void test_pane_center_taller_window_than_client(void)
+{
+    /* client_rows < win_rows would make status_rows negative. Treated as no
+     * status line rather than shifting the pointer upward out of the pane. */
+    WinInfo w = measured_window();
+    PaneGeom g = measured_geom(0, 0, 154, 78);
+    g.client_rows = 70;
+    int x, y;
+    assert(pane_center(&w, &g, &x, &y) == 0);
+    assert(y >= w.y && y <= w.y + w.h);
+}
+
 /* ── parse_tmux_client_line tests ──────────────────────────────────── */
 
 static void test_parse_tmux_line_focused(void)
@@ -202,7 +322,7 @@ static void test_parse_tmux_line_focused(void)
     char pane[32], win[32];
     long cpid;
     assert(parse_tmux_client_line(line, pane, sizeof(pane),
-                                  win, sizeof(win), &cpid) == 1);
+                                  win, sizeof(win), &cpid, NULL, 0) == 1);
     assert(cpid == 12345);
     assert(strcmp(pane, "%0") == 0);
     assert(strcmp(win, "@1") == 0);
@@ -214,7 +334,7 @@ static void test_parse_tmux_line_not_focused(void)
     char pane[32], win[32];
     long cpid;
     assert(parse_tmux_client_line(line, pane, sizeof(pane),
-                                  win, sizeof(win), &cpid) == 0);
+                                  win, sizeof(win), &cpid, NULL, 0) == 0);
 }
 
 static void test_parse_tmux_line_focused_utf8(void)
@@ -224,7 +344,7 @@ static void test_parse_tmux_line_focused_utf8(void)
     char pane[32], win[32];
     long cpid;
     assert(parse_tmux_client_line(line, pane, sizeof(pane),
-                                  win, sizeof(win), &cpid) == 1);
+                                  win, sizeof(win), &cpid, NULL, 0) == 1);
     assert(cpid == 98765);
     assert(strcmp(pane, "%3") == 0);
     assert(strcmp(win, "@2") == 0);
@@ -236,10 +356,34 @@ static void test_parse_tmux_line_malformed(void)
     long cpid;
     /* Too few fields */
     assert(parse_tmux_client_line("focused 123", pane, sizeof(pane),
-                                  win, sizeof(win), &cpid) == 0);
+                                  win, sizeof(win), &cpid, NULL, 0) == 0);
     /* Empty */
     assert(parse_tmux_client_line("", pane, sizeof(pane),
-                                  win, sizeof(win), &cpid) == 0);
+                                  win, sizeof(win), &cpid, NULL, 0) == 0);
+}
+
+static void test_parse_tmux_line_client_name(void)
+{
+    const char *line = "attached,focused,UTF-8 98765 %3 @2 /dev/pts/4\n";
+    char pane[32], win[32], client[64];
+    long cpid;
+    assert(parse_tmux_client_line(line, pane, sizeof(pane),
+                                  win, sizeof(win), &cpid,
+                                  client, sizeof(client)) == 1);
+    assert(strcmp(client, "/dev/pts/4") == 0);
+}
+
+static void test_parse_tmux_line_client_name_absent(void)
+{
+    /* Four fields is still the contract: the name is only wanted for the
+     * pointer warp, and a line without it describes a usable client. */
+    const char *line = "attached,focused 12345 %0 @1\n";
+    char pane[32], win[32], client[64];
+    long cpid;
+    assert(parse_tmux_client_line(line, pane, sizeof(pane),
+                                  win, sizeof(win), &cpid,
+                                  client, sizeof(client)) == 1);
+    assert(client[0] == '\0');
 }
 
 /* ── is_ancestor_of tests (mocked) ─────────────────────────────────── */
@@ -506,14 +650,26 @@ int main(void)
     RUN(test_parse_window_full);
     RUN(test_parse_window_missing_pid);
     RUN(test_parse_window_missing_class);
+    RUN(test_parse_window_missing_geometry);
     RUN(test_parse_window_empty);
     RUN(test_parse_window_large_pid);
+
+    printf("\npane_center:\n");
+    RUN(test_pane_center_bottom_right);
+    RUN(test_pane_center_top_left);
+    RUN(test_pane_center_status_position_shifts_down);
+    RUN(test_pane_center_single_pane_is_near_middle);
+    RUN(test_pane_center_rejects_nonsense);
+    RUN(test_pane_center_clamps_inside_the_window);
+    RUN(test_pane_center_taller_window_than_client);
 
     printf("\nparse_tmux_client_line:\n");
     RUN(test_parse_tmux_line_focused);
     RUN(test_parse_tmux_line_not_focused);
     RUN(test_parse_tmux_line_focused_utf8);
     RUN(test_parse_tmux_line_malformed);
+    RUN(test_parse_tmux_line_client_name);
+    RUN(test_parse_tmux_line_client_name_absent);
 
     printf("\nis_ancestor_of (mocked):\n");
     RUN(test_ancestor_direct_parent);
