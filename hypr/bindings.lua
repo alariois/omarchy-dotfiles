@@ -250,6 +250,34 @@ o.bind("SUPER + SHIFT + F", "File manager", "files-here")
 -- commands would have stayed live on the one key.
 o.bind("SUPER + BRACKETRIGHT", "Focus on next monitor", hl.dsp.focus({ monitor = "+1" }))
 
+-- SUPER + \: back to the workspace you came from.
+--
+-- The same dispatcher SUPER + CTRL + TAB already carries -- Omarchy's own
+-- "Former workspace", from default/hypr/bindings/tiling.lua -- moved onto a key
+-- that can be pressed with one hand, for the same reason SUPER + ] exists
+-- above. It is a toggle rather than a direction: `workspace previous` remembers
+-- where you were, so pressing it twice puts you back, and there is nothing to
+-- bind in reverse.
+--
+-- Not to be confused with the two neighbours already on TAB: SUPER + SHIFT +
+-- TAB is "Previous workspace", meaning one step down in numeric order (`e-1`),
+-- and SUPER + TAB is `e+1`. This key ignores the numbering entirely.
+--
+-- No unbind, as with SUPER + ] above: backslash is untouched in stock Omarchy.
+-- It appears in neither `hyprctl binds` nor the keybindings menu, and the only
+-- keycode-spelled chords in the tree are 20/21 (window resize), 34/35 (webcam
+-- overlay) and 201 (the menu key) -- so unlike SUPER + MINUS, nothing reaches
+-- this key under a name a plain-keysym unbind would miss.
+--
+-- Description kept identical to the stock binding's so `omarchy menu
+-- keybindings` shows the two keys as the one command.
+--
+-- Note that `previous` is global rather than per-monitor: it remembers the last
+-- workspace left on *any* monitor, so on a multi-head setup this can pull focus
+-- to the other screen. `previous_per_monitor` is the variant to swap in if that
+-- ever grates.
+o.bind("SUPER + BACKSLASH", "Former workspace", hl.dsp.focus({ workspace = "previous" }))
+
 -- SUPER + I: where would these keys open?
 --
 -- SUPER+RETURN and SUPER+SHIFT+F both work a directory out of the focused
