@@ -229,3 +229,23 @@ o.bind("SUPER + RETURN", "Terminal", "term-here")
 -- a directory that looks wrong.
 hl.unbind("SUPER + SHIFT + F")
 o.bind("SUPER + SHIFT + F", "File manager", "files-here")
+
+-- SUPER + ]: focus the next monitor.
+--
+-- The same dispatcher CTRL+ALT+TAB already carries -- Omarchy's own
+-- "Focus on next monitor", from default/hypr/bindings/tiling.lua -- moved onto
+-- a key that can be pressed with one hand. With two monitors "+1" is a toggle;
+-- with three it cycles, so there is no separate reverse binding here.
+--
+-- No unbind, unlike most of the blocks above: stock Omarchy leaves plain
+-- SUPER + BRACKETRIGHT free. Only SUPER + ALT + BRACKETRIGHT is taken ("Make
+-- webcam overlay larger"), and that is a different chord.
+--
+-- This key rather than SUPER + MINUS, which was the first attempt: Omarchy
+-- binds the -/= pair to horizontal window resize, and taking one half of it
+-- leaves the other half orphaned. Nothing here should cost a stock binding
+-- when a free key does the same job. Note that the resize row is spelled in
+-- keycodes upstream (`SUPER + code:20`), so unbinding it would have had to
+-- name it that way too -- "SUPER + MINUS" would not have matched, and both
+-- commands would have stayed live on the one key.
+o.bind("SUPER + BRACKETRIGHT", "Focus on next monitor", hl.dsp.focus({ monitor = "+1" }))
