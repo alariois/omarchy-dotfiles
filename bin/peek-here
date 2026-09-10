@@ -41,8 +41,25 @@ escape() {
 # `--hint=urgency:byte:2` relayed into a headline stops being text. This talks
 # to org.freedesktop.Notifications over busctl, where every value is one typed
 # parameter and can never become a flag.
-toast() { # <headline> <body> [urgency]
-  omarchy-notification-send -g "$GLYPH" ${3:+-u "$3"} "$1" "$2"
+#
+# --exec rides along as the toast's default action: clicking it, or pressing
+# SUPER+ALT+comma ("Invoke last notification"), puts the directory on the
+# clipboard and dismisses the toast. The shell runs that argv directly, with no
+# shell in between, so a directory with a space or a quote in it stays one
+# argument -- which is also why --exec has to come last and be written as
+# separate words rather than one quoted string.
+#
+# The clipboard gets the absolute path, not the ~-abbreviated one the toast
+# shows: the short form is only meaningful to a shell, and a path is worth
+# copying precisely so it can be pasted somewhere that is not one.
+toast() { # <headline> <body> [urgency] [path to copy on invoke]
+  local -a opts=(-g "$GLYPH") action=()
+  [[ -n ${3-} ]] && opts+=(-u "$3")
+  # After the two positionals, never before: omarchy-notification-send looks
+  # for --exec only once it has taken the headline and description, so an
+  # --exec earlier on the line would swallow them as its argv.
+  [[ -n ${4-} ]] && action=(--exec wl-copy "$4")
+  omarchy-notification-send "${opts[@]}" "$1" "$2" ${action[@]+"${action[@]}"}
 }
 
 printed=$(term-here --print 2>/dev/null) || printed=""
@@ -73,4 +90,4 @@ else
   body+="Files opens $(escape "$(tilde "$files_dir")")"
 fi
 
-toast "$(escape "$(tilde "$headline")")" "$body"
+toast "$(escape "$(tilde "$headline")")" "$body" "" "$headline"
