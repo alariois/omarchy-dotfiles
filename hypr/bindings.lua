@@ -249,3 +249,18 @@ o.bind("SUPER + SHIFT + F", "File manager", "files-here")
 -- name it that way too -- "SUPER + MINUS" would not have matched, and both
 -- commands would have stayed live on the one key.
 o.bind("SUPER + BRACKETRIGHT", "Focus on next monitor", hl.dsp.focus({ monitor = "+1" }))
+
+-- SUPER + I: where would these keys open?
+--
+-- SUPER+RETURN and SUPER+SHIFT+F both work a directory out of the focused
+-- window -- a tmux pane's cwd, a Nautilus folder, or whatever Omarchy's own
+-- reader makes of it -- and none of that is visible until a window appears.
+-- bin/peek-here asks both the same question they ask themselves and puts the
+-- answer in a toast, the shape SUPER+ALT+CTRL+M already uses for a keypress
+-- with no window of its own.
+--
+-- No unbind: SUPER + I is free in stock Omarchy. The only chord on the key is
+-- SUPER + CTRL + I ("Toggle locking on idle"), which is unrelated, so "i for
+-- info" carries no ambiguity. SUPER + U is the only wholly unbound letter left
+-- if this key is ever wanted for something else.
+o.bind("SUPER + I", "Peek at target directory", "peek-here")

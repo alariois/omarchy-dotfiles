@@ -25,6 +25,23 @@
 
 set -euo pipefail
 
+# --print reports the answer instead of acting on it, for bin/peek-here.
+# Every branch below routes its result through answer() rather than printing
+# for itself, so the peek cannot drift from the launch: it is the same code,
+# the same branch, and the same value that would have been passed to the
+# terminal a line later.
+print_only=false
+if [[ ${1:-} == --print ]]; then
+  print_only=true
+  shift
+fi
+
+answer() { # <directory> [pre-typed line]
+  $print_only || return 0
+  printf '%s\t%s\n' "$1" "${2-}"
+  exit 0
+}
+
 STATE="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/omarchy-dotfiles/nautilus-location.json"
 
 class=""
@@ -43,8 +60,10 @@ if [[ $class != org.gnome.Nautilus ]]; then
   # Nothing is pre-typed -- the selected-file line is a file manager idea, and
   # a pane already has a prompt of its own to type on.
   if dir=$(tmux-cwd); then
+    answer "$dir"
     exec setsid uwsm-app -- xdg-terminal-exec --dir="$dir" "$@"
   fi
+  answer "$(omarchy-cmd-terminal-cwd)"
   exec omarchy-launch-terminal "$@"
 fi
 
@@ -63,6 +82,7 @@ fi
 # than guessing -- its fallback for a non-terminal window is $HOME, which is
 # the same answer, arrived at honestly.
 if [[ ! -d $folder ]]; then
+  answer "$(omarchy-cmd-terminal-cwd)"
   exec omarchy-launch-terminal "$@"
 fi
 
@@ -79,6 +99,8 @@ for path in ${selection[@]+"${selection[@]}"}; do
   esac
   line+=" $(printf %q "$path")"
 done
+
+answer "$folder" "$line"
 
 if [[ -z $line ]]; then
   # Same launch as omarchy-launch-terminal, with our directory instead of the

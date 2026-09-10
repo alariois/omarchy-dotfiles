@@ -122,6 +122,12 @@ LINKS=(
   "$HOME/.local/bin/tmux-cwd|bin/tmux-cwd"
   "$HOME/.local/bin/files-here|bin/files-here"
 
+  # SUPER+I: the same question those two keys ask themselves, answered in a
+  # toast instead of a window. It resolves nothing of its own -- term-here and
+  # files-here each take --print -- so there is no third copy of the logic to
+  # drift from the two that matter.
+  "$HOME/.local/bin/peek-here|bin/peek-here"
+
   # The workspace indicators in the bar, made monitor-aware. A clone of
   # Omarchy's omarchy.workspaces, which is how the shell wants built-in widgets
   # customised -- the packaged copy under $OMARCHY_PATH/shell/plugins is never

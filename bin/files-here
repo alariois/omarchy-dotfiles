@@ -19,4 +19,12 @@ set -euo pipefail
 
 dir=$(tmux-cwd) || dir=$(omarchy-cmd-terminal-cwd)
 
+# --print reports the answer instead of acting on it, for bin/peek-here. It
+# sits after the resolution and before the launch on purpose: the peek reads
+# the same variable the launch does, so the two cannot disagree.
+if [[ ${1:-} == --print ]]; then
+  printf '%s\n' "$dir"
+  exit 0
+fi
+
 exec setsid uwsm-app -- nautilus --new-window "$dir"

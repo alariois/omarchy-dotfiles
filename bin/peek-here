@@ -1,0 +1,76 @@
+#!/bin/bash
+#
+# SUPER+I: say where SUPER+RETURN and SUPER+SHIFT+F would open, and open
+# nothing.
+#
+# Both keys work out a directory from the focused window -- a tmux pane's cwd,
+# a Nautilus window's folder, or whatever Omarchy's own reader makes of it --
+# and with a file selected the terminal also comes up with its path pre-typed.
+# All of that is invisible until you press the key and get a window. This is
+# the same question asked out loud.
+#
+# It does not work the answer out for itself. term-here and files-here each
+# take --print, which reports what they would use and stops before acting, so
+# a peek that disagrees with the launch is not possible: same script, same
+# branch, same value. Duplicating the resolution here would have been a third
+# copy free to drift from the two that matter.
+#
+# Shaped like msg-otp's toast, and for the same reason -- there is no window to
+# put this in, and a keypress that appears to do nothing is worse than no
+# keypress.
+
+set -uo pipefail
+
+# U+F07C, an open folder.
+GLYPH=""
+
+tilde() { printf '%s' "${1/#"$HOME"/\~}"; }
+
+# The notification daemon renders the body as Pango markup -- verified by
+# sending one: <b> and <i> came back bold and italic. These strings are file
+# paths, so a name with a < in it would be swallowed as an unclosed tag and
+# take the rest of the line with it.
+escape() {
+  local text=${1//&/&amp;}
+  text=${text//</&lt;}
+  printf '%s' "${text//>/&gt;}"
+}
+
+# omarchy-notification-send rather than notify-send, which its own source is
+# emphatic about: notify-send parses its argv, so a *filename* like
+# `--hint=urgency:byte:2` relayed into a headline stops being text. This talks
+# to org.freedesktop.Notifications over busctl, where every value is one typed
+# parameter and can never become a flag.
+toast() { # <headline> <body> [urgency]
+  omarchy-notification-send -g "$GLYPH" ${3:+-u "$3"} "$1" "$2"
+}
+
+printed=$(term-here --print 2>/dev/null) || printed=""
+term_dir=${printed%%$'\t'*}
+term_line=${printed#*$'\t'}
+
+files_dir=$(files-here --print 2>/dev/null) || files_dir=""
+
+if [[ -z $term_dir && -z $files_dir ]]; then
+  toast "Nowhere" "Neither key could read the focused window" critical
+  exit 1
+fi
+
+# Normally identical. They can differ honestly -- files-here has no Nautilus
+# branch, so over a file manager the terminal follows the folder on screen
+# while the file manager falls back to Omarchy's answer -- and saying so is
+# most of the point of this key.
+headline=$term_dir
+[[ -n $headline ]] || headline=$files_dir
+
+body=""
+# term_line already starts with the space it puts in front of the path, which
+# is why there is none after "types".
+[[ -n $term_line ]] && body+="Terminal types$(escape "$term_line")"$'\n'
+if [[ $files_dir == "$term_dir" ]]; then
+  body+="Terminal and Files open here"
+else
+  body+="Files opens $(escape "$(tilde "$files_dir")")"
+fi
+
+toast "$(escape "$(tilde "$headline")")" "$body"
