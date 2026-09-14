@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+#
+# leave-peek -- when to leave for the train, in a floating window.
+#
+# Bound to SUPER + ALT + L in hypr/bindings.lua, which launches a terminal
+# with --app-id=leave-peek and floats it by that id. Not useful on its own,
+# though running it in any terminal works fine. Shaped deliberately like
+# msg-peek: same window trick, same pager, same way out.
+#
+# Arguments pass straight through to `leave`, so a second binding for a
+# different journey needs no second script -- see the --to example in
+# bindings.lua.
+#
+# The window opens before the lookup starts, so the keypress always visibly
+# does something. `leave` is about half a second when the caches are warm and
+# several seconds when they are not, and a window that appears only afterwards
+# reads as a dropped keypress.
+
+set -uo pipefail
+
+clear
+printf '\n  Checking departures…\n'
+
+# Stderr is folded into the body on purpose. leave's failures are one-liners
+# meant to be read ("no trains to Aegviidu left today"), and in a window that
+# closes with the process there is nowhere else for them to go.
+if ! out=$(leave --table --color=always "$@" 2>&1); then
+  out=$'Could not work out when to leave.\n\n'$out
+fi
+
+clear
+# Same flags as msg-peek, for the same reasons: -P pins the hint so it cannot
+# scroll away, -c repaints from the top whether or not this TERM has an
+# alternate screen, -~ blanks the tilde column past end of file, and
+# --quit-on-intr lets Ctrl-C close it as well as q.
+#
+# -S is the one addition. The table is 83 columns and the window is sized to
+# fit it, but a narrower window, a bigger font or a longer stop name would
+# wrap every row into two and destroy the alignment that makes it readable.
+# Better to let a rare long line run off the edge than to mangle every line.
+printf '%s\n' "$out" | less -R -S -c -~ --quit-on-intr -Ps'  q to close '

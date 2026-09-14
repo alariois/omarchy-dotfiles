@@ -148,6 +148,29 @@ LINKS=(
   # drift from the two that matter.
   "$HOME/.local/bin/peek-here|bin/peek-here"
 
+  # When to walk out the door: the 85 out of Löwenruh, the Aegviidu train out
+  # of Balti jaam, or the two chained into the one time that matters.
+  #
+  # Three names, one file. leave-bus and leave-train are symlinks to leave in
+  # the repo, and the tool picks its behaviour from the name it was called as.
+  # Three copies of the same SIRI parsing and the same GraphQL would be three
+  # places for the timetable handling to drift apart; argv[0] is the cheapest
+  # way to avoid that without inventing an importable library under bin/,
+  # which nothing else here does. A link to a link resolves fine.
+  #
+  # No PACKAGES entry: stdlib Python only, and python is already listed there
+  # for msg-code's sake. Neither upstream needs a key -- transport.tallinn.ee
+  # serves the SIRI feed as plain CSV and api.peatus.ee its GraphQL open --
+  # so there is no secret here either.
+  "$HOME/.local/bin/leave|bin/leave"
+  "$HOME/.local/bin/leave-bus|bin/leave-bus"
+  "$HOME/.local/bin/leave-train|bin/leave-train"
+
+  # The floating-window front end for it, bound to SUPER+ALT+L. A separate
+  # script rather than a longer bind string because the binding needs a
+  # terminal that stays open: `leave` prints and exits, so a bare -e leave
+  # would flash a window and close it.
+  "$HOME/.local/bin/leave-peek|bin/leave-peek"
 
   # The workspace indicators in the bar, made monitor-aware. A clone of
   # Omarchy's omarchy.workspaces, which is how the shell wants built-in widgets

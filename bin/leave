@@ -1,0 +1,837 @@
+#!/usr/bin/env python3
+"""
+leave -- when to walk out the door.
+
+Three tools in one file, picked by the name it is run as:
+
+    leave-bus     the next 85s out of Löwenruh, and when to leave for each
+    leave-train   the next Aegviidu trains out of Tallinn, and likewise
+    leave         both chained -- the next train you can still catch, the bus
+                  that gets you to it, and the one time that matters: when to
+                  put your shoes on
+
+The defaults are one specific commute (Löwenruh -> Balti jaam on the 85,
+then Tallinn -> Aegviidu by rail), but every leg is overridable; see --help.
+
+WHERE THE NUMBERS COME FROM
+
+Buses: transport.tallinn.ee's SIRI feed, the same one the live departure
+boards use. It is plain CSV over HTTP with no key:
+
+    https://transport.tallinn.ee/siri-stop-departures.php?stopid=<SiriID>
+
+It carries real predictions -- a late trolley shows up late -- but it only
+looks about an hour ahead. Past that horizon this falls back to the schedule
+(see below) and says so, rather than claiming the bus does not run.
+
+Trains, and bus schedule beyond the SIRI horizon: api.peatus.ee, the Estonian
+Digitransit/OpenTripPlanner instance. GraphQL, also no key. It carries the
+ELRON feed, so Tallinn -> Aegviidu comes from the same timetable elron.ee
+publishes.
+
+Not elron.pilet.ee, which is what you would reach for first. That site is an
+Angular app whose API base is injected at runtime and is not in the bundle;
+every path it hints at falls through to the SPA shell. Digitransit serves the
+same ELRON GTFS openly, so there is nothing to scrape and nothing to log in to.
+
+THE TWO STOP NUMBERINGS
+
+The same physical stop has two ids, and they are not related:
+
+    Löwenruh, Balti jaam direction = SiriID 6288 = estonia:150408
+
+SIRI needs the first, Digitransit the second. They are reconciled by
+coordinates -- data/stops.txt gives the SIRI stop a lat/lon, and a radius
+query finds the Digitransit stop 7 m away. That is why --stop takes a SIRI
+id or a name and everything else follows from it.
+
+WHY TRIPS, NOT HEADSIGNS
+
+A train to Aegviidu is not only a train whose sign says Aegviidu. The 17:05
+to Tartu stops there too, and the 16:32 to Narva does not, because it is an
+express. So destinations are matched against the stops a trip actually makes,
+which is what the elron.ee search does and what headsign matching would get
+wrong in both directions.
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+TZ = ZoneInfo("Europe/Tallinn")
+
+SIRI_URL = "https://transport.tallinn.ee/siri-stop-departures.php"
+STOPS_URL = "https://transport.tallinn.ee/data/stops.txt"
+OTP_URL = "https://api.peatus.ee/routing/v1/routers/estonia/index/graphql"
+
+# The commute this was written for. Every one of these is overridable.
+DEFAULT_BUS_STOP = "6288"  # Löwenruh, the platform the 85 leaves for Balti jaam
+DEFAULT_LINE = "85"
+DEFAULT_INTERCHANGE = "Balti jaam"
+DEFAULT_TRAIN_FROM = "estonia:10137"  # Tallinn; 10138 is the arrivals platform
+DEFAULT_TRAIN_TO = "Aegviidu"
+DEFAULT_WALK = 10
+DEFAULT_TRANSFER = 5
+
+# stops.txt is 200 KB and changes a few times a year. A day is plenty, and it
+# keeps a tool that may be bound to a key from fetching it on every press.
+CACHE_TTL = 24 * 3600
+CACHE_DIR = os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "leave"
+)
+
+TIMEOUT = 20
+
+# transport.tallinn.ee returns 403 to the default Python-urllib agent, by name.
+# This is an honest identifier rather than a browser string: the point is to be
+# let through, not to pretend to be something else.
+USER_AGENT = "leave/1 (+https://github.com/omarchy-dotfiles; personal timetable CLI)"
+
+
+class Failed(Exception):
+    """Anything the user should see as a one-line error rather than a traceback."""
+
+
+# --- fetching ---------------------------------------------------------------
+
+
+def http(url, data=None, headers=None):
+    headers = dict(headers or {})
+    headers.setdefault("User-Agent", USER_AGENT)
+    req = urllib.request.Request(url, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as exc:
+        raise Failed(f"{url} returned HTTP {exc.code}")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise Failed(f"cannot reach {url}: {exc}")
+
+
+def graphql(query):
+    body = json.dumps({"query": query}).encode()
+    raw = http(OTP_URL, body, {"Content-Type": "application/json"})
+    try:
+        doc = json.loads(raw)
+    except ValueError:
+        raise Failed("api.peatus.ee returned something that is not JSON")
+    if "errors" in doc:
+        raise Failed("api.peatus.ee: " + json.dumps(doc["errors"])[:300])
+    return doc["data"]
+
+
+def cached(name, url):
+    """Fetch url, but reuse a copy on disk for CACHE_TTL seconds."""
+    path = os.path.join(CACHE_DIR, name)
+    try:
+        if time.time() - os.path.getmtime(path) < CACHE_TTL:
+            with open(path, "rb") as fh:
+                return fh.read()
+    except OSError:
+        pass
+    blob = http(url)
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = f"{path}.{os.getpid()}"
+        with open(tmp, "wb") as fh:
+            fh.write(blob)
+        os.replace(tmp, path)  # atomic, so a killed run never leaves a half file
+    except OSError:
+        pass  # a cold cache every time is slow, not wrong
+    return blob
+
+
+# --- time -------------------------------------------------------------------
+
+
+def midnight(day=None):
+    day = day or datetime.now(TZ).date()
+    return datetime(day.year, day.month, day.day, tzinfo=TZ)
+
+
+def hhmm(dt):
+    return dt.strftime("%H:%M") if dt else None
+
+
+def dur(minutes):
+    """55 -> '55m', 178 -> '2h58'. Long train legs are unreadable in minutes."""
+    minutes = int(minutes)
+    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h{minutes % 60:02d}"
+
+
+def rel_str(minutes):
+    """Signed and in h/m: '+12m', '-8m', '+6h02'. Bare minutes stop reading
+    as a duration somewhere around the hundred mark."""
+    return ("+" if minutes >= 0 else "-") + dur(abs(minutes))
+
+
+def rel(dt, now):
+    """'in 7 min' as a plain integer, negative if it has already gone."""
+    return int((dt - now).total_seconds() // 60)
+
+
+# --- Tallinn stops ----------------------------------------------------------
+
+
+def tallinn_stops():
+    """data/stops.txt as dicts. Semicolon separated, first line a header."""
+    text = cached("stops.txt", STOPS_URL).decode("utf-8-sig", "replace")
+    out = []
+    for line in text.splitlines()[1:]:
+        f = line.split(";")
+        # Trailing empty fields are omitted, not left empty: the Löwenruh
+        # platform the 85 leaves from is a five-field row with no name at all.
+        if len(f) < 4 or not f[1]:
+            continue  # no SiriID means nothing live can be asked about it
+        try:
+            # Coordinates are stored as integers scaled by 1e5, not 1e6.
+            lat, lon = int(f[2]) / 1e5, int(f[3]) / 1e5
+        except ValueError:
+            continue
+        name = f[5] if len(f) > 5 else ""
+        out.append({"code": f[0], "siri": f[1], "lat": lat, "lon": lon, "name": name})
+    return out
+
+
+def resolve_bus_stop(spec):
+    """A SiriID, a stop code like 00148-1, or a stop name -> one stop dict."""
+    stops = tallinn_stops()
+    for s in stops:
+        if spec == s["siri"] or spec == s["code"]:
+            return s
+    hits = [s for s in stops if s["name"].lower() == spec.lower()]
+    if not hits:
+        hits = [s for s in stops if spec.lower() in s["name"].lower()]
+    if not hits:
+        raise Failed(f"no Tallinn stop matches {spec!r}")
+    if len(hits) > 1:
+        # Several platforms share a name; the caller has to say which way.
+        listed = ", ".join(f"{h['siri']} ({h['name']})" for h in hits[:6])
+        raise Failed(
+            f"{spec!r} matches {len(hits)} platforms -- pass a SiriID: {listed}"
+        )
+    return hits[0]
+
+
+def otp_stop_near(lat, lon):
+    """The Digitransit stop standing on the same pavement as a SIRI one."""
+    data = graphql(
+        f"{{ stopsByRadius(lat:{lat}, lon:{lon}, radius:100) "
+        f"{{ edges {{ node {{ distance stop {{ gtfsId name }} }} }} }} }}"
+    )
+    edges = (data.get("stopsByRadius") or {}).get("edges") or []
+    if not edges:
+        raise Failed(f"no Digitransit stop within 100 m of {lat},{lon}")
+    return edges[0]["node"]["stop"]
+
+
+# --- buses ------------------------------------------------------------------
+
+
+def siri_departures(siri_id):
+    """
+    Parse the SIRI CSV. Shape:
+
+        Transport,RouteNum,Expected,Scheduled,<now>,version...
+        stop,<SiriID>
+        trol,85,55878,55868,Balti jaam,391,
+
+    Times are seconds since midnight and can exceed 86400 after midnight.
+    The trailing flag is undocumented; it is passed through untouched rather
+    than guessed at.
+    """
+    raw = http(f"{SIRI_URL}?stopid={siri_id}").decode("utf-8", "replace")
+    lines = [l for l in raw.splitlines() if l.strip()]
+    if not lines:
+        raise Failed(f"SIRI returned nothing for stop {siri_id}")
+    head = lines[0].split(",")
+    try:
+        now_s = int(head[4])
+    except (IndexError, ValueError):
+        raise Failed("SIRI header did not carry a clock; the format has changed")
+    base = midnight()
+    out = []
+    for line in lines[2:]:
+        f = line.split(",")
+        if len(f) < 6:
+            continue
+        try:
+            expected, scheduled = int(f[2]), int(f[3])
+        except ValueError:
+            continue
+        out.append(
+            {
+                "mode": f[0],
+                "line": f[1],
+                "when": base + timedelta(seconds=expected),
+                "scheduled": base + timedelta(seconds=scheduled),
+                "headsign": f[4],
+                "flag": f[6] if len(f) > 6 else "",
+                "source": "siri",
+                # A prediction that differs from the timetable is proof a real
+                # vehicle is being tracked. Equality proves nothing either way,
+                # so this under-claims rather than over-claims.
+                "realtime": expected != scheduled,
+            }
+        )
+    return base + timedelta(seconds=now_s), out
+
+
+def otp_bus_departures(otp_stop, line, interchange, start, count, time_range=86400):
+    """
+    Scheduled departures of `line`, each with its arrival at `interchange`.
+
+    numberOfDepartures counts every line at the stop, not just ours -- four
+    other routes call here -- so asking for the whole day costs four times
+    what it looks like. `time_range` lets the caller stop at the last train
+    it actually cares about instead.
+    """
+    data = graphql(
+        f'{{ stop(id:"{otp_stop}") {{ name stoptimesWithoutPatterns('
+        f"startTime:{int(start.timestamp())}, timeRange:{int(time_range)}, "
+        f"numberOfDepartures:{count}, omitNonPickups:true) "
+        f"{{ scheduledDeparture serviceDay headsign "
+        f"trip {{ route{{shortName}} stoptimes {{ scheduledArrival stop{{name}} }} }} "
+        f"}} }} }}"
+    )
+    stop = data.get("stop")
+    if not stop:
+        raise Failed(f"Digitransit knows no stop {otp_stop}")
+    out = []
+    for st in stop.get("stoptimesWithoutPatterns") or []:
+        if st["trip"]["route"]["shortName"] != line:
+            continue
+        hit = next(
+            (
+                s
+                for s in st["trip"]["stoptimes"]
+                if s["stop"]["name"].lower().startswith(interchange.lower())
+            ),
+            None,
+        )
+        if not hit:
+            continue  # this run of the line does not reach the interchange
+        day = datetime.fromtimestamp(st["serviceDay"], TZ)
+        out.append(
+            {
+                "line": line,
+                "when": day + timedelta(seconds=st["scheduledDeparture"]),
+                "arrival": day + timedelta(seconds=hit["scheduledArrival"]),
+                "headsign": st["headsign"],
+                "realtime": False,
+                "source": "schedule",
+            }
+        )
+    return out
+
+
+def bus_departures(stop, line, interchange, count, now, until=None):
+    """
+    Live departures where SIRI has them, schedule past its horizon.
+
+    Ride time comes from the schedule either way: SIRI says when the bus
+    leaves, never when it arrives. Using the median of the scheduled runs
+    keeps one unusually slow rush-hour trip from skewing every estimate.
+    """
+    # Cover only as far as the caller needs, but always at least the SIRI
+    # horizon, or the live rows would have nothing to be checked against.
+    span = 86400 if until is None else max(3600, (until - now).total_seconds())
+    want = 80 if until is None else 600
+    otp_stop = otp_stop_near(stop["lat"], stop["lon"])
+    # Some platforms are unnamed in stops.txt; Digitransit names all of them.
+    stop.setdefault("name", "")
+    if not stop["name"]:
+        stop["name"] = otp_stop["name"]
+    scheduled = otp_bus_departures(
+        otp_stop["gtfsId"], line, interchange, now, want, span
+    )
+    if not scheduled:
+        raise Failed(
+            f"line {line} does not run from {stop['name'] or stop['code']} "
+            f"to {interchange}"
+        )
+    rides = sorted((s["arrival"] - s["when"]).total_seconds() / 60 for s in scheduled)
+    ride = int(rides[len(rides) // 2])
+
+    _, live = siri_departures(stop["siri"])
+    out = []
+    for d in live:
+        if d["line"] != line or d["when"] < now:
+            continue
+        # SIRI reports both directions from stops that serve both; the
+        # interchange only appears on the runs actually heading there.
+        if not any(
+            s["headsign"] == d["headsign"] for s in scheduled
+        ) and not d["headsign"].lower().startswith(interchange.lower()):
+            continue
+        out.append({**d, "arrival": d["when"] + timedelta(minutes=ride), "ride": ride})
+
+    horizon = max((d["when"] for d in out), default=now)
+    for s in scheduled:
+        if s["when"] > horizon and s["when"] >= now:
+            out.append({**s, "ride": int((s["arrival"] - s["when"]).total_seconds() // 60)})
+    out.sort(key=lambda d: d["when"])
+    return out[:count] if count else out
+
+
+# --- trains -----------------------------------------------------------------
+
+
+def train_departures(origins, dest, start, count):
+    """
+    Departures from `origins` on trips that actually stop at `dest`.
+
+    `origins` is a list because a station is several platforms, and which one
+    a train leaves from is not knowable from the name: Tallinn is both
+    estonia:10137 (departures) and estonia:10138 (arrivals). Asking only the
+    first one the API happens to list means silently losing every train.
+    """
+    out, seen = [], set()
+    for origin in origins:
+        data = graphql(
+            f'{{ stop(id:"{origin}") {{ name stoptimesWithoutPatterns('
+            f"startTime:{int(start.timestamp())}, timeRange:86400, "
+            f"numberOfDepartures:120, omitNonPickups:true) "
+            f"{{ scheduledDeparture realtimeDeparture realtime serviceDay headsign "
+            f"trip {{ route{{shortName longName}} "
+            f"stoptimes {{ scheduledArrival stop{{name}} }} }} }} }} }}"
+        )
+        stop = data.get("stop")
+        if not stop:
+            raise Failed(f"Digitransit knows no stop {origin}")
+        for st in stop.get("stoptimesWithoutPatterns") or []:
+            times = st["trip"]["stoptimes"]
+            names = [s["stop"]["name"] for s in times]
+            try:
+                here = next(i for i, n in enumerate(names) if n == stop["name"])
+            except StopIteration:
+                here = 0
+            # Only stops *after* this one count, or a return working would match.
+            hit = next(
+                (
+                    s
+                    for s in times[here + 1 :]
+                    if s["stop"]["name"].lower().startswith(dest.lower())
+                ),
+                None,
+            )
+            if not hit:
+                continue
+            day = datetime.fromtimestamp(st["serviceDay"], TZ)
+            row = {
+                "line": st["trip"]["route"]["shortName"],
+                "route": st["trip"]["route"]["longName"],
+                "when": day + timedelta(seconds=st["realtimeDeparture"]),
+                "scheduled": day + timedelta(seconds=st["scheduledDeparture"]),
+                "arrival": day + timedelta(seconds=hit["scheduledArrival"]),
+                "headsign": st["headsign"],
+                "realtime": bool(st.get("realtime")),
+                "to": hit["stop"]["name"],
+            }
+            # The same working can be listed by more than one platform, and by
+            # more than one pattern on one platform.
+            key = (row["line"], row["when"], row["arrival"])
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(row)
+    out.sort(key=lambda d: d["when"])
+    return out[:count] if count else out
+
+
+def resolve_train_stop(spec):
+    """
+    A gtfsId or a station name -> (every matching platform, name, description).
+
+    No platform number comes back, because there is none to have. This feed
+    models Tallinn as a single virtual departures stop -- estonia:10137,
+    described as "Rong Tallinnast väljuv suund" -- rather than the five
+    physical platforms at Balti jaam. Every train reports that same stop and a
+    null platformCode, and SIRI, which does list Balti jaam 1..5, carries no
+    trains at them. elron.ee shows a platform on its own board; it is not in
+    any open feed reachable from here, so this reports the station and says
+    nothing it cannot back up.
+    """
+    if spec.startswith("estonia:"):
+        data = graphql(f'{{ stop(id:"{spec}") {{ gtfsId name desc }} }}')
+        st = data.get("stop")
+        if not st:
+            raise Failed(f"Digitransit knows no stop {spec}")
+        return [spec], st["name"], st.get("desc") or ""
+    data = graphql(f'{{ stops(name:"{spec}") {{ gtfsId name desc vehicleMode }} }}')
+    rail = [
+        st
+        for st in data.get("stops") or []
+        if st["vehicleMode"] == "RAIL" and st["name"].lower() == spec.lower()
+    ]
+    if not rail:
+        raise Failed(f"no rail stop named {spec!r}")
+    return [st["gtfsId"] for st in rail], rail[0]["name"], rail[0].get("desc") or ""
+
+
+# --- output -----------------------------------------------------------------
+
+
+# SGR 2 (dim) rather than a colour or a background stripe. Omarchy swaps both
+# foreground and background with the theme, so a hardcoded grey that reads as
+# "quieter" on a dark theme reads as "nearly invisible" on a light one. Dim is
+# relative to whatever the theme's foreground already is, which means the
+# stripe survives a theme change without this script knowing anything about it.
+DIM, BOLD, OFF = "\033[2m", "\033[1m", "\033[0m"
+
+
+def want_color(mode):
+    """
+    auto means "a terminal is watching". Note that leave-peek captures this
+    output into a variable to page it, so auto is false there -- it passes
+    --color=always precisely because it knows `less -R` will render it.
+    """
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    return (
+        sys.stdout.isatty()
+        and os.environ.get("TERM", "") not in ("", "dumb")
+        and "NO_COLOR" not in os.environ
+    )
+
+
+def table(rows, headers, color=False):
+    if not rows:
+        return "  nothing found"
+    cols = list(zip(*([headers] + rows)))
+    w = [max(len(str(c)) for c in col) for col in cols]
+
+    def paint(line, code):
+        return f"{code}{line}{OFF}" if color and code else line
+
+    out = [
+        paint("  " + "  ".join(str(h).ljust(n) for h, n in zip(headers, w)).rstrip(), BOLD),
+        paint("  " + "  ".join("-" * n for n in w), DIM),
+    ]
+    for i, r in enumerate(rows):
+        line = "  " + "  ".join(str(c).ljust(n) for c, n in zip(r, w)).rstrip()
+        # Striped from the second row on, so the soonest option -- the one you
+        # are most likely acting on -- is never the dim one.
+        out.append(paint(line, DIM if i % 2 else ""))
+    return "\n".join(out)
+
+
+def emit(payload, text, as_table):
+    print(text if as_table else json.dumps(payload, indent=2, ensure_ascii=False))
+
+
+# --- the three tools --------------------------------------------------------
+
+
+def cmd_bus(args):
+    color = want_color(args.color)
+    now = datetime.now(TZ)
+    stop = resolve_bus_stop(args.stop)
+    deps = bus_departures(stop, args.line, args.to, args.count, now)
+    if not deps:
+        raise Failed(f"no {args.line} to {args.to} left today")
+
+    rows, items = [], []
+    for d in deps:
+        leave = d["when"] - timedelta(minutes=args.walk)
+        items.append(
+            {
+                "departure": hhmm(d["when"]),
+                "arrival": hhmm(d["arrival"]),
+                "leave_at": hhmm(leave),
+                "leave_in_minutes": rel(leave, now),
+                "in_minutes": rel(d["when"], now),
+                "ride_minutes": d["ride"],
+                "source": d["source"],
+                "realtime": d["realtime"],
+                "headsign": d["headsign"],
+            }
+        )
+        rows.append(
+            [
+                hhmm(leave),
+                rel_str(rel(leave, now)),
+                hhmm(d["when"]),
+                hhmm(d["arrival"]),
+                dur(d["ride"]),
+                d["source"] + ("*" if d["realtime"] else ""),
+            ]
+        )
+    payload = {
+        "tool": "leave-bus",
+        "now": hhmm(now),
+        "stop": {"name": stop["name"] or stop["code"], "siri_id": stop["siri"]},
+        "line": args.line,
+        "to": args.to,
+        "walk_minutes": args.walk,
+        "departures": items,
+    }
+    text = (
+        f"  {args.line} from {stop['name'] or stop['code']} to {args.to}"
+        f"   (walk {args.walk} min, now {hhmm(now)})\n\n"
+        + table(rows, ["LEAVE", "IN", "BUS", "ARRIVES", "RIDE", "SRC"], color)
+    )
+    emit(payload, text, args.table)
+    return 0
+
+
+def cmd_train(args):
+    color = want_color(args.color)
+    now = datetime.now(TZ)
+    start = now if not args.date else max(now, midnight(args.date))
+    origin, origin_name, origin_desc = resolve_train_stop(args.origin)
+    deps = train_departures(origin, args.to, start, args.count)
+    if not deps:
+        raise Failed(f"no trains to {args.to} left")
+
+    rows, items = [], []
+    for d in deps:
+        leave = d["when"] - timedelta(minutes=args.walk)
+        items.append(
+            {
+                "line": d["line"],
+                "departure": hhmm(d["when"]),
+                "arrival": hhmm(d["arrival"]),
+                "trip_minutes": int((d["arrival"] - d["when"]).total_seconds() // 60),
+                "leave_at": hhmm(leave),
+                "leave_in_minutes": rel(leave, now),
+                "headsign": d["headsign"],
+                "realtime": d["realtime"],
+            }
+        )
+        rows.append(
+            [
+                hhmm(leave),
+                rel_str(rel(leave, now)),
+                hhmm(d["when"]),
+                hhmm(d["arrival"]),
+                dur((d["arrival"] - d["when"]).total_seconds() // 60),
+                d["line"],
+                d["headsign"] or "",
+            ]
+        )
+    payload = {
+        "tool": "leave-train",
+        "now": hhmm(now),
+        "from": {"name": origin_name, "desc": origin_desc, "stops": origin},
+        "to": args.to,
+        "walk_minutes": args.walk,
+        "departures": items,
+    }
+    text = (
+        f"  Trains {origin_name} -> {args.to}"
+        + (f"   [{origin_desc}]" if origin_desc else "")
+        + f"\n  walk {args.walk} min, now {hhmm(now)}\n\n"
+        + table(
+            rows, ["LEAVE", "IN", "TRAIN", "ARRIVES", "TRIP", "LINE", "TO"], color
+        )
+    )
+    emit(payload, text, args.table)
+    return 0
+
+
+def cmd_leave(args):
+    """
+    Every train to the destination you can still catch today, one row each.
+
+    For each train, the latest bus that still lands at the interchange
+    --transfer minutes before the train leaves AND that you can still walk to.
+    A train with no such bus is simply not listed -- it is not catchable, and
+    printing it with a leave time already in the past would be noise.
+
+    The latest qualifying bus wins rather than the earliest, on the grounds
+    that nobody wants to stand on a platform for twenty minutes. `slack` is
+    the honest price of that: how late the bus may run before the connection
+    breaks.
+    """
+    color = want_color(args.color)
+    now = datetime.now(TZ)
+    stop = resolve_bus_stop(args.stop)
+    origin, origin_name, origin_desc = resolve_train_stop(args.origin)
+
+    trains = [
+        t
+        for t in train_departures(origin, args.to, now, 0)
+        if t["when"].date() == now.date()
+    ]
+    if not trains:
+        raise Failed(f"no trains to {args.to} left today")
+
+    # Nothing past the last train's transfer deadline can matter, and asking
+    # for less is the difference between one bus query and four.
+    until = trains[-1]["when"] - timedelta(minutes=args.transfer)
+    buses = bus_departures(stop, args.line, args.interchange, 0, now, until)
+
+    options = []
+    for t in trains:
+        latest = t["when"] - timedelta(minutes=args.transfer)
+        usable = [
+            b
+            for b in buses
+            if b["arrival"] <= latest
+            and b["when"] - timedelta(minutes=args.walk) >= now
+        ]
+        if not usable:
+            continue
+        b = usable[-1]
+        leave = b["when"] - timedelta(minutes=args.walk)
+        options.append(
+            {
+                "leave_at": hhmm(leave),
+                "leave_in_minutes": rel(leave, now),
+                "slack_minutes": int((latest - b["arrival"]).total_seconds() // 60),
+                "bus": {
+                    "line": b["line"],
+                    "from": stop["name"] or stop["code"],
+                    "departure": hhmm(b["when"]),
+                    "to": args.interchange,
+                    "arrival": hhmm(b["arrival"]),
+                    "ride_minutes": b["ride"],
+                    "source": b["source"],
+                    "realtime": b["realtime"],
+                },
+                "train": {
+                    "line": t["line"],
+                    "station": origin_name,
+                    "station_desc": origin_desc,
+                    "departure": hhmm(t["when"]),
+                    "to": t["to"],
+                    "arrival": hhmm(t["arrival"]),
+                    "trip_minutes": int(
+                        (t["arrival"] - t["when"]).total_seconds() // 60
+                    ),
+                    "headsign": t["headsign"],
+                },
+            }
+        )
+
+    if not options:
+        raise Failed(
+            f"no {args.line} gets you to {args.to} today with "
+            f"{args.walk} min walk and {args.transfer} min transfer"
+        )
+
+    payload = {
+        "tool": "leave",
+        "now": hhmm(now),
+        "walk_minutes": args.walk,
+        "transfer_minutes": args.transfer,
+        # The soonest one, lifted out so `leave | jq -r .leave_at` still works.
+        "leave_at": options[0]["leave_at"],
+        "leave_in_minutes": options[0]["leave_in_minutes"],
+        "options": options,
+    }
+
+    rows = [
+        [
+            o["leave_at"],
+            rel_str(o["leave_in_minutes"]),
+            o["bus"]["departure"],
+            o["bus"]["arrival"],
+            dur(o["bus"]["ride_minutes"]),
+            o["train"]["departure"],
+            o["train"]["arrival"],
+            dur(o["train"]["trip_minutes"]),
+            o["train"]["line"],
+            f"{o['slack_minutes']}m",
+            # "schedule" is only ever the fallback; abbreviated so the column
+            # does not set the table's width on its own.
+            ("siri" if o["bus"]["source"] == "siri" else "sched")
+            + ("*" if o["bus"]["realtime"] else ""),
+        ]
+        for o in options
+    ]
+    head = (
+        f"  bus {args.line} from {stop['name'] or stop['code']}, then the train"
+        f" from {origin_name} to {args.to}"
+        + (f"\n  {origin_name}: {origin_desc}" if origin_desc else "")
+        + f"\n  walk {args.walk}, transfer {args.transfer}, now {hhmm(now)}"
+    )
+    text = "\n".join(
+        [
+            "",
+            head,
+            "",
+            table(
+                rows,
+                [
+                    "LEAVE",
+                    "IN",
+                    "BUS",
+                    args.interchange.upper(),
+                    "RIDE",
+                    "TRAIN",
+                    args.to.upper(),
+                    "TRIP",
+                    "LINE",
+                    "SLACK",
+                    "SRC",
+                ],
+                color,
+            ),
+            "",
+        ]
+    )
+    emit(payload, text, args.table)
+    return 0
+
+
+# --- cli --------------------------------------------------------------------
+
+
+def main(argv):
+    who = os.path.basename(argv[0])
+    p = argparse.ArgumentParser(
+        prog=who,
+        description=__doc__.strip().splitlines()[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--table", action="store_true", help="human table instead of JSON")
+    p.add_argument("--color", choices=("auto", "always", "never"), default="auto",
+                   help="dim alternate rows; auto means when stdout is a terminal")
+    p.add_argument("--walk", type=int, default=DEFAULT_WALK, metavar="MIN",
+                   help=f"door to stop, default {DEFAULT_WALK}")
+
+    if who == "leave-bus":
+        p.add_argument("--stop", default=DEFAULT_BUS_STOP, help="SiriID, stop code or name")
+        p.add_argument("--line", default=DEFAULT_LINE)
+        p.add_argument("--to", default=DEFAULT_INTERCHANGE, help="where it must be headed")
+        p.add_argument("-n", "--count", type=int, default=5)
+        run = cmd_bus
+    elif who == "leave-train":
+        p.add_argument("--from", dest="origin", default=DEFAULT_TRAIN_FROM)
+        p.add_argument("--to", default=DEFAULT_TRAIN_TO)
+        p.add_argument("--date", type=date.fromisoformat, metavar="YYYY-MM-DD")
+        p.add_argument("-n", "--count", type=int, default=5)
+        run = cmd_train
+    else:
+        p.add_argument("--stop", default=DEFAULT_BUS_STOP)
+        p.add_argument("--line", default=DEFAULT_LINE)
+        p.add_argument("--interchange", default=DEFAULT_INTERCHANGE)
+        p.add_argument("--from", dest="origin", default=DEFAULT_TRAIN_FROM)
+        p.add_argument("--to", default=DEFAULT_TRAIN_TO)
+        p.add_argument("--transfer", type=int, default=DEFAULT_TRANSFER, metavar="MIN",
+                       help=f"bus arrival to train departure, default {DEFAULT_TRANSFER}")
+        run = cmd_leave
+
+    args = p.parse_args(argv[1:])
+    try:
+        return run(args)
+    except Failed as exc:
+        print(f"{who}: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except KeyboardInterrupt:
+        sys.exit(130)

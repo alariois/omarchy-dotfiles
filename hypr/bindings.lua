@@ -82,6 +82,38 @@ o.bind("SUPER + ALT + M", "Latest message",
   "setsid uwsm-app -- xdg-terminal-exec --app-id=msg-peek --title=Messages -e msg-peek")
 o.bind("SUPER + ALT + CTRL + M", "Copy login code", "msg-otp")
 
+-- SUPER + ALT + L: when to leave for the Aegviidu train.
+--
+-- Same shape as SUPER + ALT + M above, and on purpose -- this is the other
+-- thing you want answered without leaving what you are doing, so it gets the
+-- same floating-window-and-a-pager treatment rather than a new idiom.
+--
+-- L was the only letter that fit. ALT+L is hypr-nav's "navigate right",
+-- SUPER+L is Omarchy's workspace layout toggle and CTRL+SUPER+L locks the
+-- screen, so SUPER+ALT+L is what was left, and it is the exact parallel of
+-- the M row.
+--
+-- Sized to the table rather than to the screen. It is 83 columns wide and
+-- about twenty rows tall; msg-peek's 720 would nearly fill the laptop's 750
+-- logical pixels for the sake of a lot of empty space. leave-peek passes
+-- `less -S`, so if a longer stop name ever pushes past the width the rows
+-- stay aligned and scroll sideways instead of wrapping.
+--
+-- For a different journey, bind another key to the same script with
+-- arguments -- they pass straight through:
+--   o.bind("SUPER + ALT + SHIFT + L", "Leave for Tartu",
+--     "... -e leave-peek --to Tartu")
+o.window("^(leave-peek)$", {
+  float = true,
+  center = true,
+  size = { 900, 560 },
+  tag = "-default-opacity",
+  opacity = "1.0 1.0",
+})
+
+o.bind("SUPER + ALT + L", "When to leave",
+  "setsid uwsm-app -- xdg-terminal-exec --app-id=leave-peek --title=Leave -e leave-peek")
+
 -- SUPER + SHIFT + S: Slack, in place of Omarchy's Google Maps.
 --
 -- The unbind is required for the same reason as Gmail's above: Omarchy's
