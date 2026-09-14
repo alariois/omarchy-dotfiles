@@ -576,6 +576,59 @@ def table(rows, headers, color=False):
     return "\n".join(out)
 
 
+def grid(specs, color=False):
+    """
+    Render several tables on one shared set of column widths, so that a column
+    lands at the same offset in every one of them.
+
+    `specs` is [(headers, rows, striped), ...] and every header list and row in
+    every spec must be the same length -- the layout is one grid that the tables
+    take turns filling in. A column left empty in a given table stays blank
+    there, rule included, which is what lets the missed table skip the bus
+    columns and still line its destination up with the table below it.
+
+    Columns that are empty in *all* of them are dropped, so a table rendered on
+    its own does not pay for padding it is not aligning to.
+    """
+    ncols = len(specs[0][0])
+    w = [0] * ncols
+    for headers, rows, _ in specs:
+        for cells in [headers] + rows:
+            for i, c in enumerate(cells):
+                w[i] = max(w[i], len(str(c)))
+    keep = [i for i in range(ncols) if w[i]]
+
+    out = []
+    for headers, rows, striped in specs:
+        def line(cells):
+            return ("  " + "  ".join(
+                str(cells[i]).ljust(w[i]) for i in keep
+            )).rstrip()
+
+        # The rule is drawn to what this table actually puts in the column, not
+        # to the shared width. A column stretched by another table's longer
+        # header would otherwise trail dashes past its own heading.
+        own = [
+            max([len(str(headers[i]))] + [len(str(r[i])) for r in rows])
+            for i in range(ncols)
+        ]
+        rule = [
+            ("-" * own[i]).ljust(w[i]) if str(headers[i]).strip() else " " * w[i]
+            for i in range(ncols)
+        ]
+        head, ruled = line(headers), line(rule)
+        lines = (
+            [f"{BOLD}{head}{OFF}", f"{DIM}{ruled}{OFF}"]
+            if color and striped
+            else [head, ruled]
+        )
+        for i, row in enumerate(rows):
+            ln = line(row)
+            lines.append(f"{DIM}{ln}{OFF}" if color and striped and i % 2 else ln)
+        out.append("\n".join(lines))
+    return out
+
+
 def emit(payload, text, as_table):
     print(text if as_table else json.dumps(payload, indent=2, ensure_ascii=False))
 
@@ -830,86 +883,80 @@ def cmd_leave(args):
 
     blocks = ["", head, "", f"  NOW: {hhmm(now)}", ""]
 
+    # One column layout, filled in by both tables, so that the destination --
+    # and TRIP and LINE behind it -- sit at the same offset in each and can be
+    # read straight down. The missed table leaves the bus columns empty: there
+    # is no bus, which is the whole reason it is a separate table.
+    dest, via = args.to.upper(), args.interchange.upper()
+    specs = []
+
     if missed:
-        mrows = [
-            [
-                m["departure"],
-                rel_str(m["departure_in_minutes"]),
-                m["arrival"],
-                dur(m["trip_minutes"]),
-                m["line"],
-                dur(m["bus_late_by_minutes"])
-                if m["bus_late_by_minutes"] is not None
-                else "-",
-            ]
-            for m in missed
-        ]
-        # table() is asked for no colour of its own here: the whole block is
-        # tinted afterwards, and a bold header inside an orange block would
-        # leave the escape codes fighting over the same run of text.
-        blocks += [
-            tint(
-                f"  NO BUS to these -- IN is how long until the train leaves",
-                ORANGE,
-                color,
-            ),
-            "",
-            tint(
-                table(
-                    mrows,
+        specs.append(
+            (
+                # BUS LATE rides in the last slot rather than SLACK's, so that
+                # the eight-character header widens a column the main table
+                # leaves empty at the end of the line instead of prising SLACK
+                # and SRC apart on every row.
+                ["TRAIN", "IN", "", "", "", "", dest, "TRIP", "LINE", "", "BUS LATE"],
+                [
                     [
-                        "TRAIN",
-                        "IN",
-                        args.to.upper(),
-                        "TRIP",
-                        "LINE",
-                        "BUS LATE",
-                    ],
-                ),
-                ORANGE,
-                color,
-            ),
-            "",
-        ]
+                        m["departure"],
+                        rel_str(m["departure_in_minutes"]),
+                        "",
+                        "",
+                        "",
+                        "",
+                        m["arrival"],
+                        dur(m["trip_minutes"]),
+                        m["line"],
+                        "",
+                        dur(m["bus_late_by_minutes"])
+                        if m["bus_late_by_minutes"] is not None
+                        else "-",
+                    ]
+                    for m in missed
+                ],
+                False,  # tinted as a block below, so no bold or stripe of its own
+            )
+        )
 
     if options:
-        rows = [
-            [
-                o["leave_at"],
-                rel_str(o["leave_in_minutes"]),
-                o["bus"]["departure"],
-                o["bus"]["arrival"],
-                dur(o["bus"]["ride_minutes"]),
-                o["train"]["departure"],
-                o["train"]["arrival"],
-                dur(o["train"]["trip_minutes"]),
-                o["train"]["line"],
-                f"{o['slack_minutes']}m",
-                ("siri" if o["bus"]["source"] == "siri" else "sched")
-                + ("*" if o["bus"]["realtime"] else ""),
-            ]
-            for o in options
-        ]
-        blocks += [
-            table(
-                rows,
+        specs.append(
+            (
+                ["LEAVE", "IN", "BUS", via, "RIDE", "TRAIN", dest, "TRIP", "LINE",
+                 "SLACK", "SRC"],
                 [
-                    "LEAVE",
-                    "IN",
-                    "BUS",
-                    args.interchange.upper(),
-                    "RIDE",
-                    "TRAIN",
-                    args.to.upper(),
-                    "TRIP",
-                    "LINE",
-                    "SLACK",
-                    "SRC",
+                    [
+                        o["leave_at"],
+                        rel_str(o["leave_in_minutes"]),
+                        o["bus"]["departure"],
+                        o["bus"]["arrival"],
+                        dur(o["bus"]["ride_minutes"]),
+                        o["train"]["departure"],
+                        o["train"]["arrival"],
+                        dur(o["train"]["trip_minutes"]),
+                        o["train"]["line"],
+                        f"{o['slack_minutes']}m",
+                        ("siri" if o["bus"]["source"] == "siri" else "sched")
+                        + ("*" if o["bus"]["realtime"] else ""),
+                    ]
+                    for o in options
                 ],
-                color,
-            ),
+                True,
+            )
+        )
+
+    rendered = grid(specs, color)
+    if missed:
+        blocks += [
+            tint("  NO BUS to these -- IN is how long until the train leaves",
+                 ORANGE, color),
+            "",
+            tint(rendered.pop(0), ORANGE, color),
             "",
         ]
+    if options:
+        blocks += [rendered.pop(0), ""]
 
     text = "\n".join(blocks)
     emit(payload, text, args.table)
