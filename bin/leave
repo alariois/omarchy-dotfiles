@@ -81,7 +81,7 @@ DEFAULT_INTERCHANGE = "Balti jaam"
 DEFAULT_TRAIN_FROM = "Tallinn"
 DEFAULT_TRAIN_TO = "Aegviidu"
 DEFAULT_WALK = 10
-DEFAULT_TRANSFER = 5
+DEFAULT_TRANSFER = 3
 
 # stops.txt is 200 KB and changes a few times a year. A day is plenty, and it
 # keeps a tool that may be bound to a key from fetching it on every press.
