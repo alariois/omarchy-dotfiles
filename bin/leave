@@ -734,9 +734,20 @@ def cmd_leave(args):
         usable = [b for b in reachable if b["arrival"] <= latest]
         if not usable:
             # Still listed, in its own table: the train has not gone, so a cab
-            # to the interchange is a decision the reader may want to make. The
-            # soonest bus is shown against the deadline it misses, because how
-            # badly it misses is what says whether a cab is worth it.
+            # to the interchange is a decision the reader may want to make.
+            #
+            # The countdown shown is to the train's own departure, not to the
+            # departure minus --transfer. Whoever is deciding whether to call a
+            # cab is deciding how to cover the distance, and the transfer buffer
+            # is a margin they chose for walking off a bus -- it has nothing to
+            # say about a taxi that stops outside. be_there_by is still in the
+            # JSON for anyone who wants the stricter deadline.
+            #
+            # BUS LATE stays measured against that stricter deadline, because
+            # that is the rule that put the train in this table at all. Against
+            # the train's departure instead it could read as a negative number
+            # -- a bus arriving before a train it cannot catch -- which explains
+            # nothing.
             soonest = min((b["arrival"] for b in reachable), default=None)
             missed.append(
                 {
@@ -814,17 +825,16 @@ def cmd_leave(args):
         f"  bus {args.line} from {stop['name'] or stop['code']}, then the train"
         f" from {origin_name} to {args.to}"
         + (f"\n  {origin_name}: {origin_desc}" if origin_desc else "")
-        + f"\n  walk {args.walk}, transfer {args.transfer}, now {hhmm(now)}"
+        + f"\n  walk {args.walk}, transfer {args.transfer}"
     )
 
-    blocks = ["", head, ""]
+    blocks = ["", head, "", f"  NOW: {hhmm(now)}", ""]
 
     if missed:
         mrows = [
             [
-                m["be_there_by"],
-                rel_str(m["be_there_in_minutes"]),
                 m["departure"],
+                rel_str(m["departure_in_minutes"]),
                 m["arrival"],
                 dur(m["trip_minutes"]),
                 m["line"],
@@ -839,7 +849,7 @@ def cmd_leave(args):
         # leave the escape codes fighting over the same run of text.
         blocks += [
             tint(
-                f"  NO BUS -- be at {args.interchange} by BE THERE to still make these",
+                f"  NO BUS to these -- IN is how long until the train leaves",
                 ORANGE,
                 color,
             ),
@@ -848,9 +858,8 @@ def cmd_leave(args):
                 table(
                     mrows,
                     [
-                        "BE THERE",
-                        "IN",
                         "TRAIN",
+                        "IN",
                         args.to.upper(),
                         "TRIP",
                         "LINE",
