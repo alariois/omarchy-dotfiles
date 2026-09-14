@@ -50,6 +50,8 @@ o.bind("ALT + L", "Navigate right", "hypr-nav r")
 hl.unbind("SUPER + SHIFT + G")
 o.bind("SUPER + SHIFT + G", "Gmail", { webapp = "https://mail.google.com/", focus = true })
 
+hl.unbind("SUPER + SHIFT + ALT + G")
+o.bind("SUPER + SHIFT + ALT + G", "Git Tips", { webapp = "https://docs.google.com/spreadsheets/d/1snFfD7RkxRWWVQuMJsPj-uNLnqjtcJl2M1iIpA2ZyY0/edit?gid=0#gid=0", focus = true })
 -- SUPER + ALT + M: the newest mail, in a floating window.
 -- SUPER + ALT + CTRL + M: its login code, straight onto the clipboard.
 --
