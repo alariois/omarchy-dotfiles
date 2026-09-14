@@ -523,6 +523,20 @@ def resolve_train_stop(spec):
 # stripe survives a theme change without this script knowing anything about it.
 DIM, BOLD, OFF = "\033[2m", "\033[1m", "\033[0m"
 
+# Orange for the trains no bus reaches. Hardcoded where the stripe deliberately
+# is not, and for the opposite reason: 208 lives in the 256-colour cube, which
+# Omarchy themes leave alone -- they remap the sixteen base colours, so colour 3
+# would come out as whatever the theme calls yellow. This one is a warning,
+# which is worth naming exactly rather than inheriting.
+ORANGE = "\033[38;5;208m"
+
+
+def tint(text, code, color):
+    """Colour every line of a block, so `less -R` keeps it across scrolling."""
+    if not color:
+        return text
+    return "\n".join(f"{code}{ln}{OFF}" if ln.strip() else ln for ln in text.split("\n"))
+
 
 def want_color(mode):
     """
@@ -709,16 +723,41 @@ def cmd_leave(args):
     until = trains[-1]["when"] - timedelta(minutes=args.transfer)
     buses = bus_departures(stop, args.line, args.interchange, 0, now, until)
 
-    options = []
+    options, missed = [], []
     for t in trains:
         latest = t["when"] - timedelta(minutes=args.transfer)
-        usable = [
+        reachable = [
             b
             for b in buses
-            if b["arrival"] <= latest
-            and b["when"] - timedelta(minutes=args.walk) >= now
+            if b["when"] - timedelta(minutes=args.walk) >= now
         ]
+        usable = [b for b in reachable if b["arrival"] <= latest]
         if not usable:
+            # Still listed, in its own table: the train has not gone, so a cab
+            # to the interchange is a decision the reader may want to make. The
+            # soonest bus is shown against the deadline it misses, because how
+            # badly it misses is what says whether a cab is worth it.
+            soonest = min((b["arrival"] for b in reachable), default=None)
+            missed.append(
+                {
+                    "line": t["line"],
+                    "departure": hhmm(t["when"]),
+                    "be_there_by": hhmm(latest),
+                    "be_there_in_minutes": rel(latest, now),
+                    "departure_in_minutes": rel(t["when"], now),
+                    "to": t["to"],
+                    "arrival": hhmm(t["arrival"]),
+                    "trip_minutes": int(
+                        (t["arrival"] - t["when"]).total_seconds() // 60
+                    ),
+                    "terminus": t["terminus"],
+                    "bus_late_by_minutes": (
+                        int((soonest - latest).total_seconds() // 60)
+                        if soonest
+                        else None
+                    ),
+                }
+            )
             continue
         b = usable[-1]
         leave = b["when"] - timedelta(minutes=args.walk)
@@ -753,7 +792,7 @@ def cmd_leave(args):
             }
         )
 
-    if not options:
+    if not options and not missed:
         raise Failed(
             f"no {args.line} gets you to {args.to} today with "
             f"{args.walk} min walk and {args.transfer} min transfer"
@@ -765,41 +804,84 @@ def cmd_leave(args):
         "walk_minutes": args.walk,
         "transfer_minutes": args.transfer,
         # The soonest one, lifted out so `leave | jq -r .leave_at` still works.
-        "leave_at": options[0]["leave_at"],
-        "leave_in_minutes": options[0]["leave_in_minutes"],
+        "leave_at": options[0]["leave_at"] if options else None,
+        "leave_in_minutes": options[0]["leave_in_minutes"] if options else None,
         "options": options,
+        "missed": missed,
     }
 
-    rows = [
-        [
-            o["leave_at"],
-            rel_str(o["leave_in_minutes"]),
-            o["bus"]["departure"],
-            o["bus"]["arrival"],
-            dur(o["bus"]["ride_minutes"]),
-            o["train"]["departure"],
-            o["train"]["arrival"],
-            dur(o["train"]["trip_minutes"]),
-            o["train"]["line"],
-            f"{o['slack_minutes']}m",
-            # "schedule" is only ever the fallback; abbreviated so the column
-            # does not set the table's width on its own.
-            ("siri" if o["bus"]["source"] == "siri" else "sched")
-            + ("*" if o["bus"]["realtime"] else ""),
-        ]
-        for o in options
-    ]
     head = (
         f"  bus {args.line} from {stop['name'] or stop['code']}, then the train"
         f" from {origin_name} to {args.to}"
         + (f"\n  {origin_name}: {origin_desc}" if origin_desc else "")
         + f"\n  walk {args.walk}, transfer {args.transfer}, now {hhmm(now)}"
     )
-    text = "\n".join(
-        [
+
+    blocks = ["", head, ""]
+
+    if missed:
+        mrows = [
+            [
+                m["be_there_by"],
+                rel_str(m["be_there_in_minutes"]),
+                m["departure"],
+                m["arrival"],
+                dur(m["trip_minutes"]),
+                m["line"],
+                dur(m["bus_late_by_minutes"])
+                if m["bus_late_by_minutes"] is not None
+                else "-",
+            ]
+            for m in missed
+        ]
+        # table() is asked for no colour of its own here: the whole block is
+        # tinted afterwards, and a bold header inside an orange block would
+        # leave the escape codes fighting over the same run of text.
+        blocks += [
+            tint(
+                f"  NO BUS -- be at {args.interchange} by BE THERE to still make these",
+                ORANGE,
+                color,
+            ),
             "",
-            head,
+            tint(
+                table(
+                    mrows,
+                    [
+                        "BE THERE",
+                        "IN",
+                        "TRAIN",
+                        args.to.upper(),
+                        "TRIP",
+                        "LINE",
+                        "BUS LATE",
+                    ],
+                ),
+                ORANGE,
+                color,
+            ),
             "",
+        ]
+
+    if options:
+        rows = [
+            [
+                o["leave_at"],
+                rel_str(o["leave_in_minutes"]),
+                o["bus"]["departure"],
+                o["bus"]["arrival"],
+                dur(o["bus"]["ride_minutes"]),
+                o["train"]["departure"],
+                o["train"]["arrival"],
+                dur(o["train"]["trip_minutes"]),
+                o["train"]["line"],
+                f"{o['slack_minutes']}m",
+                ("siri" if o["bus"]["source"] == "siri" else "sched")
+                + ("*" if o["bus"]["realtime"] else ""),
+            ]
+            for o in options
+        ]
+        blocks += [
             table(
                 rows,
                 [
@@ -819,7 +901,8 @@ def cmd_leave(args):
             ),
             "",
         ]
-    )
+
+    text = "\n".join(blocks)
     emit(payload, text, args.table)
     return 0
 
