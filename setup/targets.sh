@@ -88,6 +88,26 @@ LINKS=(
   "$HOME/.local/bin/slack-launch|bin/slack-launch"
   "$HOME/.local/share/applications/slack.desktop|slack/slack.desktop"
 
+  # The Copilot key as an Alt -- the one remapping that could not be done in
+  # the xkb block below. That key sends no keycode of its own: its firmware
+  # holds down LEFTMETA+LEFTSHIFT+F23 for as long as the key is, which is why
+  # Omarchy can bind it as `SUPER + SHIFT + code:201`. xkb rewrites keysyms one
+  # key at a time and cannot cancel the two modifiers riding along, so this one
+  # lives a level lower: bin/copilot-alt grabs the internal keyboard, re-emits
+  # it through uinput, and turns that chord into a plain held LEFTALT.
+  #
+  # Two links, because the second is what `systemctl --user enable` would have
+  # written. Declaring it here instead keeps "this service is on" in the repo
+  # rather than in machine state a reinstall would lose. A new machine still
+  # needs one `systemctl --user daemon-reload && systemctl --user start
+  # copilot-alt`; the link alone only decides what happens at next login.
+  #
+  # No PACKAGES entry: the script is stdlib Python and python is already listed
+  # there for msg-code's sake.
+  "$HOME/.local/bin/copilot-alt|bin/copilot-alt"
+  "$HOME/.config/systemd/user/copilot-alt.service|systemd/copilot-alt.service"
+  "$HOME/.config/systemd/user/default.target.wants/copilot-alt.service|systemd/copilot-alt.service"
+
   # Custom xkb options, selected by hypr/input.lua. libxkbcommon searches
   # ~/.config/xkb before the system tree, which is how these work without root.
   # Omarchy puts nothing here, so the whole directory is safe to link.
@@ -127,6 +147,7 @@ LINKS=(
   # files-here each take --print -- so there is no third copy of the logic to
   # drift from the two that matter.
   "$HOME/.local/bin/peek-here|bin/peek-here"
+
 
   # The workspace indicators in the bar, made monitor-aware. A clone of
   # Omarchy's omarchy.workspaces, which is how the shell wants built-in widgets

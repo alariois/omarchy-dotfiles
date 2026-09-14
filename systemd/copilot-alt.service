@@ -1,0 +1,37 @@
+# The Copilot key as an Alt. bin/copilot-alt explains why this takes a process
+# at all: the key emits a held LEFTMETA+LEFTSHIFT+F23 chord rather than a
+# keycode, and xkb -- where every other remapping in this repo lives -- cannot
+# cancel two real modifiers.
+#
+# A user service and not a system one, because the remapper needs no root: the
+# `input` group opens /dev/input, and /dev/uinput carries a uaccess ACL for
+# whoever is logged in. Nothing here should run as root just to read a keyboard.
+#
+# Enabled by a second LINKS entry in setup/targets.sh rather than by
+# `systemctl --user enable`. That entry creates exactly the symlink enable
+# would, so the service being on is declared in the repo like everything else
+# instead of being state a fresh machine has to be told about separately.
+
+[Unit]
+Description=Copilot key as Alt (evdev chord remap)
+
+# Neither condition holds on a machine without this ThinkPad's keyboard -- a
+# VM, say -- and a service that cannot work should stay stopped rather than
+# restart forever. Conditions fail quietly; they are not a unit failure.
+ConditionPathExists=/dev/input/by-path/platform-i8042-serio-0-event-kbd
+ConditionPathExists=/dev/uinput
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/copilot-alt
+
+# Always come back: this is the keyboard. A crash costs nothing on its own --
+# the kernel drops the grab when the process dies, so the real keyboard is
+# immediately back with the Copilot key doing whatever Omarchy binds it to --
+# but it should not stay that way. The delay keeps a device that has gone away
+# from turning into a restart loop.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+"""Make the Copilot key a real Alt.
+
+The 2024+ ThinkPad keyboard has no key of its own between AltGr and the right
+Ctrl -- what sits there is Microsoft's Copilot key, and its firmware emits no
+keycode for it. It emits a chord: LEFTMETA, LEFTSHIFT and F23 pressed together,
+held for as long as the key is down, released together. That is why Omarchy
+binds it as `SUPER + SHIFT + code:201`; 201 is xkb's number for F23.
+
+A chord cannot be remapped in xkb, which is where every other remapping in this
+repo lives (see xkb/symbols/custom). xkb rewrites keysyms one key at a time and
+has no way to cancel the two real modifiers the firmware presses alongside F23.
+Map F23 to Alt_R there and the key yields Super+Shift+Alt -- neither an Alt any
+application will accept nor a modifier combination any binding wants to match.
+
+So this sits one level below xkb. It grabs the internal keyboard (EVIOCGRAB, so
+nothing else sees it), re-emits every event on a uinput clone, and rewrites the
+one chord into a plain LEFTALT held for exactly as long as the key is:
+
+    LEFTMETA v  LEFTSHIFT v  F23 v   ->   LEFTALT v
+    LEFTMETA ^  LEFTSHIFT ^  F23 ^   ->   LEFTALT ^
+
+Everything else passes through untouched, in its original frames.
+
+No root: /dev/input/event* is readable through the `input` group and /dev/uinput
+carries a uaccess ACL for the logged-in user. No dependencies either -- evdev
+and uinput are a handful of ioctls, spelled out below, and a keyboard that stops
+working because a Python package changed is not a trade worth making.
+
+If this process dies the kernel drops the grab and the real keyboard comes
+straight back, Copilot key included. That is the intended failure mode: never a
+keyboard you cannot type on. `--trace` exercises the whole decision path without
+grabbing anything, which is the safe way to check a change.
+"""
+
+import fcntl
+import os
+import select
+import signal
+import struct
+import sys
+import time
+
+# --- evdev and uinput ioctls ------------------------------------------------
+#
+# Spelled out rather than imported. These are the _IOC macros from
+# <asm-generic/ioctl.h>: direction in the top two bits, then the size of the
+# argument, the driver's letter, and the call's number.
+
+
+def _ioc(direction, letter, nr, size):
+    return (direction << 30) | (size << 16) | (ord(letter) << 8) | nr
+
+
+def _iow(letter, nr, size):
+    return _ioc(1, letter, nr, size)
+
+
+def _ior(letter, nr, size):
+    return _ioc(2, letter, nr, size)
+
+
+def _io(letter, nr):
+    return _ioc(0, letter, nr, 0)
+
+
+EV_SYN, EV_KEY, EV_MSC = 0x00, 0x01, 0x04
+SYN_REPORT, SYN_DROPPED = 0, 3
+MSC_SCAN = 4
+KEY_CNT = 0x300  # KEY_MAX + 1, from <linux/input-event-codes.h>
+
+EVIOCGRAB = _iow("E", 0x90, 4)
+EVIOCGID = _ior("E", 0x02, 8)
+
+
+def EVIOCGBIT(ev, length):
+    return _ior("E", 0x20 + ev, length)
+
+
+UI_DEV_CREATE = _io("U", 1)
+UI_DEV_DESTROY = _io("U", 2)
+UI_DEV_SETUP = _iow("U", 3, 92)  # sizeof(struct uinput_setup)
+UI_SET_EVBIT = _iow("U", 100, 4)
+UI_SET_KEYBIT = _iow("U", 101, 4)
+UI_SET_MSCBIT = _iow("U", 104, 4)
+
+EVENT = struct.Struct("llHHi")  # struct input_event
+
+KEY_LEFTSHIFT, KEY_LEFTALT, KEY_LEFTMETA, KEY_F23 = 42, 56, 125, 193
+CHORD_MODS = (KEY_LEFTMETA, KEY_LEFTSHIFT)
+
+# The internal keyboard, by a path that survives renumbering of /dev/input.
+KEYBOARD = "/dev/input/by-path/platform-i8042-serio-0-event-kbd"
+
+# How long a frame holding nothing but chord modifiers waits to see whether F23
+# follows it. The firmware sends all three together, but "together" is the
+# firmware's word, not a guarantee about kernel frames -- the events may arrive
+# in one frame or in three back to back, and a modifier already forwarded
+# cannot be taken back. So Super and Shift presses are withheld for this long,
+# and only Super and Shift presses: any other event flushes them immediately,
+# in order, which means typing never waits. The only delay that can actually be
+# felt is on a Super or Shift you press and then do nothing with.
+HOLD_BACK = 0.005
+
+
+class Remap:
+    """The chord rewrite, as a state machine over whole evdev frames."""
+
+    def __init__(self, emit):
+        self._emit = emit
+        self.held = []  # frames withheld pending a possible chord, oldest first
+        self.deadline = None  # when they must be released
+        self.swallowed = set()  # chord modifiers whose press we dropped
+        self.alt_down = False
+
+    def frame(self, events):
+        keys = [(c, v) for t, c, v in events if t == EV_KEY]
+
+        if any(c == KEY_F23 for c, _ in keys):
+            self.chord(events, keys)
+            return
+
+        # Nothing but presses of the chord's own modifiers: possibly the front
+        # of a chord arriving in pieces, so hold it back for HOLD_BACK.
+        if keys and all(c in CHORD_MODS and v == 1 for c, v in keys):
+            self.held.append(events)
+            self.deadline = time.monotonic() + HOLD_BACK
+            return
+
+        self.release_held()
+        self.emit(self.filtered(events))
+
+    def chord(self, events, keys):
+        value = next(v for c, v in keys if c == KEY_F23)
+
+        if value == 1:
+            # Whatever of the chord we were holding never happened, and neither
+            # did the modifier presses sharing this frame. Remember them, so
+            # their releases and repeats go the same way.
+            for frame in self.held:
+                self.swallowed.update(c for t, c, v in frame if t == EV_KEY)
+            self.held.clear()
+            self.deadline = None
+            self.swallowed.update(c for c, v in keys if c in CHORD_MODS and v == 1)
+            self.alt_down = True
+            self.emit([(EV_KEY, KEY_LEFTALT, 1)] + self.passthrough(events))
+            return
+
+        if value == 0:
+            self.alt_down = False
+            self.emit([(EV_KEY, KEY_LEFTALT, 0)] + self.passthrough(events))
+            return
+
+        # value == 2: the firmware repeating the chord while the key is held.
+        # A held modifier has nothing to repeat, so the whole frame goes.
+        self.emit(self.passthrough(events))
+
+    def passthrough(self, events):
+        """Whatever in a chord frame is not the chord. Normally nothing."""
+        out = []
+        for t, c, v in events:
+            if t == EV_MSC:
+                continue  # scancodes belong to the keys we just dropped
+            if t == EV_KEY and c == KEY_F23:
+                continue
+            if t == EV_KEY and c in CHORD_MODS:
+                if v == 0:
+                    self.swallowed.discard(c)
+                continue
+            out.append((t, c, v))
+        return out
+
+    def filtered(self, events):
+        """A normal frame, minus any echo of a press we swallowed."""
+        out, scan = [], None
+        for t, c, v in events:
+            if t == EV_MSC and c == MSC_SCAN:
+                scan = (t, c, v)  # always precedes the key it describes
+                continue
+            if t == EV_KEY and c in self.swallowed:
+                if v == 0:
+                    self.swallowed.discard(c)
+                scan = None
+                continue
+            if scan:
+                out.append(scan)
+                scan = None
+            out.append((t, c, v))
+        if scan:
+            out.append(scan)
+        return out
+
+    def release_held(self):
+        held, self.held, self.deadline = self.held, [], None
+        for frame in held:
+            self.emit(self.filtered(frame))
+
+    def emit(self, events):
+        if events:
+            self._emit(events)
+
+
+def open_keyboard(path, grab=True):
+    fd = os.open(path, os.O_RDONLY)
+    if grab:
+        try:
+            fcntl.ioctl(fd, EVIOCGRAB, 1)
+        except OSError as exc:
+            raise SystemExit(
+                f"copilot-alt: cannot grab {path}: {exc}\n"
+                "Another instance is probably already running."
+            )
+    return fd
+
+
+def make_clone(fd, name):
+    """A uinput device carrying the same keys as the real keyboard."""
+    ui = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
+
+    for ev in (EV_SYN, EV_KEY, EV_MSC):
+        fcntl.ioctl(ui, UI_SET_EVBIT, ev)
+    fcntl.ioctl(ui, UI_SET_MSCBIT, MSC_SCAN)
+
+    # Copy the real key bitmap rather than claiming every code there is: the
+    # KEY range runs through BTN_*, and a keyboard advertising mouse buttons
+    # invites libinput to classify it as something it is not.
+    keybits = bytearray(KEY_CNT // 8)
+    fcntl.ioctl(fd, EVIOCGBIT(EV_KEY, len(keybits)), keybits)
+    for code in range(KEY_CNT):
+        if keybits[code // 8] >> (code % 8) & 1:
+            fcntl.ioctl(ui, UI_SET_KEYBIT, code)
+    fcntl.ioctl(ui, UI_SET_KEYBIT, KEY_LEFTALT)  # the one key we invent
+
+    ident = bytearray(8)  # struct input_id: bustype, vendor, product, version
+    fcntl.ioctl(fd, EVIOCGID, ident)
+    setup = bytes(ident) + name.encode()[:79].ljust(80, b"\0") + struct.pack("I", 0)
+    fcntl.ioctl(ui, UI_DEV_SETUP, setup)
+    fcntl.ioctl(ui, UI_DEV_CREATE)
+    return ui
+
+
+def main():
+    trace = "--trace" in sys.argv[1:]
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    fd = open_keyboard(KEYBOARD, grab=not trace)
+    ui = None if trace else make_clone(fd, "copilot-alt keyboard")
+
+    if trace:
+        def emit(events):
+            print("  ->", " ".join(f"{t}/{c}={v}" for t, c, v in events), flush=True)
+    else:
+        def emit(events):
+            # A timestamp of zero asks the kernel for the current time.
+            blob = b"".join(EVENT.pack(0, 0, t, c, v) for t, c, v in events)
+            os.write(ui, blob + EVENT.pack(0, 0, EV_SYN, SYN_REPORT, 0))
+
+    remap = Remap(emit)
+    frame = []
+    try:
+        while True:
+            timeout = None
+            if remap.deadline is not None:
+                timeout = max(0.0, remap.deadline - time.monotonic())
+            if not select.select([fd], [], [], timeout)[0]:
+                remap.release_held()
+                continue
+            data = os.read(fd, EVENT.size * 64)
+            for offset in range(0, len(data) - EVENT.size + 1, EVENT.size):
+                _, _, etype, code, value = EVENT.unpack_from(data, offset)
+                if etype == EV_SYN:
+                    if code == SYN_REPORT:
+                        if trace:
+                            print("frame", frame, flush=True)
+                        remap.frame(frame)
+                    frame = []  # SYN_DROPPED discards the partial frame too
+                    continue
+                frame.append((etype, code, value))
+    finally:
+        if ui is not None:
+            if remap.alt_down:  # never leave Alt stuck down
+                emit([(EV_KEY, KEY_LEFTALT, 0)])
+            try:
+                fcntl.ioctl(ui, UI_DEV_DESTROY)
+            except OSError:
+                pass
+            os.close(ui)
+        os.close(fd)  # closing drops the grab
+
+
+if __name__ == "__main__":
+    main()
