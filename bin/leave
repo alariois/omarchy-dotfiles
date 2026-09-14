@@ -74,7 +74,11 @@ OTP_URL = "https://api.peatus.ee/routing/v1/routers/estonia/index/graphql"
 DEFAULT_BUS_STOP = "6288"  # Löwenruh, the platform the 85 leaves for Balti jaam
 DEFAULT_LINE = "85"
 DEFAULT_INTERCHANGE = "Balti jaam"
-DEFAULT_TRAIN_FROM = "estonia:10137"  # Tallinn; 10138 is the arrivals platform
+# The station by name, not by stop id, and that matters. Tallinn is two stops
+# -- estonia:10137 and estonia:10138 -- and neither is "the departures one":
+# R30 to Tapa leaves from 10138 while RE33 to Narva leaves from 10137. Naming
+# the station resolves both; naming one stop silently loses half the trains.
+DEFAULT_TRAIN_FROM = "Tallinn"
 DEFAULT_TRAIN_TO = "Aegviidu"
 DEFAULT_WALK = 10
 DEFAULT_TRANSFER = 5
@@ -87,6 +91,11 @@ CACHE_DIR = os.path.join(
 )
 
 TIMEOUT = 20
+
+# How close two runs of one line over one stop sequence must be before they are
+# taken for the same train listed twice. Real ELRON headways on these lines are
+# half an hour and up, so this is nowhere near a legitimate pair.
+DUP_WINDOW = 15
 
 # transport.tallinn.ee returns 403 to the default Python-urllib agent, by name.
 # This is an honest identifier rather than a browser string: the point is to be
@@ -392,7 +401,7 @@ def train_departures(origins, dest, start, count):
     estonia:10137 (departures) and estonia:10138 (arrivals). Asking only the
     first one the API happens to list means silently losing every train.
     """
-    out, seen = [], set()
+    out = []
     for origin in origins:
         data = graphql(
             f'{{ stop(id:"{origin}") {{ name stoptimesWithoutPatterns('
@@ -426,6 +435,12 @@ def train_departures(origins, dest, start, count):
             day = datetime.fromtimestamp(st["serviceDay"], TZ)
             row = {
                 "line": st["trip"]["route"]["shortName"],
+                # The terminus, for display. headsign is unreliable here: the
+                # Tapa services carry "Tallinn" (where they start) and the
+                # Rakvere one carries nothing at all.
+                "terminus": names[-1] if names else "",
+                # The whole stop sequence, used only to spot duplicates below.
+                "pattern": tuple(names),
                 "route": st["trip"]["route"]["longName"],
                 "when": day + timedelta(seconds=st["realtimeDeparture"]),
                 "scheduled": day + timedelta(seconds=st["scheduledDeparture"]),
@@ -434,15 +449,33 @@ def train_departures(origins, dest, start, count):
                 "realtime": bool(st.get("realtime")),
                 "to": hit["stop"]["name"],
             }
-            # The same working can be listed by more than one platform, and by
-            # more than one pattern on one platform.
-            key = (row["line"], row["when"], row["arrival"])
-            if key in seen:
-                continue
-            seen.add(key)
             out.append(row)
+
+    # The feed carries several regional schedules side by side, and one train
+    # can appear in two of them at slightly different times: RE33 to Narva is
+    # both 19:11 (Ida, Lõuna) and 19:15 (Edel), same route, same twenty stops
+    # in the same order, four minutes apart. Elron lists it once, at 19:11.
+    #
+    # So a duplicate is: same line, identical stop sequence, departing within
+    # DUP_WINDOW minutes. Requiring the sequence to match as well as the line
+    # is what keeps this from collapsing the hourly R31s, which share a line
+    # and a pattern but are nowhere near each other in time.
+    #
+    # The earlier one wins, deliberately. Being told 19:11 for a train that
+    # leaves 19:15 costs four minutes on the platform; being told 19:15 for a
+    # train that left at 19:11 costs the train.
     out.sort(key=lambda d: d["when"])
-    return out[:count] if count else out
+    kept = []
+    for row in out:
+        if any(
+            k["line"] == row["line"]
+            and k["pattern"] == row["pattern"]
+            and (row["when"] - k["when"]).total_seconds() <= DUP_WINDOW * 60
+            for k in kept
+        ):
+            continue
+        kept.append(row)
+    return kept[:count] if count else kept
 
 
 def resolve_train_stop(spec):
@@ -472,7 +505,12 @@ def resolve_train_stop(spec):
     ]
     if not rail:
         raise Failed(f"no rail stop named {spec!r}")
-    return [st["gtfsId"] for st in rail], rail[0]["name"], rail[0].get("desc") or ""
+    # desc describes one platform ("Rong Tallinnast väljuv suund", "Lõpp-peatus")
+    # and a station usually has two, both of which get queried. Quoting either
+    # one would describe half of what was asked, so it is only reported when the
+    # station turned out to be a single stop.
+    desc = rail[0].get("desc") or "" if len(rail) == 1 else ""
+    return [st["gtfsId"] for st in rail], rail[0]["name"], desc
 
 
 # --- output -----------------------------------------------------------------
@@ -601,6 +639,7 @@ def cmd_train(args):
                 "departure": hhmm(d["when"]),
                 "arrival": hhmm(d["arrival"]),
                 "trip_minutes": int((d["arrival"] - d["when"]).total_seconds() // 60),
+                "terminus": d["terminus"],
                 "leave_at": hhmm(leave),
                 "leave_in_minutes": rel(leave, now),
                 "headsign": d["headsign"],
@@ -615,7 +654,7 @@ def cmd_train(args):
                 hhmm(d["arrival"]),
                 dur((d["arrival"] - d["when"]).total_seconds() // 60),
                 d["line"],
-                d["headsign"] or "",
+                d["terminus"] or d["headsign"] or "",
             ]
         )
     payload = {
@@ -708,6 +747,7 @@ def cmd_leave(args):
                     "trip_minutes": int(
                         (t["arrival"] - t["when"]).total_seconds() // 60
                     ),
+                    "terminus": t["terminus"],
                     "headsign": t["headsign"],
                 },
             }
