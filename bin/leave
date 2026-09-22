@@ -587,19 +587,24 @@ def table(rows, headers, color=False):
     return "\n".join(out)
 
 
-def grid(specs, color=False):
+def grid(specs, color=False, strong=()):
     """
     Render several tables on one shared set of column widths, so that a column
     lands at the same offset in every one of them.
 
-    `specs` is [(headers, rows, striped), ...] and every header list and row in
-    every spec must be the same length -- the layout is one grid that the tables
+    `specs` is [(headers, rows, style), ...] -- style "main" gets a bold heading
+    and dim alternate rows, style "alt" is the orange block -- and every header
+    list and row must be the same length: the layout is one grid that the tables
     take turns filling in. A column left empty in a given table stays blank
     there, rule included, which is what lets the missed table skip the bus
-    columns and still line its destination up with the table below it.
+    columns and still line its destination up with the table below it. Columns
+    empty in *all* of them are dropped.
 
-    Columns that are empty in *all* of them are dropped, so a table rendered on
-    its own does not pay for padding it is not aligning to.
+    `strong` names columns to set in bold within the data rows -- the time you
+    leave and the time you arrive, so the pair that answers the question can be
+    found without reading the row. Emphasis is written as OFF-BOLD-base ...
+    OFF-base rather than a bare bold, because a plain reset inside a dim or
+    orange line would drop the rest of that line back to ordinary text.
     """
     ncols = len(specs[0][0])
     w = [0] * ncols
@@ -609,13 +614,34 @@ def grid(specs, color=False):
                 w[i] = max(w[i], len(str(c)))
     keep = [i for i in range(ncols) if w[i]]
 
-    out = []
-    for headers, rows, striped in specs:
-        def line(cells):
-            return ("  " + "  ".join(
-                str(cells[i]).ljust(w[i]) for i in keep
-            )).rstrip()
+    def render(cells, base, emphasise):
+        # Trailing blank columns are dropped rather than padded, which is the
+        # rstrip this has to do by hand: with escape codes appended after the
+        # padding, a plain rstrip would not reach the spaces.
+        last = None
+        for pos, i in enumerate(keep):
+            if str(cells[i]).strip():
+                last = pos
+        if last is None:
+            return ""
+        parts = []
+        for pos, i in enumerate(keep[: last + 1]):
+            text = str(cells[i])
+            text = text if pos == last else text.ljust(w[i])
+            if color and emphasise and i in strong and str(cells[i]).strip():
+                # Bold *instead of* dim, never both: SGR 1 and 2 are the same
+                # attribute and a terminal given both will not brighten the
+                # cell, which is the entire point of emphasising it. Colour is
+                # a different attribute, so the orange table keeps its tint.
+                lift = "" if base == DIM else base
+                text = f"{OFF}{BOLD}{lift}{text}{OFF}{base}"
+            parts.append(text)
+        line = "  " + "  ".join(parts)
+        return f"{base}{line}{OFF}" if color and base else line
 
+    out = []
+    for headers, rows, style in specs:
+        alt = style == "alt"
         # The rule is drawn to what this table actually puts in the column, not
         # to the shared width. A column stretched by another table's longer
         # header would otherwise trail dashes past its own heading.
@@ -624,18 +650,16 @@ def grid(specs, color=False):
             for i in range(ncols)
         ]
         rule = [
-            ("-" * own[i]).ljust(w[i]) if str(headers[i]).strip() else " " * w[i]
+            ("-" * own[i]) if str(headers[i]).strip() else ""
             for i in range(ncols)
         ]
-        head, ruled = line(headers), line(rule)
-        lines = (
-            [f"{BOLD}{head}{OFF}", f"{DIM}{ruled}{OFF}"]
-            if color and striped
-            else [head, ruled]
-        )
+        lines = [
+            render(headers, ORANGE if alt else BOLD, False),
+            render(rule, ORANGE if alt else DIM, False),
+        ]
         for i, row in enumerate(rows):
-            ln = line(row)
-            lines.append(f"{DIM}{ln}{OFF}" if color and striped and i % 2 else ln)
+            base = ORANGE if alt else (DIM if i % 2 else "")
+            lines.append(render(row, base, True))
         out.append("\n".join(lines))
     return out
 
@@ -927,7 +951,7 @@ def cmd_leave(args):
                     ]
                     for m in missed
                 ],
-                False,  # tinted as a block below, so no bold or stripe of its own
+                "alt",
             )
         )
 
@@ -953,17 +977,19 @@ def cmd_leave(args):
                     ]
                     for o in options
                 ],
-                True,
+                "main",
             )
         )
 
-    rendered = grid(specs, color)
+    # Column 0 is the time you act on -- LEAVE below, the train itself above --
+    # and column 6 the time you get there. Bold picks that pair out of the row.
+    rendered = grid(specs, color, strong=(0, 6))
     if missed:
         blocks += [
             tint("  NO BUS to these -- IN is how long until the train leaves",
                  ORANGE, color),
             "",
-            tint(rendered.pop(0), ORANGE, color),
+            rendered.pop(0),
             "",
         ]
     if options:
