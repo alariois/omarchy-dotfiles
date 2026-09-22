@@ -568,6 +568,7 @@ msgs --sms            # SMS only
 msgs -a superhands    # one mail account (implies --mail)
 msgs -m Junk          # a named mailbox instead of the inbox (mail only)
 msgs -d <device-id>   # a specific phone (`kdeconnect-cli -a --id-only`)
+msgs --no-cache       # re-fetch the bodies instead of reusing cached ones
 ```
 
 An SMS has no subject, so `--subject` renders it as `(SMS)`. That is what
@@ -608,6 +609,41 @@ from the envelope alone: `msgs -n 3 --subject --mail` makes 2 `envelope list`
 calls and **zero** `message read` calls, against 3 for `--text`. SMS is free
 either way — the body arrives with the conversation list, so there is no
 second call to skip.
+
+Bodies are also where all the time went, and `msgs -n 10` took 18.6s until
+three things changed. Measured, not guessed — the split came out of a
+timestamped trace:
+
+| | before | after |
+|---|---|---|
+| `msgs -n 10`, nothing cached | 18.6s | ~3s |
+| `msgs -n 10` again | 18.6s | ~1.2s |
+| `msgs -n 10 --subject` (no bodies) | 0.97s | 0.97s |
+
+- **Four fetches at a time** instead of one. `message read` takes a single id
+  and there is no batch form, so ten messages were ten processes and ten IMAP
+  sessions, strictly in turn. Eight gmail messages take 6.0s serially, 1.6s
+  at four in flight and 2.2s at eight — past four the server throttles and the
+  extra connections cost more than they buy. `MSGS_JOBS` overrides it.
+- **One jq pass over the envelopes** instead of five per message over the
+  whole merged structure. That structure is 13 MB for ten messages, one
+  newsletter being 1.9 MB of base64 on its own, and it was being re-parsed for
+  every field of every message: about half the wall clock, none of it printed.
+  Each message's body now comes out of its own file.
+- **A cache**, in `${XDG_CACHE_HOME:-~/.cache}/msgs/bodies`, keyed by
+  Message-ID. Delivered mail does not change, so the only question is how long
+  to keep it: thirty days untouched and an entry is pruned, a hit is touched.
+  Keying on the header rather than the per-mailbox id means the same mail
+  reached through two accounts is fetched once, and moving a message between
+  mailboxes does not orphan its body. `--no-cache` skips it both ways.
+  Envelope listing is never cached — that is the half that has to be current,
+  and it is already fast.
+
+What remains is the network, and one thing worth knowing: an occasional single
+`message read` stalls for ten seconds or more where its neighbours take 0.6s.
+That is not new and not the parallelism — the same stall shows up in serial
+runs — but it is now the whole of a slow run, and the cache means it is paid
+once per message ever.
 
 `--text` and `--code` tidy the body for reading: every line loses its leading
 and trailing whitespace, runs of blank lines collapse to a single one, and

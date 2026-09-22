@@ -19,6 +19,16 @@
 #   msgs -m Junk         # a named mailbox instead of the inbox (mail only)
 #   msgs --raw           # bodies as raw RFC822 instead of parsed (mail only)
 #   msgs -d <device-id>  # a specific phone (see `kdeconnect-cli -a --id-only`)
+#   msgs --no-cache      # re-fetch the bodies rather than reusing cached ones
+#
+# Bodies are fetched four at a time and kept afterwards, because reading them
+# is nearly all of what this costs: one process and one IMAP session per
+# message, and `message read` takes a single id. MSGS_JOBS sets how many run
+# at once; four is where gmail stops rewarding more. The cache lives in
+# ${XDG_CACHE_HOME:-~/.cache}/msgs/bodies, keyed by Message-ID -- delivered
+# mail does not change, so an entry is good until it is thirty days untouched
+# and pruned. --no-cache skips it in both directions. Envelope listing is not
+# cached: it is the part that has to be current, and it is already fast.
 #
 # An SMS has no subject, so --subject renders it as "(SMS)". That is what
 # marks the channel when reading: mail output is untouched, and an SMS can
@@ -143,6 +153,8 @@ count=1
 mailbox=()
 raw=()
 only_account=
+want_cache=true
+jobs=${MSGS_JOBS:-4}
 want_mail=true
 want_sms=true
 src_chosen=false
@@ -174,6 +186,7 @@ while (($#)); do
     --mail)       want_mail=true; want_sms=false; src_chosen=true; shift ;;
     --sms)        want_sms=true; want_mail=false; src_chosen=true; shift ;;
     --raw)        raw=(--raw)        ; shift ;;
+    --no-cache)   want_cache=false     ; shift ;;
     --json)       want_json=true     ; shift ;;
     --date)       want_date=true   ; any_field=true; shift ;;
     --from)       want_from=true   ; any_field=true; shift ;;
@@ -477,47 +490,133 @@ human_date() {
   printf '%s (%s)\n' "$(date -d "$iso" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "$iso")" "$rel"
 }
 
-# Build the structure with jq rather than string concatenation, so a subject
-# holding a quote or a newline cannot corrupt it.
+# One message per file, fetched several at a time, with a cache in front.
+#
+# Bodies are where this command spends its life. At -n 10 the ten reads were
+# 21 seconds of a 31-second traced run: one process, one TLS handshake and one
+# IMAP session each, strictly one after another, because `message read` takes
+# a single id and there is no batch form of it in himalaya 2.1.
+#
+# The task list is built once and indexed, and the index is the filename. That
+# is what lets the fetches run out of order and still be reassembled in order,
+# and it is also what lets the renderer below parse one message to print one
+# message rather than parsing all of them to print each one.
+tasks="$work/tasks"
+jq -r 'to_entries[]
+       | [ (.key | tostring), .value.source, .value.account,
+           (.value.envelope.id | tostring),
+           (.value.envelope["message-id"] // "") ]
+       | @tsv' <<<"$top" > "$tasks"
+
+msg_file() { printf '%s/msg.%s.json' "$work" "$1"; }
+
+# Mail is immutable once delivered, so a body fetched today is still that
+# message's body next week and the only real question is how long to keep it.
+#
+# Keyed by Message-ID rather than by the id `envelope list` returns, which is
+# per mailbox and per account: keying on the header instead means the same
+# mail reached through two accounts is fetched once, and a message moved
+# between mailboxes is not silently re-fetched under a new id. Mail with no
+# Message-ID is simply not cached. --raw is a different rendering of the same
+# message, so it belongs in the key rather than in a second cache.
+#
+# Written through a temporary name in the same directory and moved into place,
+# because a run killed mid-copy would otherwise leave a short file that every
+# later run would believe. Entries untouched for thirty days are dropped, and
+# a hit is touched, so what you keep re-reading keeps living.
+cache=
+if $want_cache && $need_body; then
+  cache=${XDG_CACHE_HOME:-$HOME/.cache}/msgs/bodies
+  if mkdir -p "$cache" 2>/dev/null; then
+    find "$cache" -type f -mtime +30 -delete 2>/dev/null || true
+  else
+    # A cache that cannot be created is not worth an error. Everything below
+    # treats an empty $cache as "fetch it every time", which is what this
+    # command did before there was a cache at all.
+    warn "could not use the cache in $cache; fetching without it"
+    cache=
+  fi
+fi
+
+cache_key() { # message-id
+  local tag=; ((${#raw[@]})) && tag=raw
+  printf '%s/%s.json' "$cache" \
+    "$(printf '%s\0%s' "$tag" "$1" | sha256sum | cut -c1-40)"
+}
+
+# Failures are recorded as files rather than returned, because these run in
+# the background where an exit status has nowhere to go. The message says
+# which message, once per message; the count is reported after the wait.
+fetch_body() { # index, account, id, message-id
+  local i=$1 acct=$2 id=$3 mid=$4 dest key=
+  dest=$(msg_file "$i")
+
+  if [[ -n $cache && -n $mid ]]; then
+    key=$(cache_key "$mid")
+    if [[ -s $key ]]; then
+      cp "$key" "$dest" 2>/dev/null && { touch "$key" 2>/dev/null; return 0; }
+    fi
+  fi
+
+  if ! himalaya --account "$acct" message read "${raw[@]}" \
+         "${mailbox[@]}" --json "$id" > "$dest" 2>/dev/null; then
+    warn "could not read message $id from '$acct'"
+    : > "$work/failed.$i"
+    return 0
+  fi
+
+  if [[ -n $key ]]; then
+    cp "$dest" "$key.$$" 2>/dev/null && mv "$key.$$" "$key" 2>/dev/null \
+      || rm -f "$key.$$"
+  fi
+  return 0
+}
+
+# Four at a time. Measured against gmail: eight messages take 6.0s one after
+# another, 1.6s with four in flight and 2.2s with eight -- past four the
+# server throttles and the extra connections cost more than they buy. Set
+# MSGS_JOBS for a link that disagrees.
+if $need_body; then
+  [[ $jobs =~ ^[1-9][0-9]*$ ]] || die "MSGS_JOBS must be a positive integer, got '$jobs'"
+  while IFS=$'\t' read -r i src acct id mid; do
+    # SMS arrives complete: the body came down with the conversation list, so
+    # there is nothing to fetch and nothing here that can fail.
+    [[ $src == mail ]] || continue
+    while (( $(jobs -rp | wc -l) >= jobs )); do wait -n || true; done
+    fetch_body "$i" "$acct" "$id" "$mid" &
+  done < "$tasks"
+  wait
+
+  shopt -s nullglob
+  failed=("$work"/failed.*)
+  shopt -u nullglob
+  ((${#failed[@]} == 0)) || die "${#failed[@]} of the messages could not be read"
+fi
+
+# --json is the only caller that wants every message in one structure, so it
+# is the only one that pays for building one.
 #
 # Message bodies go through files, never argv. Accumulating with
 # `jq --argjson o "$out"` reads naturally but passes the whole growing result
 # as a command-line argument, and dies with "Argument list too long" once the
 # bodies add up -- at -n 5 on real mail, which is well inside normal use. One
 # JSON object per line here, slurped into an array at the end.
-lines="$work/lines.jsonl"
-: > "$lines"
-
-while IFS=$'\t' read -r src acct id; do
-  # SMS arrives complete: the body came down with the conversation list, so
-  # there is nothing to fetch and nothing here that can fail.
-  if [[ $src == sms ]]; then
-    jq -c --arg id "$id" \
-       '.[] | select(.source == "sms" and .envelope.id == $id)' \
-       <<<"$top" >> "$lines"
-    continue
-  fi
-
-  if $need_body; then
-    himalaya --account "$acct" message read "${raw[@]}" \
-      "${mailbox[@]}" --json "$id" > "$work/msg.json" \
-      || die "could not read message $id from '$acct'"
-  else
-    echo null > "$work/msg.json"
-  fi
-  jq -c --arg a "$acct" --arg id "$id" --argjson t "$top" \
-     '. as $m
-      | ($t[] | select(.source == "mail" and .account == $a and .envelope.id == $id)
-        | {source: "mail", account: $a, accounts: .accounts,
-           envelope: .envelope, message: $m})' \
-     "$work/msg.json" >> "$lines"
-done < <(jq -r '.[] | "\(.source)\t\(.account)\t\(.envelope.id)"' <<<"$top")
-
-out="$work/out.json"
-jq -s '.' "$lines" > "$out"
-
 if $want_json; then
-  jq . "$out"
+  lines="$work/lines.jsonl"
+  : > "$lines"
+  while IFS=$'\t' read -r i src acct id mid; do
+    if [[ $src == sms ]]; then
+      jq -c --argjson i "$i" '.[$i]' <<<"$top" >> "$lines"
+      continue
+    fi
+    f=$(msg_file "$i")
+    [[ -s $f ]] || echo null > "$f"
+    jq -c --argjson i "$i" --argjson t "$top" \
+       '$t[$i] as $e
+        | {source: $e.source, account: $e.account, accounts: $e.accounts,
+           envelope: $e.envelope, message: .}' "$f" >> "$lines"
+  done < "$tasks"
+  jq -s '.' "$lines"
   exit 0
 fi
 
@@ -722,18 +821,27 @@ html_to_text() {
 # of the 8 messages in the inbox it was tested against; the html_body branch
 # read .body.Text too, so it could not have covered for it.
 body_text() {
-  local part
+  local i=$1 f part
 
   # An SMS body is just text. No parts, no variants, no HTML -- but it goes
   # through tidy_body all the same, because senders pad shortcodes with
-  # trailing spaces and stray blank lines exactly like mail does.
-  if [[ $(jq -r --argjson i "$1" '.[$i].source' "$out") == sms ]]; then
-    jq -r --argjson i "$1" '.[$i].sms.body' "$out" | tidy_body
+  # trailing spaces and stray blank lines exactly like mail does. It is also
+  # already in hand, having come down with the conversation list.
+  if [[ ${field[4 * i + 3]} == sms ]]; then
+    jq -r --argjson i "$i" '.[$i].sms.body' <<<"$top" | tidy_body
     return
   fi
 
-  part=$(jq -c --argjson i "$1" '
-    .[$i].message as $m
+  # One message's own file, so the cost of finding its body is the size of
+  # that message. Reading the field out of a merged structure meant parsing
+  # every body to print any of them, which at -n 10 was ten megabytes of
+  # base64 attachments re-parsed five times per message -- about half the
+  # wall clock of the whole command, none of it printed.
+  f=$(msg_file "$i")
+  [[ -s $f ]] || { echo "(no body)"; return; }
+
+  part=$(jq -c '
+    . as $m
     | if $m == null then { kind: "unfetched" }
       else (($m.text_body // []) + ($m.html_body // [])) as $cand
         | ([ $cand[] | select(($m.parts[.].body // {}) | has("Text")) ] | first) as $t
@@ -742,7 +850,7 @@ body_text() {
           elif $h != null then { kind: "Html", text: $m.parts[$h].body.Html }
           else { kind: "none" }
           end
-      end' "$out")
+      end' "$f")
 
   case $(jq -r '.kind' <<<"$part") in
     Text)      jq -r '.text' <<<"$part" | tidy_body ;;
@@ -758,27 +866,42 @@ $want_from    && (( labelw < 5 )) && labelw=5
 $want_subject && labelw=8
 true
 
-msg_count=$(jq 'length' "$out")
+# Every printable field of every message in one pass, over the envelopes
+# alone -- which are a few kilobytes whatever the bodies weigh. It used to be
+# a jq call per field per message, each one re-reading the merged structure
+# with every body in it.
+#
+# NUL-separated, because it is the one byte a subject or a sender's name
+# cannot contain, and read as a flat array of four fields per message: date,
+# from, subject, source.
+mapfile -t -d '' field < <(
+  jq -j '.[]
+         | [ (.envelope.date // ""),
+             ((.envelope.from // [])[0]
+              | if . == null then "(unknown)"
+                elif (.name // "") == "" then .email
+                else "\(.name) <\(.email)>" end),
+             (.envelope.subject // "(no subject)"),
+             .source ]
+         | map(. + "\u0000") | add' <<<"$top")
+
+msg_count=$(jq 'length' <<<"$top")
 for i in $(seq 0 $((msg_count - 1))); do
   (( i > 0 )) && echo
 
   if $want_date; then
     label Date
-    human_date "$(jq -r --argjson i "$i" '.[$i].envelope.date // ""' "$out")"
+    human_date "${field[4 * i]}"
   fi
 
   if $want_from; then
     label From
-    jq -r --argjson i "$i" '
-      (.[$i].envelope.from // [])[0]
-      | if . == null then "(unknown)"
-        elif (.name // "") == "" then .email
-        else "\(.name) <\(.email)>" end' "$out"
+    printf '%s\n' "${field[4 * i + 1]}"
   fi
 
   if $want_subject; then
     label Subject
-    jq -r --argjson i "$i" '.[$i].envelope.subject // "(no subject)"' "$out"
+    printf '%s\n' "${field[4 * i + 2]}"
   fi
 
   if $want_code; then
