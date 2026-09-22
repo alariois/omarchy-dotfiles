@@ -52,6 +52,22 @@ o.bind("SUPER + SHIFT + G", "Gmail", { webapp = "https://mail.google.com/", focu
 
 hl.unbind("SUPER + SHIFT + ALT + G")
 o.bind("SUPER + SHIFT + ALT + G", "Git Tips", { webapp = "https://docs.google.com/spreadsheets/d/1snFfD7RkxRWWVQuMJsPj-uNLnqjtcJl2M1iIpA2ZyY0/edit?gid=0#gid=0", focus = true })
+
+-- The same again on the L of the same row, for the Linux sheet.
+--
+-- No unbind here, unlike Git Tips directly above. SUPER+SHIFT+ALT+L is
+-- untouched in stock Omarchy -- it is in neither `hyprctl binds` nor the
+-- keybindings menu, and that row is busy enough to be worth checking: the
+-- same modifiers carry A, B, E, F, G, M, X, TAB, comma and the arrows, but
+-- not L. The check that would have mattered is for a keycode-spelled chord,
+-- since a plain-keysym unbind does not match one; there are no keycode binds
+-- in the tree at all, so there is nothing for L (code 46) to collide with.
+--
+-- The label is not decoration. `{ webapp = ... }` resolves to
+-- omarchy-launch-or-focus-webapp "<label>" "<url>", so it is what Omarchy
+-- matches on to raise the window that is already open rather than opening a
+-- second one -- which is also why it has to stay distinct from "Git Tips".
+o.bind("SUPER + SHIFT + ALT + L", "Linux Tips", { webapp = "https://docs.google.com/spreadsheets/d/1U6yDgIPKoSGDwnQcnE51ieKFwuWNnhHtCMVPlK8QzWk/edit?gid=0#gid=0", focus = true })
 -- SUPER + ALT + M: the newest mail, in a floating window.
 -- SUPER + ALT + CTRL + M: its login code, straight onto the clipboard.
 --
