@@ -274,6 +274,17 @@ def siri_departures(siri_id):
             expected, scheduled = int(f[2]), int(f[3])
         except ValueError:
             continue
+        # SIRI reports to the second (19:37:47). Every other time here is a
+        # whole minute, and the table prints whole minutes, so carrying the
+        # seconds only makes the arithmetic on screen stop adding up: a bus
+        # landing at 19:49:47 shows as 19:49, six minutes before a 19:55 train,
+        # while the slack it is really worth is 2m13s and prints as 2. Drop the
+        # seconds here, once, rather than explain the discrepancy forever.
+        # Compared before truncating, or a real prediction less than a minute
+        # from the timetable would stop registering as one.
+        live = expected != scheduled
+        expected -= expected % 60
+        scheduled -= scheduled % 60
         out.append(
             {
                 "mode": f[0],
@@ -286,7 +297,7 @@ def siri_departures(siri_id):
                 # A prediction that differs from the timetable is proof a real
                 # vehicle is being tracked. Equality proves nothing either way,
                 # so this under-claims rather than over-claims.
-                "realtime": expected != scheduled,
+                "realtime": live,
             }
         )
     return base + timedelta(seconds=now_s), out
@@ -638,7 +649,7 @@ def emit(payload, text, as_table):
 
 def cmd_bus(args):
     color = want_color(args.color)
-    now = datetime.now(TZ)
+    now = datetime.now(TZ).replace(second=0, microsecond=0)
     stop = resolve_bus_stop(args.stop)
     deps = bus_departures(stop, args.line, args.to, args.count, now)
     if not deps:
@@ -690,7 +701,7 @@ def cmd_bus(args):
 
 def cmd_train(args):
     color = want_color(args.color)
-    now = datetime.now(TZ)
+    now = datetime.now(TZ).replace(second=0, microsecond=0)
     start = now if not args.date else max(now, midnight(args.date))
     origin, origin_name, origin_desc = resolve_train_stop(args.origin)
     deps = train_departures(origin, args.to, start, args.count)
@@ -759,7 +770,7 @@ def cmd_leave(args):
     breaks.
     """
     color = want_color(args.color)
-    now = datetime.now(TZ)
+    now = datetime.now(TZ).replace(second=0, microsecond=0)
     stop = resolve_bus_stop(args.stop)
     origin, origin_name, origin_desc = resolve_train_stop(args.origin)
 
