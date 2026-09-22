@@ -2,15 +2,17 @@
 #
 # msg-peek -- show the newest message, mail or SMS, in a floating window.
 #
-# Bound to SUPER + ALT + M in hypr/bindings.lua, which launches a terminal
-# with --app-id=msg-peek and floats it by that id. Not useful on its own,
-# though running it in any terminal works fine.
+#   msg-peek          # read it in the pager, q to close
+#   msg-peek --nvim   # read it in a neovim buffer, ZZ or :wq to close
 #
-# --nvim puts the message in a neovim buffer instead of the pager, which is
-# what the binding uses: the message is then read with the same keys as
-# everything else on this machine, and closed with ZZ or :wq. Without it the
-# pager is unchanged, so `msg-peek` over ssh or in a plain terminal still
-# needs nothing but less.
+# Bound to SUPER + ALT + M in hypr/bindings.lua, which launches a terminal
+# with --app-id=msg-peek, floats it by that id and passes --nvim. Not useful
+# on its own, though running it in any terminal works fine.
+#
+# --nvim puts the message in a neovim buffer instead of the pager: the message
+# is then read with the same keys as everything else on this machine. Without
+# it the pager is unchanged, so `msg-peek` over ssh or in a plain terminal
+# still needs nothing but less.
 #
 # The window opens before the fetch starts, so the keypress always visibly
 # does something: IMAP takes a second or two and a window that appears only
@@ -25,19 +27,24 @@
 
 set -uo pipefail
 
+die() { echo "msg-peek: $*" >&2; exit 1; }
+
+# Help is the header block above, found the same way msgs finds its own: lines
+# 3..N that start with #, rather than a hardcoded range, so editing the header
+# cannot silently truncate what --help prints. It is also why the usage lines
+# live up there and not in a here-doc down here -- one copy, and the reader of
+# the source and the reader of --help see the same one.
+usage() {
+  awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; next } NR > 2 { exit }' "$0"
+  exit "${1:-0}"
+}
+
 viewer=pager
 while (($#)); do
   case $1 in
-    --nvim) viewer=nvim ;;
-    -h | --help)
-      printf 'usage: msg-peek [--nvim]\n\n'
-      printf '  --nvim  read the message in a neovim buffer instead of less\n'
-      exit 0
-      ;;
-    *)
-      printf 'msg-peek: unknown argument: %s\n' "$1" >&2
-      exit 2
-      ;;
+    --nvim)    viewer=nvim ;;
+    -h|--help) usage 0 ;;
+    *)         die "unknown argument: $1  (try --help)" ;;
   esac
   shift
 done
