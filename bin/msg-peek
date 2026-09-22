@@ -6,17 +6,41 @@
 # with --app-id=msg-peek and floats it by that id. Not useful on its own,
 # though running it in any terminal works fine.
 #
+# --nvim puts the message in a neovim buffer instead of the pager, which is
+# what the binding uses: the message is then read with the same keys as
+# everything else on this machine, and closed with ZZ or :wq. Without it the
+# pager is unchanged, so `msg-peek` over ssh or in a plain terminal still
+# needs nothing but less.
+#
 # The window opens before the fetch starts, so the keypress always visibly
 # does something: IMAP takes a second or two and a window that appears only
 # afterwards reads as a dropped keypress.
 #
-# Closing is `q`, not Escape. Escape can be bound in less through a lesskey
-# file, but `\e` alone risks shadowing the arrow keys, which also arrive as
-# escape sequences -- and that could not be verified here, since driving less
-# through a pty in a test harness does not deliver arrow keys at all. A pager
-# that quits when you try to scroll would be a bad trade for one keybinding.
+# Closing the pager is `q`, not Escape. Escape can be bound in less through a
+# lesskey file, but `\e` alone risks shadowing the arrow keys, which also
+# arrive as escape sequences -- and that could not be verified here, since
+# driving less through a pty in a test harness does not deliver arrow keys at
+# all. A pager that quits when you try to scroll would be a bad trade for one
+# keybinding.
 
 set -uo pipefail
+
+viewer=pager
+while (($#)); do
+  case $1 in
+    --nvim) viewer=nvim ;;
+    -h | --help)
+      printf 'usage: msg-peek [--nvim]\n\n'
+      printf '  --nvim  read the message in a neovim buffer instead of less\n'
+      exit 0
+      ;;
+    *)
+      printf 'msg-peek: unknown argument: %s\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
 
 clear
 printf '\n  Fetching messages…\n'
@@ -26,6 +50,37 @@ if ! out=$(msgs --date --from --subject --text 2>&1); then
 fi
 
 clear
+
+if [[ $viewer == nvim ]]; then
+  # `nv` cannot be called from here. It is a bash alias (shell/bashrc), so it
+  # exists only inside an interactive shell, and this runs from Hyprland's
+  # exec, which reads no profile. What the alias is actually for is the
+  # standalone config in nvim-chad/ rather than Omarchy's LazyVim, and that is
+  # one environment variable -- set here, and only if the caller has not
+  # already chosen one.
+  export NVIM_APPNAME=${NVIM_APPNAME:-nvim-chad}
+
+  # A real file, not a scratch buffer. ZZ and :wq both *write*, and a buffer
+  # with nothing behind it answers either with an error instead of closing --
+  # which would leave the window stuck on the one key you would reach for.
+  #
+  # Its own directory so the buffer is named `message.eml` and not a string of
+  # mktemp's random characters; the extension is what makes neovim choose
+  # filetype=mail, and the Date/From/Subject block msgs prints is close enough
+  # to a real header for that highlighting to land on the right lines.
+  #
+  # Under XDG_RUNTIME_DIR rather than /tmp: this is somebody's mail, and that
+  # directory is a 0700 tmpfs that goes away with the session. The file is
+  # deleted on the way out regardless, including when neovim is killed with
+  # the window -- which is also why nvim is not exec'd, since an exec would
+  # leave no shell to run the trap.
+  dir=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" msg-peek.XXXXXXXX) || exit 1
+  trap 'rm -rf "$dir"' EXIT
+  printf '%s\n' "$out" >"$dir/message.eml"
+  nvim "$dir/message.eml"
+  exit
+fi
+
 # -P sets the status line, so the hint stays put instead of scrolling away
 # with the body. --quit-on-intr makes Ctrl-C close it too.
 #

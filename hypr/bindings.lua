@@ -76,6 +76,12 @@ o.bind("SUPER + SHIFT + ALT + L", "Linux Tips", { webapp = "https://docs.google.
 -- app and a window would steal the focus you are about to type into. So the
 -- code path only ever raises toasts -- see bin/msg-otp.
 --
+-- The reader is a neovim buffer: --nvim, and the message opens in the editor
+-- this machine already uses, with its search, its yanking and its way out --
+-- ZZ or :wq. A pager would be one more set of keys to remember for the sake
+-- of one window. msg-peek without the flag still uses less, so the script
+-- keeps working anywhere the editor's config is not.
+--
 -- The window rule lives here rather than in a windows file because it is not
 -- really a window rule: it is half of this binding. --app-id is what ties them
 -- together, and it is a private id rather than the terminal's own, so the rule
@@ -95,7 +101,7 @@ o.window("^(msg-peek)$", {
 })
 
 o.bind("SUPER + ALT + M", "Latest message",
-  "setsid uwsm-app -- xdg-terminal-exec --app-id=msg-peek --title=Messages -e msg-peek")
+  "setsid uwsm-app -- xdg-terminal-exec --app-id=msg-peek --title=Messages -e msg-peek --nvim")
 o.bind("SUPER + ALT + CTRL + M", "Copy login code", "msg-otp")
 
 -- SUPER + ALT + L: when to leave for the Aegviidu train.

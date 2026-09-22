@@ -137,7 +137,7 @@ hypr-nav/                                 C source for the hypr-nav binary (buil
 himalaya/config.toml                      Gmail over IMAP for scripting (linked)
 bin/msgs                                  newest message(s), mail or SMS (linked)
 bin/msg-code                              one-time code extraction (linked)
-bin/msg-peek                              newest message in a floating window (linked)
+bin/msg-peek                              newest message in a floating nvim buffer (linked)
 bin/msg-otp                               login code to clipboard, via toast (linked)
 bin/term-here                             SUPER+RETURN, file-manager aware (linked)
 bin/files-here                            SUPER+SHIFT+F, the mirror of it (linked)
@@ -640,7 +640,7 @@ Two Hyprland bindings sit on top of all this:
 
 | Key | What |
 |---|---|
-| `SUPER + ALT + M` | the newest message, mail or SMS, in a floating window (`bin/msg-peek`) |
+| `SUPER + ALT + M` | the newest message, mail or SMS, in a floating neovim buffer (`bin/msg-peek`) |
 | `SUPER + ALT + CTRL + M` | its login code onto the clipboard, toast only (`bin/msg-otp`) |
 
 Both act on *the newest message*, whichever channel it came from. That is the
@@ -661,6 +661,17 @@ a window rule, it is half of the binding; `--app-id=msg-peek` is what ties
 them together, private rather than the terminal's own id so the rule cannot
 catch an ordinary terminal.
 
+The message lands in neovim, not a pager — `msg-peek --nvim`, which the
+binding passes and a bare `msg-peek` does not, so the script still works in a
+terminal that has no editor config to speak of. It buys the keys you already
+know for searching and yanking a code out of the body, and `ZZ` or `:wq` for
+the way out. Two things it needs to be: a real file under `XDG_RUNTIME_DIR`
+rather than a scratch buffer, since `ZZ` and `:wq` both *write* and would
+otherwise error on the one key you reach for, and `NVIM_APPNAME=nvim-chad` set
+in the script, since `nv` is a shell alias and Hyprland runs no shell. The file
+is named `message.eml` so neovim reads the `Date:`/`From:`/`Subject:` block as
+mail, and is deleted when the window closes.
+
 Three things that turned out to matter, all found by screenshotting the actual
 window rather than trusting it:
 
@@ -669,7 +680,8 @@ window rather than trusting it:
   through the body. Pinned to `1.0`.
 - **`less -c`.** `foot-extra`'s terminfo carries no `smcup`, so without an
   alternate screen `less` paints inline and leaves a short message pinned to
-  the *bottom* under a screenful of nothing.
+  the *bottom* under a screenful of nothing. Still there for `msg-peek`
+  without `--nvim`; neovim clears the window itself.
 - **Whitespace.** HTML-to-text converters leave voids — the MongoDB code mail
   is mostly empty screen — and indent everything, so the text drifts
   rightwards. Tidying now lives in `msgs` itself rather than the window,
