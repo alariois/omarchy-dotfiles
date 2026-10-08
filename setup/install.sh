@@ -25,6 +25,12 @@ MARKER='omarchy-dotfiles'
 quiet=false
 [[ ${1:-} == --quiet ]] && quiet=true
 
+# Somebody is at the keyboard to answer sudo. Not when the post-update hook
+# runs us -- it passes --quiet and captures everything we print, so a password
+# prompt would hang `omarchy update` -- and not when stdin is no terminal.
+attended=false
+if ! $quiet && [[ -t 0 ]]; then attended=true; fi
+
 repaired=0
 conflicts=0
 # Reported problems that are not conflicts: nothing is wrong with the repo or
@@ -217,6 +223,51 @@ ensure_build() {
   record_build_stamp "$dir" "$artifact"
   changed "  built    ${artifact/#"$HOME"/\~}  <-  $dir"
   repaired=$((repaired + 1))
+}
+
+# Install the pacman packages our own tools need that a stock Omarchy lacks.
+#
+# The one lane that needs root, so the one that depends on who is running us.
+# Run by hand, omarchy-pkg-add goes through sudo, which asks for the password
+# if it has none cached. Unattended there is nobody to answer, so a missing
+# package stays a warning naming the command to run -- a warning rather than a
+# conflict, like a font that failed to download: nothing is broken, something
+# is just absent.
+ensure_packages() {
+  local entry cmd pkg needs
+  local -a missing=() pkgs=()
+
+  for entry in "${PACKAGES[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r cmd pkg needs <<< "$entry"
+    if command -v "$cmd" >/dev/null 2>&1; then
+      say "  ok       $cmd"
+    else
+      missing+=("$entry")
+      pkgs+=("$pkg")
+    fi
+  done
+
+  (( ${#missing[@]} )) || return 0
+
+  # One transaction for all of them, so at most one password prompt. Its exit
+  # status is not the verdict: pacman explains its own failures, and the loop
+  # below asks whether each command now resolves.
+  if $attended; then
+    omarchy-pkg-add "${pkgs[@]}" || true
+  fi
+
+  for entry in "${missing[@]}"; do
+    IFS='|' read -r cmd pkg needs <<< "$entry"
+    if command -v "$cmd" >/dev/null 2>&1; then
+      changed "  added    $cmd  <-  pacman -S $pkg"
+      repaired=$((repaired + 1))
+    else
+      changed "  no pkg   $cmd  ->  sudo pacman -S $pkg"
+      changed "           needed by $needs"
+      warnings=$((warnings + 1))
+    fi
+  done
 }
 
 # Re-read our Hyprland config into the running session.
@@ -434,19 +485,7 @@ for entry in "${BUILDS[@]:-}"; do
 done
 
 say "Packages:"
-for entry in "${PACKAGES[@]:-}"; do
-  [[ -n $entry ]] || continue
-  IFS='|' read -r cmd pkg needs <<< "$entry"
-  if command -v "$cmd" >/dev/null 2>&1; then
-    say "  ok       $cmd"
-  else
-    # A warning, not a conflict: nothing here is broken, something is just
-    # absent, and install.sh cannot fix it without sudo it must not have.
-    changed "  no pkg   $cmd  ->  sudo pacman -S $pkg"
-    changed "           needed by $needs"
-    warnings=$((warnings + 1))
-  fi
-done
+ensure_packages
 
 say "Fonts:"
 for entry in "${FONTS[@]:-}"; do

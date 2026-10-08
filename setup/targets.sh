@@ -80,7 +80,8 @@ LINKS=(
   # slack-desktop is AUR-only. bin/slack-launch does what
   # omarchy-launch-spotify does for Spotify: focus, else launch, else offer to
   # install it in a floating terminal. It is not in PACKAGES because that lane
-  # only reports; install.sh has no sudo and must not acquire any.
+  # is pacman-only, and because Slack is wanted on demand, not on every
+  # machine install.sh sets up.
   #
   # The .desktop shadows /usr/share/applications/slack.desktop from the AUR
   # package, adding --enable-wayland-ime so the Compose key works inside
@@ -222,9 +223,10 @@ BUILDS=(
 #
 #   <command>|<pacman package>|<what stops working without it>
 #
-# Checked, never installed. install.sh has no sudo anywhere and runs unattended
-# from the post-update hook, so prompting for a password there would hang an
-# `omarchy update`. It reports these as warnings and doctor.sh lists them.
+# Installed by install.sh when it is run by hand, in one `omarchy-pkg-add`
+# that asks for the sudo password if it needs it. Run from the post-update hook
+# it only warns, because a password prompt there would hang an `omarchy
+# update`. doctor.sh lists anything still missing.
 #
 # Only genuinely missing things belong here. Verified against
 # /usr/share/omarchy/install/*.packages and pactree: jq, less, wl-clipboard and

@@ -130,8 +130,9 @@ note() { echo "==> $*"; }
 #
 # Checked rather than installed: this needs sudo, and a tool that reaches for
 # root on its own is a tool you cannot read before it runs. The message names
-# the exact command instead, the same bargain setup/install.sh makes for
-# PACKAGES.
+# the exact command instead. setup/install.sh does install its PACKAGES when
+# run from a terminal, but setting a machine up is that script's whole job; a
+# test harness that finds no QEMU should stop and say so.
 require_host() {
   local missing=()
   command -v qemu-system-x86_64 >/dev/null || missing+=(qemu-desktop)
