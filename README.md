@@ -150,6 +150,7 @@ setup/lib.sh                              freshness checks shared by the two bel
 setup/install.sh                          assert every block, link, build, package, and hook
 setup/doctor.sh                           report state and unmanaged drift
 hooks/post-update.d/reapply-dotfiles.hook re-assert blocks after `omarchy update`
+vm/omarchy-vm                             disposable Omarchy VM for testing all of the above
 ```
 
 ## Usage
@@ -204,6 +205,78 @@ config against the shipped stock template *with our managed blocks stripped
 out*, so anything it reports is a local edit this repo is not capturing. Port
 it into the repo as a delta, or revert it with
 `omarchy refresh config <path>`.
+
+## Testing in a VM
+
+`vm/omarchy-vm` boots a disposable stock Omarchy in QEMU, for testing what this
+repo does to a machine it has never touched. Pointing `install.sh` at an empty
+`HOME` proves the plumbing but not the part that matters: there, Omarchy's own
+files contain nothing but our block. Whether our include still wins below the
+stock content, and whether the post-update hook puts the block back after a
+migration clobbers it, only a real Omarchy can answer.
+
+It is a golden base disk plus a throwaway overlay:
+
+| Command | What it does |
+|---|---|
+| `install` | download and verify the pinned ISO, create the base disk, boot the installer. Once, slow. |
+| `reset` | delete the overlay and cut a new one off the base. Instant. |
+| `run` | boot the overlay; changes last until the next `reset` |
+| `throwaway` | boot the base with every write discarded on shutdown |
+| `base-shell` | boot the base **read-write**, for what every fresh machine should have |
+
+Nothing writes to the base after `install` except `base-shell`, so a pristine
+machine is always one `reset` away. Everything lives in
+`~/.local/share/omarchy-vm` (ISO, base, overlay, UEFI vars), outside the repo.
+
+The loop, once the base exists:
+
+```bash
+vm/omarchy-vm reset            # fresh machine
+vm/omarchy-vm run &            # boot it
+vm/omarchy-vm push             # rsync this working tree, uncommitted changes included
+vm/omarchy-vm ssh              # then: cd projects/omarchy-dotfiles && ./setup/install.sh
+```
+
+`push` copies the working tree rather than having the guest clone from GitHub,
+so what gets tested is the repo as it is now, not as of the last commit.
+
+### Setting it up once
+
+1. **Host packages:** `sudo pacman -S --needed qemu-desktop edk2-ovmf`, and
+   your user in the `kvm` group. `socat` is needed for `console` and for
+   answering the unlock prompt, `rsync` for `push`. `vm/omarchy-vm status`
+   checks the host and lists what exists.
+2. **`vm/omarchy-vm install`**, then install Omarchy by hand. The script prints
+   what to do inside the guest before it boots: turn disk encryption off, and
+   install and enable `openssh` with `ufw allow 22/tcp` (stock Omarchy ships
+   neither sshd enabled nor port 22 open). Do not install this repo there; an
+   untouched Omarchy is the point of the base.
+3. **`vm/omarchy-vm user <name>`** with the account you created in the
+   installer, since `ssh` and `push` cannot guess it.
+4. If the base disk ended up encrypted anyway, **`vm/omarchy-vm luks-set`**
+   stores the passphrase and every boot answers the unlock prompt itself. The
+   prompt goes to the serial console, so without this the VM window just looks
+   dead.
+5. **`vm/omarchy-vm prep-base`**, which boots the base, installs your ssh key
+   and gives the guest account passwordless sudo, then powers off and cuts a
+   fresh overlay. You type the guest password twice, once for ssh-copy-id and
+   once for sudo, and never again: every reset after this can be pushed to,
+   run `install.sh` (packages included) and be stopped without you. The sudo
+   rule is a single drop-in, `/etc/sudoers.d/90-omarchy-vm`, which is fine for
+   a disposable guest and never something to copy to a real machine.
+
+### When the guest misbehaves
+
+`console` attaches to the serial console (Ctrl-] detaches), the way in when
+the screen is black or sshd is down. `log` prints this boot's serial output,
+`screenshot` captures the guest's own screen, and `stop` shuts it down over ssh
+(`--force` pulls the plug, which costs nothing on an overlay). The clipboard is
+bridged both ways on every boot; `OMARCHY_VM_CLIPBOARD=0` turns that off.
+Memory, CPUs, disk size, ssh port and ISO version can all be overridden with
+environment variables, listed in `vm/omarchy-vm --help`. The reasoning behind
+each choice (USB input, `virtio-vga-gl`, the ssh and firewall steps) is in the
+script's comments.
 
 ## Adding a delta
 

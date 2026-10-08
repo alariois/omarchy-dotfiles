@@ -681,6 +681,178 @@ EOF
   note "base disk closed -- '$0 reset' to cut a fresh overlay off the new state"
 }
 
+# The sudoers drop-in prep-base writes in the guest. A file of its own, so it
+# is obvious where it came from and one `rm` undoes it.
+GUEST_SUDOERS=/etc/sudoers.d/90-omarchy-vm
+
+# Wait for the guest's sshd by reading its banner and hanging up -- never by
+# logging in. Polling with real logins before the guest has our key is a failed
+# authentication every few seconds, and sshd's PerSourcePenalties counts them.
+# Every connection arrives from QEMU's one NAT address, so it ends up refusing
+# all of them with "Not allowed at this time", which is how the first
+# unattended run locked itself out.
+wait_for_sshd() {
+  local i banner
+  for i in $(seq 1 60); do
+    guest_running || return 1
+    banner=$(timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$SSH_PORT && head -c 7 <&3" 2>/dev/null) || true
+    [[ $banner == SSH-2.0 ]] && return 0
+    sleep 5
+  done
+  return 1
+}
+
+# Can we log in with the key alone? Its own option list rather than
+# guest_ssh plus overrides, because ssh keeps the FIRST value it sees for an
+# option: appended to ssh_opts, ControlPath=none loses to the shared socket,
+# and a master connection opened with a password would answer yes for a key
+# that was never installed.
+key_login_works() {
+  ssh -p "$SSH_PORT" \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+      -o BatchMode=yes -o ControlMaster=no -o ControlPath=none \
+      "$(guest_user)@localhost" true 2>/dev/null
+}
+
+sudo_is_passwordless() {
+  guest_ssh 'sudo -k; sudo -n true' 2>/dev/null
+}
+
+# However prep-base ends, a guest left running is the BASE, open read-write --
+# never something to leave unremarked, or to reset an overlay underneath.
+prep_base_exit() {
+  disarm_helpers
+  guest_running || return 0
+  echo >&2
+  echo "omarchy-vm: the guest is still running on the BASE disk, read-write." >&2
+  echo "  Shut it down from inside the guest (or '$0 stop' once sudo is passwordless)," >&2
+  echo "  then '$0 reset' so the overlay is cut off the changed base." >&2
+}
+
+# Is the running guest the base, open read-write? True for base-shell and for
+# a prep-base that stopped partway; false for an overlay, and false for
+# throwaway, whose -snapshot would silently discard anything prep-base wrote.
+guest_on_base_rw() {
+  local cmdline
+  guest_running || return 1
+  cmdline=$(tr '\0' '\n' < "/proc/$(cat "$PIDFILE")/cmdline" 2>/dev/null) || return 1
+  grep -q "file=$BASE," <<< "$cmdline" && ! grep -qx -- -snapshot <<< "$cmdline"
+}
+
+# Make the base drivable without a person: your ssh key, and passwordless sudo
+# for the guest account. With both, push, install.sh's package installs and
+# stop all run unattended on every machine a reset hands back.
+#
+# Both have to live in the base -- written to an overlay they are gone at the
+# next reset -- which makes this the one command besides base-shell that writes
+# the base. So it asks first, and touches nothing but the guest account's
+# authorized_keys and one sudoers drop-in. Passwordless sudo is fine here only
+# because the guest is disposable and holds nothing worth protecting.
+cmd_prep_base() {
+  require_host
+  # A guest already on the base read-write is picked up rather than refused:
+  # that is what a run cut short by a mistyped password leaves behind, and
+  # making you shut it down by hand just to boot it again helps nobody.
+  local attach=false
+  if guest_on_base_rw; then
+    attach=true
+  else
+    require_no_guest
+  fi
+  [[ -f $BASE ]] || die "no base disk yet -- run '$0 install' first"
+  [[ -t 0 ]] || die "run this from a terminal -- it asks for the guest password"
+  command -v ssh-copy-id >/dev/null || die "ssh-copy-id not installed"
+  ensure_vars
+
+  local user; user=$(guest_user)
+  cat <<EOF
+
+  This $($attach && echo "uses the running" || echo "boots the") GOLDEN BASE read-write and adds two things to it, for the
+  guest account '$user':
+
+    ~/.ssh/authorized_keys          your ssh key, so ssh and push need no password
+    $GUEST_SUDOERS   passwordless sudo, so install.sh and stop run unattended
+
+  Have the guest's password ready: ssh-copy-id asks for it, then sudo asks
+  once more. Afterwards the guest powers off and a fresh overlay is cut.
+
+EOF
+  read -rp "  Press Enter to continue, Ctrl-C to bail... " _
+
+  trap prep_base_exit EXIT
+  # Exit on Ctrl-C rather than carry on: a trap that only cleans up leaves bash
+  # running the next command, so the wait loops below would shrug it off.
+  trap 'exit 130' INT TERM
+
+  local qemu_pid="" i
+  if $attach; then
+    note "a guest is already running on the base read-write -- continuing with it"
+  else
+    # The LUKS watcher only, not arm_helpers: the clipboard autostart polls with
+    # real ssh logins, which is the penalty problem wait_for_sshd exists to avoid.
+    luks_unlock_watch &
+    HELPER_PIDS+=($!)
+
+    # setsid, so Ctrl-C at one of the password prompts stops this script and
+    # not the guest. Without it QEMU shares our process group, takes the same
+    # SIGINT, and the base disk loses power while it is open read-write.
+    local args; mapfile -t args < <(qemu_args)
+    note "booting the base read-write"
+    setsid qemu-system-x86_64 "${args[@]}" \
+      -drive "file=$BASE,if=virtio,format=qcow2,cache=writeback,discard=unmap" &
+    qemu_pid=$!
+
+    for i in $(seq 1 20); do
+      guest_running && break
+      sleep 0.5
+    done
+    guest_running || die "qemu exited before the guest started"
+  fi
+
+  note "waiting for the guest's sshd (an encrypted disk unlocks itself if 'luks-set' was run)"
+  if ! wait_for_sshd; then
+    guest_running || die "the guest exited before its sshd answered"
+    die "the guest's sshd never answered on port $SSH_PORT -- look at its window, or '$0 console'"
+  fi
+
+  if key_login_works; then
+    note "ssh key already authorized"
+  else
+    note "installing your ssh key -- enter the guest password for '$user'"
+    local opts; mapfile -t opts < <(ssh_opts)
+    ssh-copy-id "${opts[@]}" "$user@localhost" || die "ssh-copy-id failed"
+    key_login_works || die "the key was copied, but logging in with it still fails"
+    note "ssh key works"
+  fi
+
+  if sudo_is_passwordless; then
+    note "passwordless sudo already set up"
+  else
+    note "setting up passwordless sudo -- sudo will ask for the guest password"
+    # visudo checks the line before it goes anywhere near /etc/sudoers.d: a
+    # drop-in with a syntax error breaks sudo outright, in a base that has no
+    # other way to get root back.
+    local line remote
+    line="$user ALL=(ALL:ALL) NOPASSWD: ALL"
+    remote="t=\$(mktemp) && printf '%s\n' $(printf %q "$line") > \"\$t\" && sudo visudo -c -q -f \"\$t\" && sudo install -m 0440 -o root -g root \"\$t\" $GUEST_SUDOERS; s=\$?; rm -f \"\$t\"; exit \$s"
+    guest_ssh -t "$remote" || die "could not install $GUEST_SUDOERS"
+    sudo_is_passwordless || die "$GUEST_SUDOERS is in place, but sudo still wants a password"
+    note "passwordless sudo works"
+  fi
+
+  note "powering the guest off"
+  guest_ssh 'sudo -n systemctl poweroff' >/dev/null 2>&1 || true
+  for i in $(seq 1 90); do
+    guest_running || break
+    sleep 1
+  done
+  guest_running && die "the guest is still up after 90s"
+  [[ -n $qemu_pid ]] && { wait "$qemu_pid" 2>/dev/null || true; }
+
+  cmd_reset
+  note "done: every reset now gives a guest that ssh, push, install.sh and stop can drive unattended"
+}
+
 cmd_reset() {
   require_host
   [[ -f $BASE ]] || die "no base disk yet -- run '$0 install' first"
@@ -1113,6 +1285,7 @@ omarchy-vm -- a disposable Omarchy for testing this repo from nothing
   install             create the base disk and boot the installer (once, slow)
   reset               discard the overlay, cut a fresh one off the base (instant)
   base-shell          boot the BASE read-write, to change what every reset gives you
+  prep-base           put your ssh key and passwordless sudo in the base (once)
   run                 boot the overlay; changes persist until the next reset
   throwaway           boot the base read-only; changes discarded on shutdown
   push                rsync this working tree into the guest over ssh
@@ -1150,6 +1323,7 @@ case ${1:-} in
   install)   shift; cmd_install "$@" ;;
   reset)     shift; cmd_reset "$@" ;;
   base-shell) shift; cmd_base_shell "$@" ;;
+  prep-base) shift; cmd_prep_base "$@" ;;
   run)       shift; cmd_run "$@" ;;
   throwaway) shift; cmd_throwaway "$@" ;;
   push)      shift; cmd_push "$@" ;;
