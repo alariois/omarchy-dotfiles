@@ -28,8 +28,11 @@ quiet=false
 # Somebody is at the keyboard to answer sudo. Not when the post-update hook
 # runs us -- it passes --quiet and captures everything we print, so a password
 # prompt would hang `omarchy update` -- and not when stdin is no terminal.
+#
+# DOTFILES_ATTENDED=1 says so without a terminal: for the VM test and CI,
+# where sudo needs no password and there is no keyboard either.
 attended=false
-if ! $quiet && [[ -t 0 ]]; then attended=true; fi
+if ! $quiet && { [[ -t 0 ]] || [[ ${DOTFILES_ATTENDED-} == 1 ]]; }; then attended=true; fi
 
 repaired=0
 conflicts=0
@@ -48,6 +51,10 @@ changed() { echo "$@"; }
 source "$DOTFILES/setup/targets.sh"
 # shellcheck source=lib.sh
 source "$DOTFILES/setup/lib.sh"
+# shellcheck source=../lib/env.sh
+source "$DOTFILES/lib/env.sh"
+# shellcheck source=../lib/cloud.sh
+source "$DOTFILES/lib/cloud.sh"
 
 # Set when a target under ~/.config/hypr was rewritten, so the reload at the
 # end fires even if the repo payloads themselves are unchanged.
@@ -140,7 +147,11 @@ ensure_link() {
   fi
 
   if [[ -L $target ]]; then
-    if [[ $(readlink -f "$target") == "$abs" ]]; then
+    # Resolved on both sides, not compared with the payload's own path: a
+    # payload that is itself a link (bin/leave-bus -> leave) resolves past
+    # it, and the comparison failed on every run -- relinking, and making the
+    # post-update hook report a repair after every `omarchy update`.
+    if [[ $(readlink -f "$target") == "$(readlink -f "$abs")" ]]; then
       say "  ok       ${target/#"$HOME"/\~}"
       return 0
     fi
@@ -234,13 +245,23 @@ ensure_build() {
 # conflict, like a font that failed to download: nothing is broken, something
 # is just absent.
 ensure_packages() {
-  local entry cmd pkg needs
-  local -a missing=() pkgs=()
+  local entry cmd pkg needs prefix old new why path owner
+  local -a missing=() pkgs=() remove=() removing_for=()
+
+  # Old packages in the way of new ones -- only if pacman actually has them.
+  for entry in "${REPLACED[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r old new why <<< "$entry"
+    if pkg_installed "$old"; then
+      remove+=("$old")
+      removing_for+=("$entry")
+    fi
+  done
 
   for entry in "${PACKAGES[@]:-}"; do
     [[ -n $entry ]] || continue
-    IFS='|' read -r cmd pkg needs <<< "$entry"
-    if command -v "$cmd" >/dev/null 2>&1; then
+    IFS='|' read -r cmd pkg needs prefix <<< "$entry"
+    if package_ok "$cmd" "$prefix"; then
       say "  ok       $cmd"
     else
       missing+=("$entry")
@@ -248,26 +269,138 @@ ensure_packages() {
     fi
   done
 
-  (( ${#missing[@]} )) || return 0
+  (( ${#missing[@]} + ${#remove[@]} )) || return 0
 
-  # One transaction for all of them, so at most one password prompt. Its exit
-  # status is not the verdict: pacman explains its own failures, and the loop
-  # below asks whether each command now resolves.
+  # Neither exit status is the verdict -- pacman explains its own failures,
+  # and the loops below ask what is actually installed now.
   if $attended; then
-    omarchy-pkg-add "${pkgs[@]}" || true
+    local -a replacements=() rest=()
+    local failed=false
+    for entry in "${removing_for[@]:-}"; do
+      [[ -n $entry ]] || continue
+      IFS='|' read -r old new why <<< "$entry"
+      replacements+=("$new")
+    done
+    for pkg in "${pkgs[@]:-}"; do
+      [[ -n $pkg ]] || continue
+      printf '%s\n' "${replacements[@]:-}" | grep -qxF "$pkg" || rest+=("$pkg")
+    done
+
+    # A replacement is one transaction: the old package goes only as part of
+    # installing the new one, so a download that fails leaves the old one in
+    # place. Removing first and installing second was tried -- and with a
+    # package database a month old, v2's download 404'd after v1 was already
+    # gone, which left no aws at all. --ask 4 answers pacman's "Remove
+    # aws-cli?" with yes where --noconfirm would answer no: 4 is
+    # ALPM_QUESTION_CONFLICT_PKG in alpm.h, and --ask inverts the default
+    # answer for the question types it names. Kept to the declared
+    # replacements, so it never removes anything nobody listed.
+    if (( ${#replacements[@]} )); then
+      sudo pacman -S --noconfirm --needed --ask 4 "${replacements[@]}" || failed=true
+    fi
+    if (( ${#rest[@]} )); then
+      omarchy-pkg-add "${rest[@]}" || failed=true
+    fi
+    if $failed; then
+      changed "  pacman   an install failed. If it says 404 or 'failed retrieving file', the package"
+      changed "           database is older than the mirrors: 'omarchy update', then install.sh again"
+    fi
   fi
 
-  for entry in "${missing[@]}"; do
-    IFS='|' read -r cmd pkg needs <<< "$entry"
-    if command -v "$cmd" >/dev/null 2>&1; then
+  for entry in "${removing_for[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r old new why <<< "$entry"
+    if pkg_installed "$old"; then
+      changed "  replace  $old  ->  sudo pacman -Rns $old && sudo pacman -S $new"
+      changed "           $why"
+      warnings=$((warnings + 1))
+    else
+      changed "  removed  $old  ($why)"
+      repaired=$((repaired + 1))
+    fi
+  done
+
+  for entry in "${missing[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r cmd pkg needs prefix <<< "$entry"
+    if package_ok "$cmd" "$prefix"; then
       changed "  added    $cmd  <-  pacman -S $pkg"
       repaired=$((repaired + 1))
+    elif path=$(command -v "$cmd" 2>/dev/null); then
+      # There, but the wrong version. When it is the package being replaced,
+      # the replace line above already says what to do.
+      owner=$(pacman -Qoq "$path" 2>/dev/null) || owner=""
+      if [[ -n $owner ]] && printf '%s\n' "${remove[@]:-}" | grep -qxF "$owner"; then
+        continue
+      fi
+      changed "  old ver  $cmd  ->  $path is $("$cmd" --version 2>&1 | head -n 1), not $prefix*"
+      if [[ -z $owner ]]; then
+        changed "           not from pacman -- remove it yourself; install.sh does not delete what it did not install"
+      fi
+      warnings=$((warnings + 1))
     else
       changed "  no pkg   $cmd  ->  sudo pacman -S $pkg"
       changed "           needed by $needs"
       warnings=$((warnings + 1))
     fi
   done
+}
+
+# Is this exact package installed? Not `pacman -Q <name>` alone: that answers
+# for provided names too, and aws-cli-v2 provides aws-cli -- so once v2 was in,
+# asking about v1 would answer yes, and "removing v1" would remove v2.
+pkg_installed() { [[ $(pacman -Qq "$1" 2>/dev/null) == "$1" ]]; }
+
+# An entry is satisfied by its command existing -- and, when it names a
+# version prefix, by `--version` starting with it.
+package_ok() {
+  command -v "$1" >/dev/null 2>&1 || return 1
+  [[ -z ${2:-} ]] && return 0
+  [[ $("$1" --version 2>&1 | head -n 1) == "$2"* ]]
+}
+
+# env.yaml: the encrypted file of accounts and secrets. Its structure is
+# checked against env.example.yaml, and everything derived from it -- the AWS
+# profiles in ~/.aws/config and the account list the scripts and the prompt
+# read -- is regenerated. A machine without env.yaml skips all of it.
+ensure_env() {
+  local diff errs line
+  if [[ ! -f $ENV_FILE ]]; then
+    say "  skip     no env.yaml -- 'env-secrets init' starts one"
+    return 0
+  fi
+  if ! command -v sops >/dev/null || ! command -v yq >/dev/null; then
+    changed "  no env   env.yaml needs sops and yq, which are not installed"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+
+  if diff=$(env_structure_diff); then
+    say "  ok       env.example.yaml matches env.yaml"
+  else
+    changed "  example  env.example.yaml no longer matches env.yaml:"
+    while IFS= read -r line; do changed "           $line"; done <<< "$diff"
+    warnings=$((warnings + 1))
+  fi
+  if ! env_is_encrypted; then
+    changed "  plain    env.yaml is not encrypted -- 'env-secrets init' encrypts it"
+    warnings=$((warnings + 1))
+  fi
+
+  errs=$(mktemp)
+  if cloud_sync --force 2>"$errs"; then
+    if (( CLOUD_CHANGED )); then
+      changed "  synced   ~/.aws/config and the account list  <-  env.yaml"
+      repaired=$((repaired + 1))
+    else
+      say "  ok       ~/.aws/config and the account list match env.yaml"
+    fi
+  else
+    changed "  no sync  could not regenerate the cloud profiles from env.yaml:"
+    while IFS= read -r line; do changed "           $line"; done < "$errs"
+    warnings=$((warnings + 1))
+  fi
+  rm -f "$errs"
 }
 
 # Re-read our Hyprland config into the running session.
@@ -486,6 +619,9 @@ done
 
 say "Packages:"
 ensure_packages
+
+say "Environment:"
+ensure_env
 
 say "Fonts:"
 for entry in "${FONTS[@]:-}"; do

@@ -192,7 +192,23 @@ LINKS=(
   # back to the packaged widget. Put it back with:
   #   omarchy-plugin-enable alari.workspaces
   "$HOME/.config/omarchy/plugins/alari.workspaces|omarchy-shell/workspaces"
+
+  # Cloud accounts from env.yaml: switch this terminal to one (the shell
+  # functions in shell/bashrc wrap the first two), the credential_process the
+  # generated AWS profiles call, and the command for env.yaml itself. All
+  # four are ours alone. See lib/cloud.sh and lib/env.sh.
+  "$HOME/.local/bin/aws-select|bin/aws-select"
+  "$HOME/.local/bin/az-select|bin/az-select"
+  "$HOME/.local/bin/aws-env-credentials|bin/aws-env-credentials"
+  "$HOME/.local/bin/env-secrets|bin/env-secrets"
 )
+
+# The pre-commit hook that keeps env.yaml out of the history and
+# env.example.yaml in step with it. Only in a real checkout: a copy without
+# .git would otherwise get one made for the link to live in.
+if [[ -d $DOTFILES/.git ]]; then
+  LINKS+=("$DOTFILES/.git/hooks/pre-commit|git-hooks/pre-commit")
+fi
 
 # SEEDS -- machine-local files this repo deliberately does not own. install.sh
 # copies the template in when the target is missing and never touches it again,
@@ -221,7 +237,11 @@ BUILDS=(
 
 # PACKAGES -- commands our own tools need that a stock Omarchy does not ship.
 #
-#   <command>|<pacman package>|<what stops working without it>
+#   <command>|<pacman package>|<what stops working without it>[|<version prefix>]
+#
+# The optional fourth field is what `<command> --version` must start with.
+# Without it any command of that name will do -- which is wrong for aws, where
+# AWS CLI v1 answers to the same name and is not what aws-select is built on.
 #
 # Installed by install.sh when it is run by hand, in one `omarchy-pkg-add`
 # that asks for the sudo password if it needs it. Run from the post-update hook
@@ -247,6 +267,32 @@ PACKAGES=(
   "himalaya|himalaya|msgs and friends -- the mail half of the message stack"
   "python3|python|msg-code, so --code and msg-otp find one-time codes"
   "kdeconnect-cli|kdeconnect|msgs --sms -- the SMS half, read over DBus"
+
+  # Cloud accounts. Both CLIs from Arch's own repos rather than the vendors'
+  # installers, so they update with `omarchy update` like everything else --
+  # usually within weeks of a release. sops and age are what env.yaml is
+  # encrypted with; yq reads its structure (lib/env.sh).
+  "aws|aws-cli-v2|aws-select, and every AWS profile generated from env.yaml|aws-cli/2."
+  "az|azure-cli|az-select"
+  "sops|sops|env.yaml, which is encrypted -- and so everything that reads it"
+  "age-keygen|age|env-secrets, which keeps env.yaml's age key"
+  "yq|go-yq|env-secrets check and the pre-commit hook"
+)
+
+# REPLACED -- installed packages that must go before a PACKAGES entry can come
+# in, because the two conflict.
+#
+#   <old package>|<new package>|<why>
+#
+# This cannot be left to omarchy-pkg-add. It installs with --noconfirm, and
+# --noconfirm answers pacman's "Remove aws-cli? [y/N]" with its default, N, so
+# the install fails on an unresolvable conflict. install.sh installs the new
+# package in a transaction that also removes the old one, so a failed download
+# leaves the old one where it was. Only a pacman-installed old package is
+# handled; an aws v1 from pip or Amazon's bundled installer is reported,
+# never deleted, like any file this repo does not recognise.
+REPLACED=(
+  "aws-cli|aws-cli-v2|AWS CLI v1; aws-select needs v2"
 )
 
 # FONTS -- families we ask for that Omarchy does not ship, installed per-user

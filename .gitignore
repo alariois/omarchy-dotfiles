@@ -17,3 +17,8 @@ hypr-nav/test_hypr_nav
 *.key
 *.pem
 *.secret
+
+# This machine's accounts and their secrets: encrypted, but still never
+# committed. env.example.yaml is the tracked twin; git-hooks/pre-commit
+# refuses a commit that stages this file anyway.
+/env.yaml

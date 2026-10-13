@@ -41,6 +41,10 @@ tilde() { echo "${1/#"$HOME"/\~}"; }
 source "$DOTFILES/setup/targets.sh"
 # shellcheck source=lib.sh
 source "$DOTFILES/setup/lib.sh"
+# shellcheck source=../lib/env.sh
+source "$DOTFILES/lib/env.sh"
+# shellcheck source=../lib/cloud.sh
+source "$DOTFILES/lib/cloud.sh"
 
 echo "== Managed include blocks =="
 # Also check WHERE each block points. Nothing stops a second checkout existing
@@ -89,7 +93,9 @@ else
   for entry in "${LINKS[@]}"; do
     [[ -n $entry ]] || continue
     IFS='|' read -r target payload <<< "$entry"
-    if [[ -L $target && $(readlink -f "$target") == "$DOTFILES/$payload" ]]; then
+    # Resolved on both sides: bin/leave-bus is itself a link to bin/leave, so
+    # the live link resolves to leave and never equals the payload's own path.
+    if [[ -L $target && $(readlink -f "$target") == "$(readlink -f "$DOTFILES/$payload")" ]]; then
       echo "  linked   $(tilde "$target")  ->  $payload"
     elif [[ -e $target ]]; then
       echo "  STALE    $(tilde "$target")   -> real file/dir, or link elsewhere"
@@ -157,14 +163,72 @@ if (( pkg_count == 0 )); then
 else
   for entry in "${PACKAGES[@]}"; do
     [[ -n $entry ]] || continue
-    IFS='|' read -r cmd pkg needs <<< "$entry"
-    if command -v "$cmd" >/dev/null 2>&1; then
-      echo "  ok       $cmd"
-    else
+    IFS='|' read -r cmd pkg needs prefix <<< "$entry"
+    if ! path=$(command -v "$cmd" 2>/dev/null); then
       echo "  MISSING  $cmd   -> sudo pacman -S $pkg"
       echo "           needed by $needs"
+    elif [[ -n $prefix && $("$cmd" --version 2>&1 | head -n 1) != "$prefix"* ]]; then
+      echo "  STALE    $cmd   -> $path is $("$cmd" --version 2>&1 | head -n 1), not $prefix*"
+      echo "           needed by $needs"
+    else
+      echo "  ok       $cmd"
     fi
   done
+fi
+for entry in "${REPLACED[@]:-}"; do
+  [[ -n $entry ]] || continue
+  IFS='|' read -r old new why <<< "$entry"
+  # -Qq and compare: plain -Q answers for provided names, and the new package
+  # provides the old one's name.
+  if [[ $(pacman -Qq "$old" 2>/dev/null) == "$old" ]]; then
+    echo "  STALE    $old   -> still installed; setup/install.sh replaces it with $new"
+    echo "           $why"
+  fi
+done
+
+echo
+echo "== Environment =="
+# env.yaml and what is generated from it (lib/env.sh, lib/cloud.sh).
+if [[ ! -f $ENV_FILE ]]; then
+  echo "  SKIP     no env.yaml -- 'env-secrets init' starts one from env.example.yaml"
+else
+  if env_is_encrypted; then
+    echo "  ok       env.yaml is encrypted"
+  else
+    echo "  BROKEN   env.yaml is NOT encrypted -> env-secrets init"
+  fi
+  if ! command -v yq >/dev/null || ! command -v sops >/dev/null; then
+    echo "  MISSING  sops/yq   -> setup/install.sh installs them"
+  else
+    if env_diff=$(env_structure_diff); then
+      echo "  ok       env.example.yaml has env.yaml's structure"
+    else
+      echo "  STALE    env.example.yaml   -> does not match env.yaml:"
+      sed 's/^/             /' <<< "$env_diff"
+    fi
+    if env_data=$(env_json 2>/dev/null); then
+      echo "  ok       env.yaml opens with the key available here"
+      if [[ -f $CLOUD_INDEX && $CLOUD_INDEX -nt $ENV_FILE ]]; then
+        echo "  ok       cloud profiles generated from the current env.yaml"
+      else
+        echo "  STALE    cloud profiles   -> env.yaml changed since; any aws-select, az-select or setup/install.sh regenerates them"
+      fi
+      # Client secrets expire -- Azure's after two years at most -- and an
+      # expired one fails as a plain login error. Thirty days of warning.
+      while IFS=$'\t' read -r name expires; do
+        [[ -n $expires ]] || continue
+        days=$(( ( $(date -d "$expires" +%s 2>/dev/null || echo 0) - $(date +%s) ) / 86400 ))
+        if (( days < 0 )); then
+          echo "  BROKEN   $name   -> its client secret expired on $expires"
+        elif (( days < 30 )); then
+          echo "  STALE    $name   -> its client secret expires in $days day(s), on $expires"
+        fi
+      done < <(jq -r '(.azure // [])[] | [.name, (.secret_expires // "" | tostring)] | @tsv' <<< "$env_data")
+      unset env_data
+    else
+      echo "  MISSING  the age key   -> env.yaml cannot be opened here; env-secrets import-key"
+    fi
+  fi
 fi
 
 echo
@@ -347,6 +411,24 @@ for root in "${STOCK_ROOTS[@]}"; do
         index($0, ">>> " m " >>>") { skip = 1; next }
         index($0, "<<< " m " <<<") { skip = 0; next }
         !skip' "$live" > "$tmp_live"
+      cmp_live="$tmp_live"
+    fi
+
+    # Omarchy's installer writes the name and email it asked for into
+    # git/config (install/user/git.sh, `git config --global user.*`), so on
+    # every machine it installed that file differs from stock by exactly
+    # that. It is the installer's answer, not a local edit -- like the
+    # XCompose identity lines -- so it is not drift. Anything else in [user]
+    # still is.
+    if [[ $rel == git/config ]] && grep -qx '\[user\]' "$cmp_live"; then
+      [[ -n $tmp_live ]] || tmp_live=$(mktemp)
+      awk '
+        /^\[user\]$/ { u = 1; held = $0; next }
+        /^\[/ { u = 0 }
+        u && /^[[:space:]]*(name|email)[[:space:]]*=/ { next }
+        u && held != "" { print held; held = "" }
+        { print }' "$cmp_live" > "$tmp_live.git"
+      mv "$tmp_live.git" "$tmp_live"
       cmp_live="$tmp_live"
     fi
 

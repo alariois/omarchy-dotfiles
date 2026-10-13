@@ -81,6 +81,21 @@ LUKS_PASS_FILE="$VM_DIR/luks-passphrase"
 # because that is the least surprising guess, not because it is likely right.
 GUEST_USER_FILE="$VM_DIR/guest-user"
 
+# The guest account's password, for a base `autoinstall` built: generated, so
+# nobody has to choose one, and kept beside the disk for logging into the
+# guest's desktop by hand. The same plaintext trade as the LUKS passphrase
+# above, defensible for the same reason.
+GUEST_PASS_FILE="$VM_DIR/guest-password"
+
+# A key of the harness's own, authorized in every base `autoinstall` builds.
+# A CI runner has no ~/.ssh to borrow from; locally it sits beside your own
+# keys rather than replacing them, so ssh and push work with either.
+GUEST_KEY="$VM_DIR/id_ed25519"
+
+# One directory per `test` run: its overlay, firmware vars, serial log and the
+# output of every step, so a failure in CI leaves something to read.
+TEST_RUNS_DIR="$VM_DIR/test-runs"
+
 # What cryptsetup writes when it wants the passphrase. Matched as a substring,
 # because the line accumulates an asterisk per character typed.
 LUKS_PROMPT="A password is required to access the root volume"
@@ -111,6 +126,14 @@ DISPLAY_SPEC=${OMARCHY_VM_DISPLAY:-gtk,gl=on,show-cursor=on,zoom-to-fit=on}
 # `virtio-vga` (no GL) is the other fallback worth trying if a host ever
 # cannot do GL at all; Hyprland then needs software rendering.
 GPU_DEVICE=${OMARCHY_VM_GPU:-virtio-vga-gl}
+
+# Headless: no window, no GL, no audio -- what a CI runner has. Set by
+# --headless on autoinstall and test, or OMARCHY_VM_HEADLESS=1, and assumed
+# whenever there is no display to open a window on, where the gtk display
+# would only fail. The guest then runs on plain virtio-vga, the way Omarchy's
+# own ISO tests run in CI, and Hyprland renders in software.
+HEADLESS=${OMARCHY_VM_HEADLESS:-0}
+headless() { [[ $HEADLESS == 1 || -z ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]]; }
 
 DISK_SIZE=${OMARCHY_VM_DISK:-60G}
 MEM=${OMARCHY_VM_MEM:-8G}
@@ -194,6 +217,10 @@ ensure_vars() {
 # under one set of hardware and boots under another is a debugging session
 # nobody asked for.
 qemu_args() {
+  local gpu=$GPU_DEVICE display=$DISPLAY_SPEC audio="pipewire,id=snd0"
+  if headless; then
+    gpu=virtio-vga display=none audio="none,id=snd0"
+  fi
   printf '%s\n' \
     -name "omarchy-vm" \
     -machine q35,accel=kvm \
@@ -202,8 +229,8 @@ qemu_args() {
     -m "$MEM" \
     -drive "if=pflash,format=raw,readonly=on,file=$(ovmf_code)" \
     -drive "if=pflash,format=raw,file=$VARS" \
-    -device "$GPU_DEVICE" \
-    -display "$DISPLAY_SPEC" \
+    -device "$gpu" \
+    -display "$display" \
     -qmp "unix:$QMP_SOCK,server=on,wait=off" \
     -pidfile "$PIDFILE" \
     -chardev "socket,id=serial0,path=$SERIAL_SOCK,server=on,wait=off,logfile=$SERIAL_LOG,logappend=off" \
@@ -211,11 +238,13 @@ qemu_args() {
     -device qemu-xhci,id=usb \
     -device usb-kbd \
     -device usb-tablet \
-    -audiodev "pipewire,id=snd0" \
+    -audiodev "$audio" \
     -device intel-hda -device "hda-output,audiodev=snd0" \
     -object "rng-random,filename=/dev/urandom,id=rng0" \
     -device "virtio-rng-pci,rng=rng0" \
-    -nic "user,model=virtio-net-pci,hostfwd=tcp::$SSH_PORT-:22" \
+    -nic "user,model=virtio-net-pci,hostfwd=tcp::$SSH_PORT-:22"
+  # No clipboard channel headless: there is no host clipboard to share.
+  headless || printf '%s\n' \
     -device virtio-serial-pci \
     -chardev "qemu-vdagent,id=vdagent,name=vdagent,clipboard=on" \
     -device "virtserialport,chardev=vdagent,name=com.redhat.spice.0"
@@ -417,8 +446,21 @@ cmd_stop() {
 # log at worst. One shot on purpose -- if the passphrase is wrong the guest
 # asks again, and a watcher that answered every time would sit there feeding a
 # bad passphrase to a retry loop.
+#
+# $1 is how many prompts the log already holds, for re-arming across a
+# reboot: QEMU only empties the log when it starts, so after a guest reboots
+# the previous boot's prompt is still in it, and matching that would answer a
+# prompt that is not there yet -- leaving the real one to wait forever.
+# How many unlock prompts this boot's serial log holds so far. Not
+# `grep -c ... || echo 0`: grep -c prints 0 AND fails when nothing matches.
+luks_prompts_seen() {
+  local n
+  n=$(grep -ac "$LUKS_PROMPT" "$SERIAL_LOG" 2>/dev/null) || true
+  echo "${n:-0}"
+}
+
 luks_unlock_watch() {
-  local pass i
+  local pass i seen=${1:-0} now
   [[ -f $LUKS_PASS_FILE ]] || return 0
   pass=$(< "$LUKS_PASS_FILE")
   [[ -n $pass ]] || return 0
@@ -427,7 +469,8 @@ luks_unlock_watch() {
   for i in $(seq 1 180); do
     sleep 1
     [[ -S $SERIAL_SOCK ]] || continue
-    grep -qa "$LUKS_PROMPT" "$SERIAL_LOG" 2>/dev/null || continue
+    now=$(grep -ac "$LUKS_PROMPT" "$SERIAL_LOG" 2>/dev/null) || now=0
+    (( now > seen )) || continue
     printf '%s\n' "$pass" | socat -u - "unix-connect:$SERIAL_SOCK" 2>/dev/null || true
     return 0
   done
@@ -708,14 +751,30 @@ wait_for_sshd() {
 # and a master connection opened with a password would answer yes for a key
 # that was never installed.
 key_login_works() {
+  local ids; mapfile -t ids < <(ssh_identity_opts)
   ssh -p "$SSH_PORT" \
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-      -o BatchMode=yes -o ControlMaster=no -o ControlPath=none \
-      "$(guest_user)@localhost" true 2>/dev/null
+      -o BatchMode=yes -o ControlMaster=no -o ControlPath=none -o ConnectTimeout=10 \
+      "${ids[@]}" "$(guest_user)@localhost" true 2>/dev/null
 }
 
+# `sudo -v` too, and not only because a test should be thorough: the 4.0.2
+# `omarchy update` calls it, and sudo answers -v with a password prompt unless
+# EVERY rule for the user is NOPASSWD -- which the installer's own drop-in
+# (`<user> ALL=(ALL) ALL`) never is. So a guest could pass `sudo -n true` and
+# still stop an unattended update dead at "[sudo] password for test".
 sudo_is_passwordless() {
-  guest_ssh 'sudo -k; sudo -n true' 2>/dev/null
+  guest_ssh 'sudo -k; sudo -n true && sudo -n -v' 2>/dev/null
+}
+
+# The root half of passwordless sudo, as one script for `sudo bash -c`: write
+# the drop-in, have visudo check it, and only then install it. A drop-in with
+# a syntax error breaks sudo outright, in a base with no other way back to
+# root. verifypw=any is what makes `sudo -v` count the NOPASSWD rule; see
+# sudo_is_passwordless.
+guest_sudoers_script() {
+  local content="$1 ALL=(ALL:ALL) NOPASSWD: ALL"$'\n'"Defaults:$1 verifypw=any"
+  printf '%s' "t=\$(mktemp) && printf '%s\\n' $(printf %q "$content") > \"\$t\" && visudo -c -q -f \"\$t\" && install -m 0440 -o root -g root \"\$t\" $GUEST_SUDOERS; s=\$?; rm -f \"\$t\"; exit \$s"
 }
 
 # However prep-base ends, a guest left running is the BASE, open read-write --
@@ -749,6 +808,12 @@ guest_on_base_rw() {
 # authorized_keys and one sudoers drop-in. Passwordless sudo is fine here only
 # because the guest is disposable and holds nothing worth protecting.
 cmd_prep_base() {
+  local yes=false
+  case ${1:-} in
+    --yes) yes=true ;;
+    "") ;;
+    *) die "unknown argument: $1 (prep-base takes only --yes)" ;;
+  esac
   require_host
   # A guest already on the base read-write is picked up rather than refused:
   # that is what a run cut short by a mistyped password leaves behind, and
@@ -760,7 +825,7 @@ cmd_prep_base() {
     require_no_guest
   fi
   [[ -f $BASE ]] || die "no base disk yet -- run '$0 install' first"
-  [[ -t 0 ]] || die "run this from a terminal -- it asks for the guest password"
+  $yes || [[ -t 0 ]] || die "run this from a terminal -- it may ask for the guest password (--yes skips the confirmation)"
   command -v ssh-copy-id >/dev/null || die "ssh-copy-id not installed"
   ensure_vars
 
@@ -777,7 +842,7 @@ cmd_prep_base() {
   once more. Afterwards the guest powers off and a fresh overlay is cut.
 
 EOF
-  read -rp "  Press Enter to continue, Ctrl-C to bail... " _
+  $yes || read -rp "  Press Enter to continue, Ctrl-C to bail... " _
 
   trap prep_base_exit EXIT
   # Exit on Ctrl-C rather than carry on: a trap that only cleans up leaves bash
@@ -818,6 +883,7 @@ EOF
   if key_login_works; then
     note "ssh key already authorized"
   else
+    [[ -t 0 ]] || die "the guest does not take your key yet, and there is no terminal to type its password in"
     note "installing your ssh key -- enter the guest password for '$user'"
     local opts; mapfile -t opts < <(ssh_opts)
     ssh-copy-id "${opts[@]}" "$user@localhost" || die "ssh-copy-id failed"
@@ -825,17 +891,20 @@ EOF
     note "ssh key works"
   fi
 
+  local root_script; root_script=$(guest_sudoers_script "$user")
   if sudo_is_passwordless; then
     note "passwordless sudo already set up"
+  elif guest_ssh 'sudo -k; sudo -n true' 2>/dev/null; then
+    # A drop-in from before verifypw: sudo runs without a password already, so
+    # the upgrade needs none either.
+    note "updating $GUEST_SUDOERS so 'sudo -v' needs no password either"
+    guest_ssh "sudo -n bash -c $(printf %q "$root_script")" || die "could not update $GUEST_SUDOERS"
+    sudo_is_passwordless || die "$GUEST_SUDOERS is updated, but sudo -v still wants a password"
+    note "passwordless sudo works"
   else
+    [[ -t 0 ]] || die "sudo in the guest needs the password, and there is no terminal to type it in"
     note "setting up passwordless sudo -- sudo will ask for the guest password"
-    # visudo checks the line before it goes anywhere near /etc/sudoers.d: a
-    # drop-in with a syntax error breaks sudo outright, in a base that has no
-    # other way to get root back.
-    local line remote
-    line="$user ALL=(ALL:ALL) NOPASSWD: ALL"
-    remote="t=\$(mktemp) && printf '%s\n' $(printf %q "$line") > \"\$t\" && sudo visudo -c -q -f \"\$t\" && sudo install -m 0440 -o root -g root \"\$t\" $GUEST_SUDOERS; s=\$?; rm -f \"\$t\"; exit \$s"
-    guest_ssh -t "$remote" || die "could not install $GUEST_SUDOERS"
+    guest_ssh -t "sudo bash -c $(printf %q "$root_script")" || die "could not install $GUEST_SUDOERS"
     sudo_is_passwordless || die "$GUEST_SUDOERS is in place, but sudo still wants a password"
     note "passwordless sudo works"
   fi
@@ -851,6 +920,610 @@ EOF
 
   cmd_reset
   note "done: every reset now gives a guest that ssh, push, install.sh and stop can drive unattended"
+}
+
+# ── Unattended install ────────────────────────────────────────────────
+#
+# The Omarchy ISO installs itself with no keyboard when a drive labelled
+# `cidata` (cloud-init's NoCloud label) carries the configurator's own output
+# files: it copies them into /root, skips the wizard, installs, and reboots
+# into the new system. With an authorized_keys file on the drive it also
+# enables sshd and opens port 22 -- the two steps `install` has to ask for.
+# See "Autoinstall" in github.com/omacom-io/omarchy-iso's README; the loader
+# is configs/airootfs/usr/local/bin/omarchy-cidata-load.
+
+# The configurator's two required files, plus the optional ones we want.
+#
+# Field for field what the 4.0.2 configurator writes (configs/airootfs/root/
+# configurator at the ISO's build), with the answers filled in. So this is
+# pinned to ISO_VERSION like everything else that touches the installer, and a
+# bump means comparing it with that release's configurator. Upstream's own
+# test template has since moved to the linux-omarchy kernel, which the 4.0.2
+# installer does not default to -- it writes plain `linux`, and that is what a
+# hand-installed 4.0.2 base runs.
+write_cidata() {
+  local dir=$1 disk_bytes=$2 user=$3 pass=$4
+  local mib=$((1024 * 1024)) gib=$((1024 * 1024 * 1024)) hash
+  # The configurator's sizing: 1MiB gap, 2GiB ESP, the rest btrfs minus the
+  # GPT backup reserve, on a size rounded down to a whole MiB.
+  local boot_start=$mib boot_size=$((2 * gib))
+  local main_start=$((boot_start + boot_size))
+  local main_size=$((disk_bytes / mib * mib - main_start - mib))
+
+  hash=$(openssl passwd -6 "$pass")
+  jq -n --arg hash "$hash" --arg user "$user" '{
+    root_enc_password: $hash,
+    users: [ { enc_password: $hash, groups: [], sudo: true, username: $user } ]
+  }' > "$dir/user_credentials.json"
+
+  jq -n --argjson boot_start "$boot_start" --argjson boot_size "$boot_size" \
+        --argjson main_start "$main_start" --argjson main_size "$main_size" '
+    def extent($v): { sector_size: { unit: "B", value: 512 }, unit: "B", value: $v };
+    {
+      app_config: null,
+      "archinstall-language": "English",
+      auth_config: {},
+      audio_config: { audio: "pipewire" },
+      bootloader_config: { bootloader: "Limine", uki: false, removable: false },
+      custom_commands: [],
+      omarchy_install: {
+        mode: "full_disk",
+        defer_provisioning: false,
+        target_mount: "/mnt",
+        boot: { esp_mount: "/boot", esp_path: "/EFI/limine", efi_binary: "limine_x64.efi", enable_fallback: true },
+        storage: { kernel: "linux" }
+      },
+      disk_config: {
+        config_type: "default_layout",
+        device_modifications: [ {
+          device: "/dev/vda",
+          partitions: [
+            { btrfs: [], dev_path: null, flags: [ "boot", "esp" ], fs_type: "fat32",
+              mount_options: [], mountpoint: "/boot",
+              obj_id: "ea21d3f2-82bb-49cc-ab5d-6f81ae94e18d",
+              size: extent($boot_size), start: extent($boot_start),
+              status: "create", type: "primary" },
+            { btrfs: [ { mountpoint: "/", name: "@" },
+                       { mountpoint: "/home", name: "@home" },
+                       { mountpoint: "/var/log", name: "@log" },
+                       { mountpoint: "/var/cache/pacman/pkg", name: "@pkg" } ],
+              dev_path: null, flags: [], fs_type: "btrfs",
+              mount_options: [ "compress=zstd" ], mountpoint: null,
+              obj_id: "8c2c2b92-1070-455d-b76a-56263bab24aa",
+              size: extent($main_size), start: extent($main_start),
+              status: "create", type: "primary" }
+          ],
+          wipe: true
+        } ]
+      },
+      hostname: "omarchy-vm",
+      kernels: [ "linux" ],
+      network_config: { type: "iso" },
+      ntp: true,
+      parallel_downloads: 8,
+      script: null,
+      services: [],
+      swap: true,
+      timezone: "UTC",
+      locale_config: { kb_layout: "us", sys_enc: "UTF-8", sys_lang: "en_US.UTF-8" },
+      mirror_config: {
+        custom_repositories: [],
+        custom_servers: [
+          { url: "https://mirror.omarchy.org/$repo/os/$arch" },
+          { url: "https://mirror.rackspace.com/archlinux/$repo/os/$arch" },
+          { url: "https://geo.mirror.pkgbuild.com/$repo/os/$arch" }
+        ],
+        mirror_regions: {},
+        optional_repositories: []
+      },
+      packages: [ "base-devel", "git", "omarchy-keyring", "omarchy-settings", "omarchy" ],
+      profile_config: { gfx_driver: null, greeter: null, profile: {} },
+      version: "3.0.9"
+    }' > "$dir/user_configuration.json"
+
+  echo "omarchy-vm" > "$dir/user_full_name.txt"
+  echo "omarchy-vm@localhost" > "$dir/user_email_address.txt"
+  echo "false" > "$dir/user_encrypt_installation.txt"
+
+  # The harness key always; your own public keys too, so `ssh` works for you
+  # as well as for the test.
+  cat "$GUEST_KEY.pub" > "$dir/authorized_keys"
+  local pub
+  for pub in ~/.ssh/id_*.pub; do
+    [[ -f $pub ]] && cat "$pub" >> "$dir/authorized_keys"
+  done
+  return 0
+}
+
+# Build the base with nobody at the keyboard: what `install` does by hand,
+# plus what `prep-base` adds afterwards. Unencrypted on purpose -- an
+# encrypted autoinstall stops at the LUKS prompt on first boot, which is the
+# one thing an unattended install cannot have.
+#
+# The disk is built under a staging name and promoted only after a clean
+# shutdown, so a failed or interrupted install can never pass for a base.
+cmd_autoinstall() {
+  case ${1:-} in
+    --headless) HEADLESS=1 ;;
+    "") ;;
+    *) die "unknown argument: $1 (autoinstall takes only --headless)" ;;
+  esac
+  require_host
+  require_no_guest
+  local tool
+  for tool in bsdtar openssl jq ssh-keygen; do
+    command -v "$tool" >/dev/null || die "$tool not installed -- autoinstall needs it to build the cidata drive"
+  done
+  [[ -f $BASE ]] && die "base disk already exists: $BASE
+  To rebuild it unattended:  $0 clean base && $0 autoinstall"
+  cmd_iso
+
+  [[ -f $GUEST_KEY ]] || ssh-keygen -q -t ed25519 -N "" -C "omarchy-vm" -f "$GUEST_KEY"
+  # Not $USER: in CI that is often root or a runner name, and a username the
+  # installer rejects is a long way to find out. Remembered like `user` would.
+  if [[ -z ${OMARCHY_VM_USER:-} && ! -f $GUEST_USER_FILE ]]; then
+    printf 'test\n' > "$GUEST_USER_FILE"
+  fi
+  local user pass
+  user=$(guest_user)
+  pass=$(openssl rand -hex 12)
+  ( umask 077; printf '%s\n' "$pass" > "$GUEST_PASS_FILE" )
+
+  local building="$BASE.building" work cidata="$VM_DIR/cidata.iso"
+  rm -f "$building"
+  qemu-img create -f qcow2 "$building" "$DISK_SIZE" >/dev/null
+  # Fresh firmware vars: the install writes its boot entry into them, and they
+  # belong to this base from here on, exactly as after `install`.
+  rm -f "$VARS"
+  ensure_vars
+
+  work=$(mktemp -d "$VM_DIR/cidata.XXXXXX")
+  write_cidata "$work" "$(qemu-img info --output=json "$building" | jq '."virtual-size"')" "$user" "$pass"
+  # ISO 9660 from bsdtar, because libarchive is on every Arch machine (pacman
+  # links it) where mtools and genisoimage are not. Rock Ridge keeps the long
+  # file names; blkid reads the volume id as LABEL=cidata.
+  bsdtar --format iso9660 --options 'iso9660:volume-id=cidata,iso9660:rockridge,iso9660:joliet' \
+         -cf "$cidata" -C "$work" .
+  rm -rf "$work"
+
+  trap autoinstall_exit EXIT
+  trap 'exit 130' INT TERM
+
+  # Disk first, ISO second, by bootindex: the empty disk falls through to the
+  # installer, and once the install has written a bootloader the reboot comes
+  # up from the disk instead of starting the install over.
+  local args; mapfile -t args < <(qemu_args)
+  note "installing Omarchy $ISO_VERSION unattended$(headless && echo ", headless") -- typically 10-20 minutes"
+  setsid qemu-system-x86_64 "${args[@]}" \
+    -drive "file=$building,if=none,id=disk0,format=qcow2,cache=writeback,discard=unmap" \
+    -device virtio-blk-pci,drive=disk0,bootindex=1 \
+    -drive "file=$ISO,if=none,id=cd0,media=cdrom,readonly=on" \
+    -device ide-cd,drive=cd0,bootindex=2 \
+    -drive "file=$cidata,if=none,id=cd1,media=cdrom,readonly=on" \
+    -device ide-cd,drive=cd1 \
+    >"$VM_DIR/autoinstall-qemu.log" 2>&1 &
+  local qemu_pid=$! i
+
+  for i in $(seq 1 20); do
+    guest_running && break
+    sleep 0.5
+  done
+  guest_running || die "qemu exited before the installer started -- see $VM_DIR/autoinstall-qemu.log"
+
+  # Done means the INSTALLED system lets our key in: the live ISO has no such
+  # user, so a key login cannot succeed until the install has finished and
+  # rebooted. Every 15s keeps well under sshd's penalty threshold.
+  local start=$SECONDS timeout=${OMARCHY_VM_INSTALL_TIMEOUT:-2700} last_note=0
+  until key_login_works; do
+    guest_running || die "the guest exited during the install -- see $SERIAL_LOG"
+    (( SECONDS - start < timeout )) \
+      || die "the install did not finish within $((timeout / 60)) minutes -- '$0 screenshot' shows where it stopped"
+    if (( SECONDS - last_note >= 60 )); then
+      note "  ... installing ($(( (SECONDS - start) / 60 ))m)"
+      last_note=$SECONDS
+    fi
+    sleep 15
+  done
+  note "installed in $(( (SECONDS - start) / 60 ))m -- the new system is up and takes the key"
+
+  # What prep-base does by hand, without the hand: the password is ours, so
+  # sudo -S takes it on stdin. One root shell, so it is asked for once.
+  printf '%s\n' "$pass" | guest_ssh "sudo -S -p '' bash -c $(printf %q "$(guest_sudoers_script "$user")")" \
+    || die "could not install $GUEST_SUDOERS in the new system"
+  sudo_is_passwordless || die "$GUEST_SUDOERS is in place, but sudo still wants a password"
+  note "passwordless sudo set up"
+
+  note "powering the guest off"
+  guest_ssh 'sudo -n systemctl poweroff' >/dev/null 2>&1 || true
+  for i in $(seq 1 90); do
+    guest_running || break
+    sleep 1
+  done
+  guest_running && die "the guest is still up after 90s"
+  wait "$qemu_pid" 2>/dev/null || true
+
+  mv "$building" "$BASE"
+  # The drive carries the password hash; nothing needs it once installed.
+  rm -f "$cidata"
+  trap - EXIT INT TERM
+  note "base ready: $BASE"
+  cmd_reset
+}
+
+# A failed autoinstall leaves a half-installed disk under its staging name and
+# an installer that would otherwise run on. Neither is worth keeping running:
+# the next attempt starts over from an empty disk.
+autoinstall_exit() {
+  if guest_running; then
+    note "stopping the unfinished install"
+    qmp quit >/dev/null 2>&1 || kill -TERM "$(cat "$PIDFILE")" 2>/dev/null || true
+  fi
+  rm -f "$VM_DIR/cidata.iso"
+}
+
+# ── End-to-end test ───────────────────────────────────────────────────
+#
+# Everything from nothing, unattended, with a verdict: what a CI job runs.
+# Host prerequisites, the ISO, the base (built by autoinstall if there is
+# none), then a throwaway machine off that base that gets `omarchy update`,
+# this working tree, install.sh twice and doctor.sh, and has to show the
+# post-update hook repairing a clobbered block.
+#
+# Output is TAP -- "ok N - ..." / "not ok N - ..." -- which CI systems read
+# natively. Exit 0 when every check passed, 1 when one failed, 2 when the
+# test could not get far enough to judge anything.
+#
+# Each run gets its own directory under TEST_RUNS_DIR with its own overlay,
+# firmware vars, serial log and QMP socket, so it never touches the overlay
+# `run` uses. It still needs the ssh port, so it refuses to start beside a
+# running guest.
+
+T_N=0
+T_FAILED=0
+t_ok()   { T_N=$((T_N + 1)); echo "ok $T_N - $*"; }
+t_fail() {
+  local what=$1 line; shift
+  T_N=$((T_N + 1)); T_FAILED=$((T_FAILED + 1))
+  echo "not ok $T_N - $what"
+  for line in "$@"; do echo "  # $line"; done
+}
+# TAP's own word for "cannot continue".
+t_bail() { echo "Bail out! $*"; exit 2; }
+t_elapsed() { printf '%dm%02ds' $(( (SECONDS - $1) / 60 )) $(( (SECONDS - $1) % 60 )); }
+
+# The last lines of a step's log, as TAP diagnostics.
+t_tail() { tail -n "${2:-15}" "$1" 2>/dev/null | tr -d '\r'; }
+
+cmd_test() {
+  local keep=false
+  while (( $# )); do
+    case $1 in
+      --headless) HEADLESS=1 ;;
+      --keep)     keep=true ;;
+      *) die "unknown argument: $1 (test takes --headless and --keep)" ;;
+    esac
+    shift
+  done
+
+  local run_dir; run_dir="$TEST_RUNS_DIR/$(date +%Y%m%d-%H%M%S)"
+  mkdir -p "$run_dir"
+  exec > >(tee -a "$run_dir/test.log") 2>&1
+
+  echo "TAP version 13"
+  echo "# omarchy-vm test -- $DOTFILES"
+  echo "# run directory: $run_dir"
+
+  local t0=$SECONDS
+  ( require_host ) >"$run_dir/host.log" 2>&1 \
+    || { cat "$run_dir/host.log"; t_bail "the host cannot run the VM"; }
+  guest_running && t_bail "a guest is already running -- '$0 stop' it first; the test needs port $SSH_PORT"
+  t_ok "host can run the VM (qemu, OVMF, writable /dev/kvm)"
+
+  t0=$SECONDS
+  ( cmd_iso ) >"$run_dir/iso.log" 2>&1 \
+    || { t_tail "$run_dir/iso.log"; t_bail "could not get a verified Omarchy $ISO_VERSION ISO"; }
+  t_ok "Omarchy $ISO_VERSION ISO present and verified ($(t_elapsed $t0))"
+
+  if [[ -f $BASE ]]; then
+    t_ok "base disk exists ($(basename "$BASE"))"
+  else
+    t0=$SECONDS
+    echo "# no base disk -- building one unattended, this takes a while"
+    # pipefail carries the install's status through tee and sed.
+    if ! ( cmd_autoinstall ) 2>&1 | tee "$run_dir/autoinstall.log" | sed -u 's/^/# /' || [[ ! -f $BASE ]]; then
+      t_bail "the unattended install failed -- see $run_dir/autoinstall.log"
+    fi
+    t_ok "base installed unattended ($(t_elapsed $t0))"
+  fi
+
+  # From here on this run's own files: nothing below touches `run`'s overlay.
+  [[ -f $VARS ]] || t_bail "no firmware vars beside the base ($VARS) -- '$0 clean base' and let the test rebuild it"
+  local overlay="$run_dir/disk.qcow2"
+  qemu-img create -f qcow2 -b "$BASE" -F qcow2 "$overlay" >/dev/null
+  cp "$VARS" "$run_dir/OVMF_VARS.fd"
+  VARS="$run_dir/OVMF_VARS.fd"
+  QMP_SOCK="$run_dir/qmp.sock"
+  PIDFILE="$run_dir/qemu.pid"
+  SERIAL_LOG="$run_dir/serial.log"
+  SERIAL_SOCK="$run_dir/serial.sock"
+  TEST_KEEP=$keep TEST_OVERLAY=$overlay
+  trap test_exit EXIT
+  trap 'exit 130' INT TERM
+
+  # A hand-installed base may be encrypted; answer its prompt if we can.
+  luks_unlock_watch &
+  HELPER_PIDS+=($!)
+
+  t0=$SECONDS
+  local args; mapfile -t args < <(qemu_args)
+  setsid qemu-system-x86_64 "${args[@]}" \
+    -drive "file=$overlay,if=none,id=disk0,format=qcow2,cache=writeback,discard=unmap" \
+    -device virtio-blk-pci,drive=disk0,bootindex=1 \
+    >"$run_dir/qemu.log" 2>&1 &
+  local i
+  for i in $(seq 1 20); do guest_running && break; sleep 0.5; done
+  guest_running || { t_tail "$run_dir/qemu.log"; t_bail "qemu did not start"; }
+  wait_for_sshd || { t_tail "$SERIAL_LOG" 20; t_bail "the guest's sshd never answered"; }
+  for i in $(seq 1 12); do key_login_works && break; sleep 5; done
+  key_login_works || t_bail "the guest does not accept the key -- a hand-installed base needs '$0 prep-base'"
+  t_ok "fresh machine boots and accepts the ssh key ($(t_elapsed $t0))"
+
+  sudo_is_passwordless || t_bail "sudo in the guest wants a password -- a hand-installed base needs '$0 prep-base'"
+  t_ok "passwordless sudo in the guest"
+
+  # The first thing anyone does on a fresh Omarchy, and not optional here: a
+  # fresh install has never synced a package database, so install.sh could
+  # not install a single package without it. -y is omarchy-update's promise
+  # not to ask anything.
+  t0=$SECONDS
+  # Through a login shell, like everything the test runs as you: Omarchy's
+  # environment (OMARCHY_PATH, its bin on PATH) comes from ~/.bashrc, which a
+  # bare ssh command never reads -- and omarchy-update-dev dies on the unset
+  # variable.
+  #
+  # OMARCHY_UPDATE_LOGGED=1 skips omarchy-update's `script` wrapper, which is
+  # what makes -y actually unattended. The wrapper gives the update a pty, and
+  # omarchy-update-orphan-pkgs decides whether to ask by checking for a
+  # terminal -- not for -y -- so with orphans present it sat at a gum confirm
+  # for good (Omarchy 4.0.4 still does). Without the pty it reports them and
+  # moves on. The wrapper only keeps a log, and this keeps its own.
+  if guest_ssh "bash -lc 'OMARCHY_UPDATE_LOGGED=1 timeout 2700 omarchy update -y </dev/null'" >"$run_dir/omarchy-update.log" 2>&1; then
+    t_ok "omarchy update -y ($(t_elapsed $t0))"
+  else
+    t_fail "omarchy update -y" "$(t_tail "$run_dir/omarchy-update.log")"
+  fi
+  # A new kernel has no modules for the one still running; boot into it the
+  # way the person on the other end of an update would.
+  #
+  # The kernel image, not the modules directory: the directory can outlive an
+  # upgrade, and did, so the test carried on under the old kernel. This is the
+  # check omarchy-update-restart makes.
+  if ! guest_ssh 'test -f "/usr/lib/modules/$(uname -r)/vmlinuz"' 2>/dev/null; then
+    t0=$SECONDS
+    # One answer per boot: arm another for this one, past the prompts the log
+    # already holds.
+    luks_unlock_watch "$(luks_prompts_seen)" &
+    HELPER_PIDS+=($!)
+    guest_ssh 'sudo -n systemctl reboot' >/dev/null 2>&1 || true
+    sleep 20
+    wait_for_sshd && for i in $(seq 1 12); do key_login_works && break; sleep 5; done
+    key_login_works || t_bail "the guest did not come back after rebooting into the new kernel"
+    t_ok "rebooted into the updated kernel ($(t_elapsed $t0))"
+  fi
+
+  # The machine this repo was written on had AWS CLI v1 from pacman, and v2
+  # cannot be installed over it with --noconfirm. Put v1 in the guest, so the
+  # replacement install.sh does is tested rather than assumed.
+  if guest_ssh 'sudo -n pacman -S --noconfirm --needed aws-cli' >"$run_dir/aws-v1.log" 2>&1; then
+    t_ok "AWS CLI v1 installed in the guest, as a machine upgrading from it would have"
+  else
+    t_fail "could not install AWS CLI v1 to test the upgrade" "$(t_tail "$run_dir/aws-v1.log")"
+  fi
+
+  ( cmd_push ) >"$run_dir/push.log" 2>&1 \
+    || { t_tail "$run_dir/push.log"; t_bail "could not push the working tree into the guest"; }
+  t_ok "working tree pushed into the guest"
+
+  local repo='~/projects/omarchy-dotfiles' status
+
+  # Your env.yaml, when there is one here and its key with it: copied in, so
+  # install.sh generates the real profiles and the cloud checks below switch
+  # to the real accounts. The key travels on stdin for each command that
+  # needs it and is never written to the guest's disk. OMARCHY_ENV_AGE_KEY
+  # supplies it where there is no keyring, as in CI.
+  local age_key=""
+  if [[ -f $DOTFILES/env.yaml ]]; then
+    age_key=${OMARCHY_ENV_AGE_KEY:-$(secret-tool lookup service omarchy-dotfiles key sops-age 2>/dev/null || true)}
+    if [[ -n $age_key ]]; then
+      local ropts; mapfile -t ropts < <(ssh_opts)
+      rsync -a -e "ssh ${ropts[*]}" "$DOTFILES/env.yaml" "$(guest_user)@localhost:projects/omarchy-dotfiles/env.yaml" \
+        || t_bail "could not copy env.yaml into the guest"
+      t_ok "env.yaml copied into the guest, its key passed per command"
+    else
+      echo "# env.yaml is here but its key is not -- testing the cloud plumbing only"
+    fi
+  fi
+
+  # DOTFILES_ATTENDED, so install.sh installs packages as it would for a
+  # person at the keyboard -- passwordless sudo stands in for the password --
+  # while stdin stays free to carry the key.
+  t0=$SECONDS
+  # `|| status=$?`, not a bare pipeline: under set -e a failing install.sh
+  # would end the test right here instead of being reported as a failure.
+  status=0
+  guest_keyed "$age_key" "cd $repo && DOTFILES_ATTENDED=1 ./setup/install.sh" 2>&1 | tr -d '\r' >"$run_dir/install-1.log" || status=$?
+  if (( status == 0 )); then
+    t_ok "install.sh on a fresh machine ($(t_elapsed $t0))"
+  else
+    t_fail "install.sh on a fresh machine exited $status" "$(t_tail "$run_dir/install-1.log")"
+  fi
+  local problems_re='^  (CONFLICT|FAILED|no pkg|no font|no icon|replace|old ver|no env|no sync|plain|example) |MISSING payload'
+  if grep -qE "$problems_re" "$run_dir/install-1.log"; then
+    t_fail "install.sh reported problems" "$(grep -E "$problems_re" -A1 "$run_dir/install-1.log")"
+  else
+    t_ok "install.sh reported no conflicts, failures or missing pieces"
+  fi
+
+  local missing
+  missing=$(guest_ssh "cd $repo && source setup/targets.sh && for e in \"\${PACKAGES[@]}\"; do c=\${e%%|*}; command -v \"\$c\" >/dev/null || echo \"\$c\"; done" 2>&1 || echo "(could not ask the guest)")
+  if [[ -z $missing ]]; then
+    t_ok "every PACKAGES command resolves in the guest"
+  else
+    t_fail "PACKAGES commands missing after install.sh" "$missing"
+  fi
+
+  local aws_state
+  aws_state=$(guest_ssh 'aws --version 2>&1 | head -n 1; [ "$(pacman -Qq aws-cli 2>/dev/null)" = aws-cli ] && echo "aws-cli: still installed" || echo "aws-cli: not installed"' 2>&1 || true)
+  if grep -q '^aws-cli/2\.' <<<"$aws_state" && grep -q 'aws-cli: not installed' <<<"$aws_state"; then
+    t_ok "AWS CLI v1 was replaced by v2"
+  else
+    t_fail "AWS CLI v1 was not replaced by v2" "$aws_state"
+  fi
+
+  # Safe to re-run is the whole contract: a second run must change nothing.
+  guest_keyed "$age_key" "cd $repo && DOTFILES_ATTENDED=1 ./setup/install.sh" 2>&1 | tr -d '\r' >"$run_dir/install-2.log" || true
+  local changes
+  changes=$(grep -E '^  (hooked|linked|seeded|built|added|removed|synced|font|icon|webapp|reloaded) |^Applied ' "$run_dir/install-2.log" || true)
+  if [[ -z $changes ]]; then
+    t_ok "a second install.sh changes nothing"
+  else
+    t_fail "a second install.sh still changed things" "$changes"
+  fi
+
+  # doctor.sh reports and always exits 0, so read what it says. Mail is left
+  # out on purpose: its passwords live in a keyring a test machine never has.
+  guest_keyed "$age_key" "cd $repo && ./setup/doctor.sh" 2>&1 | tr -d '\r' >"$run_dir/doctor.log" || true
+  local problems
+  problems=$(awk '/^== /{ mail = ($0 == "== Mail ==") } !mail && /^  (MISSING|STALE|FOREIGN|BROKEN|BEHIND) |file\(s\) drifted/' "$run_dir/doctor.log")
+  if [[ -z $problems ]]; then
+    t_ok "doctor.sh finds nothing missing, stale, broken or drifted"
+  else
+    t_fail "doctor.sh found problems" "$problems"
+  fi
+
+  if [[ -n $age_key ]]; then
+    test_cloud_accounts "$run_dir" "$repo" "$age_key"
+  else
+    test_cloud_plumbing "$run_dir" "$repo"
+  fi
+
+  # The reason the VM exists: an Omarchy migration `mv`s a fresh file over a
+  # hooked one and drops our block; the post-update hook must put it back.
+  # Simulated on ~/.bashrc the way a migration would do it.
+  if guest_ssh 'f=~/.bashrc; t=$(mktemp); awk "/^# >>> omarchy-dotfiles >>>/{s=1;next} /^# <<< omarchy-dotfiles <<</{s=0;next} !s" "$f" > "$t" && mv "$t" "$f" && ! grep -q "omarchy-dotfiles" "$f" && ~/.config/omarchy/hooks/post-update.d/reapply-dotfiles.hook && grep -q "^# >>> omarchy-dotfiles >>>" "$f"' >"$run_dir/hook.log" 2>&1; then
+    t_ok "the post-update hook restores a block a migration clobbered"
+  else
+    t_fail "the post-update hook did not restore ~/.bashrc's block" "$(t_tail "$run_dir/hook.log")"
+  fi
+
+  echo "1..$T_N"
+  if (( T_FAILED == 0 )); then
+    echo "# all $T_N checks passed in $(t_elapsed 0) -- logs in $run_dir"
+    exit 0
+  fi
+  echo "# $T_FAILED of $T_N checks failed -- logs in $run_dir"
+  exit 1
+}
+
+# Run a command in the guest with env.yaml's age key on stdin, exported as
+# SOPS_AGE_KEY for that command alone. An empty key means none.
+guest_keyed() {
+  guest_ssh "read -r k; [ -n \"\$k\" ] && export SOPS_AGE_KEY=\"\$k\"; unset k; exec bash -lc $(printf %q "$2")" <<<"$1"
+}
+
+# The real accounts: every one in the guest's index, switched to the way you
+# would, each its own check -- plus one through an interactive shell, to show
+# the shell function really leaves AWS_PROFILE set in the calling terminal.
+test_cloud_accounts() {
+  local run_dir=$1 repo=$2 key=$3 cloud slug name out first=""
+  local index='~/.local/state/omarchy-dotfiles/cloud/profiles.tsv'
+  while IFS=$'\t' read -r cloud slug name _; do
+    [[ -n $slug ]] || continue
+    local cmd=aws-select
+    [[ $cloud == azure ]] && cmd=az-select
+    [[ $cloud == aws && -z $first ]] && first=$slug
+    if out=$(guest_keyed "$key" "~/.local/bin/$cmd --profile $slug --yes" 2>&1); then
+      t_ok "$cmd $slug signs in ($name)"
+    else
+      t_fail "$cmd $slug does not sign in ($name)" "$(tr -d '\r' <<<"$out")"
+    fi
+  done < <(guest_ssh "cat $index" 2>/dev/null)
+  [[ -n $first ]] || return 0
+  if out=$(guest_keyed "$key" "bash -ic 'aws-select --profile $first --yes >/dev/null && echo AWS_PROFILE=\$AWS_PROFILE' 2>/dev/null" 2>&1) &&
+     grep -qx "AWS_PROFILE=$first" <<<"$(tr -d '\r' <<<"$out")"; then
+    t_ok "aws-select leaves AWS_PROFILE=$first in the shell that ran it"
+  else
+    t_fail "aws-select did not set AWS_PROFILE in the calling shell" "$(tr -d '\r' <<<"$out")"
+  fi
+}
+
+# No real accounts to hand: the plumbing alone, on env.example.yaml encrypted
+# to a key made up for the purpose. Its credentials are placeholders, so a
+# switch that works would be the bug -- each must fail cleanly, with a ✗ and
+# exit 1, and the production guard must refuse without --yes.
+test_cloud_plumbing() {
+  local run_dir=$1 repo=$2 key out
+  echo "# no env.yaml here -- checking the cloud plumbing on the example, encrypted to a throwaway key"
+  if ! key=$(guest_ssh "cd $repo && k=\$(age-keygen 2>/dev/null | grep '^AGE-SECRET-KEY-') && cp env.example.yaml env.yaml && SOPS_AGE_KEY=\$k sops --encrypt --age \$(age-keygen -y <<<\"\$k\") --in-place env.yaml && echo \"\$k\"" 2>"$run_dir/cloud-setup.log"); then
+    t_fail "could not encrypt env.example.yaml in the guest" "$(t_tail "$run_dir/cloud-setup.log")"
+    return 0
+  fi
+
+  if out=$(guest_keyed "$key" "~/.local/bin/env-secrets check" 2>&1); then
+    t_ok "env-secrets check passes on the encrypted example"
+  else
+    t_fail "env-secrets check fails on the encrypted example" "$(tr -d '\r' <<<"$out")"
+  fi
+
+  if out=$(guest_keyed "$key" "~/.local/bin/aws-select --list >/dev/null && aws configure list-profiles" 2>&1) &&
+     grep -qx acme-prod <<<"$out" && grep -qx acme-staging <<<"$out"; then
+    t_ok "the AWS profiles are generated into ~/.aws/config"
+  else
+    t_fail "~/.aws/config lacks the generated profiles" "$(tr -d '\r' <<<"$out")"
+  fi
+
+  if out=$(guest_keyed "$key" "~/.local/bin/aws-select --profile acme-prod </dev/null" 2>&1); then
+    t_fail "aws-select switched to a production account without --yes or a terminal"
+  elif grep -q 'production account' <<<"$out"; then
+    t_ok "the production guard refuses without --yes"
+  else
+    t_fail "aws-select failed without --yes, but not at the production guard" "$(tr -d '\r' <<<"$out")"
+  fi
+
+  if out=$(guest_keyed "$key" "~/.local/bin/aws-select --profile acme-prod --yes" 2>&1); then
+    t_fail "aws-select accepted placeholder credentials" "$(tr -d '\r' <<<"$out")"
+  elif grep -q '✗' <<<"$out" && grep -qi 'credentials did not work' <<<"$out"; then
+    t_ok "aws-select reports bad credentials with ✗ and exit 1"
+  else
+    t_fail "aws-select failed, but not with a clear ✗" "$(tr -d '\r' <<<"$out")"
+  fi
+
+  if out=$(guest_keyed "$key" "~/.local/bin/az-select --profile example-corp --yes" 2>&1); then
+    t_fail "az-select accepted a placeholder service principal" "$(tr -d '\r' <<<"$out")"
+  elif grep -q '✗' <<<"$out"; then
+    t_ok "az-select reports a bad service principal with ✗ and exit 1"
+  else
+    t_fail "az-select failed, but not with a clear ✗" "$(tr -d '\r' <<<"$out")"
+  fi
+  guest_ssh "rm -f $repo/env.yaml" 2>/dev/null || true
+}
+
+# However the test ends, its guest goes away and its disk with it, unless
+# --keep asked to leave the machine up to look at. The logs always stay.
+test_exit() {
+  disarm_helpers
+  if [[ $TEST_KEEP == true ]] && guest_running; then
+    echo "# --keep: guest left running (pid $(cat "$PIDFILE"), ssh localhost:$SSH_PORT)"
+    echo "#   stop it with: OMARCHY_VM_DIR=$VM_DIR $0 stop --force  (or kill $(cat "$PIDFILE"))"
+    return 0
+  fi
+  if guest_running; then
+    guest_ssh 'sudo -n systemctl poweroff' >/dev/null 2>&1 || true
+    local i
+    for i in $(seq 1 60); do guest_running || break; sleep 1; done
+    guest_running && { qmp quit >/dev/null 2>&1 || kill -TERM "$(cat "$PIDFILE")" 2>/dev/null || true; }
+  fi
+  rm -f "$TEST_OVERLAY"
 }
 
 cmd_reset() {
@@ -999,6 +1672,22 @@ ssh_opts() {
     -o ControlMaster=auto \
     -o "ControlPath=$VM_DIR/ssh-%C" \
     -o ControlPersist=600
+  ssh_identity_opts
+}
+
+# The harness key, when autoinstall made one. As -o rather than -i, because
+# ssh_opts also feeds ssh-copy-id, where -i means "the key to install". And
+# with the defaults spelled out, because naming any IdentityFile makes ssh
+# stop trying its default ones -- which would lock your own key out of a base
+# that was set up by hand.
+ssh_identity_opts() {
+  [[ -f $GUEST_KEY ]] || return 0
+  local f
+  printf '%s\n' -o "IdentityFile=$GUEST_KEY"
+  for f in ~/.ssh/id_ed25519 ~/.ssh/id_ecdsa ~/.ssh/id_rsa; do
+    [[ -f $f ]] && printf '%s\n' -o "IdentityFile=$f"
+  done
+  return 0
 }
 
 guest_ssh() {
@@ -1048,8 +1737,12 @@ cmd_push() {
   # mirror of the working tree, not an accumulation of every version of it.
   # .git goes along, because setup/doctor.sh and the hooks are happier in a
   # real checkout, and it costs little.
+  # env.yaml stays behind even though it is encrypted: the guest is a machine
+  # you hand things to by choice, and `test` copies it in on purpose when it
+  # is wanted. --delete leaves the guest's own env.yaml alone for the same
+  # reason -- excluded files are protected from deletion too.
   local opts; mapfile -t opts < <(ssh_opts)
-  rsync -a --delete --info=stats1 \
+  rsync -a --delete --info=stats1 --exclude=/env.yaml \
         -e "ssh ${opts[*]}" \
         "$DOTFILES/" "$user@localhost:$dest/"
   echo
@@ -1283,9 +1976,12 @@ omarchy-vm -- a disposable Omarchy for testing this repo from nothing
 
   iso                 download the pinned Omarchy ISO ($ISO_VERSION), resumable
   install             create the base disk and boot the installer (once, slow)
+  autoinstall         create the base disk with nobody at the keyboard (cidata)
+  test [--keep]       the whole thing unattended: ISO, base, fresh machine, update,
+                      install.sh twice, doctor.sh, hook repair -- TAP, exit 0/1/2
   reset               discard the overlay, cut a fresh one off the base (instant)
   base-shell          boot the BASE read-write, to change what every reset gives you
-  prep-base           put your ssh key and passwordless sudo in the base (once)
+  prep-base [--yes]   put your ssh key and passwordless sudo in the base (once)
   run                 boot the overlay; changes persist until the next reset
   throwaway           boot the base read-only; changes discarded on shutdown
   push                rsync this working tree into the guest over ssh
@@ -1321,6 +2017,8 @@ EOF
 case ${1:-} in
   iso)       shift; cmd_iso "$@" ;;
   install)   shift; cmd_install "$@" ;;
+  autoinstall) shift; cmd_autoinstall "$@" ;;
+  test)      shift; cmd_test "$@" ;;
   reset)     shift; cmd_reset "$@" ;;
   base-shell) shift; cmd_base_shell "$@" ;;
   prep-base) shift; cmd_prep_base "$@" ;;

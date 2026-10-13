@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+#
+# aws-select -- switch this terminal to one of the AWS accounts in env.yaml,
+# and prove the switch worked.
+#
+#   aws-select                          # pick from a list
+#   aws-select --profile superhands      # by profile, or by name: "Acme Prod"
+#   aws-select --profile X --yes         # no confirmation for a production account
+#   aws-select --console                 # also open the AWS console, signed in
+#   aws-select --current                 # which account this terminal is on
+#   aws-select --list                    # every AWS account in env.yaml
+#   aws-select --clear                   # back to no account
+#
+# Every switch ends with a real request, `aws sts get-caller-identity`, and
+# prints ✓ with the account and identity AWS answered with -- or ✗ with AWS's
+# own error, in which case nothing changes. An answer from a different account
+# than env.yaml's account_id is a failure too: the keys work, but not for the
+# account you asked for.
+#
+# "This terminal" is the shell function of the same name in shell/bashrc. A
+# script cannot change the environment of the shell that ran it, so the
+# function runs this, and on success exports AWS_PROFILE. New terminals start
+# on the last account picked; terminals already open keep theirs.
+#
+# The profiles are generated from env.yaml into a managed block of
+# ~/.aws/config, so `aws --profile <name>` works anywhere, not only here. Ones
+# with access keys read them through aws-env-credentials, straight out of the
+# encrypted file, so no plaintext copy is left in ~/.aws/credentials.
+
+set -euo pipefail
+
+DOTFILES=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)
+# shellcheck source=../lib/env.sh
+source "$DOTFILES/lib/env.sh"
+# shellcheck source=../lib/cloud.sh
+source "$DOTFILES/lib/cloud.sh"
+
+usage() {
+  awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; next } NR > 2 { exit }' "$0"
+  exit "${1:-0}"
+}
+
+query="" yes=false console=false mode=switch
+while (( $# )); do
+  case $1 in
+    --profile)   [[ -n ${2:-} ]] || die "--profile needs a name"; query=$2; shift 2 ;;
+    --profile=*) query=${1#*=}; shift ;;
+    -y|--yes)    yes=true; shift ;;
+    --console)   console=true; shift ;;
+    --current)   mode=current; shift ;;
+    --list)      mode=list; shift ;;
+    --clear)     mode=clear; shift ;;
+    -h|--help)   usage 0 ;;
+    *)           die "unknown argument: $1  (try --help)" ;;
+  esac
+done
+
+command -v aws >/dev/null || die "aws is not installed -- setup/install.sh installs it"
+cloud_sync || exit 1
+
+case $mode in
+  list)
+    cloud_list aws
+    exit 0 ;;
+  current)
+    if [[ -z ${AWS_PROFILE-} ]]; then
+      echo "AWS: no account selected"
+    elif line=$(cloud_resolve aws "$AWS_PROFILE") && [[ -n $line ]]; then
+      IFS=$'\t' read -r _ _ name prod _ _ <<<"$line"
+      echo "AWS: $name$(cloud_prod_tag "$prod")  ($AWS_PROFILE)"
+    else
+      echo "AWS: $AWS_PROFILE (not an env.yaml account)"
+    fi
+    exit 0 ;;
+  clear)
+    cloud_clear_current aws
+    cloud_ok "AWS: no account selected"
+    exit 0 ;;
+esac
+
+if [[ -n $query ]]; then
+  line=$(cloud_resolve aws "$query")
+  [[ -n $line ]] || { cloud_bad "no AWS account called '$query' in env.yaml"; cloud_list aws; exit 1; }
+else
+  line=$(cloud_pick aws "AWS account" "${AWS_PROFILE-}") || exit 1
+fi
+IFS=$'\t' read -r _ slug name prod account region <<<"$line"
+
+[[ $prod == true ]] && { cloud_confirm_prod "$name" "$yes" || exit 1; }
+
+# The proof. Two errors are worth telling apart from AWS's wording: keys that
+# do not work at all, and keys that work for some other account.
+if ! out=$(timeout 60 aws sts get-caller-identity --profile "$slug" --output json 2>&1); then
+  cloud_bad "AWS  $name$(cloud_prod_tag "$prod") -- the credentials did not work"
+  sed 's/^/    /' <<<"$out" | head -n 6
+  exit 1
+fi
+got=$(jq -r .Account <<<"$out")
+arn=$(jq -r .Arn <<<"$out")
+if [[ -n $account && $got != "$account" ]]; then
+  cloud_bad "AWS  $name -- signed in, but to account $got, not $account as env.yaml says"
+  exit 1
+fi
+
+cloud_set_current aws "$line"
+cloud_ok "AWS  $name$(cloud_prod_tag "$prod")"
+cloud_info "account $got · $region"
+cloud_info "as $arn"
+
+$console || exit 0
+
+# The console takes temporary credentials, exchanged for a sign-in token at
+# AWS's federation endpoint. A role profile has temporary credentials already;
+# a profile with an IAM user's keys gets them from GetFederationToken, whose
+# session policy only ever narrows what the user may do -- AdministratorAccess
+# there means "everything this user can already do", not more.
+if [[ -n $(aws configure get role_arn --profile "$slug" 2>/dev/null) ]]; then
+  session=$(aws configure export-credentials --profile "$slug" --format process |
+    jq -c '{sessionId: .AccessKeyId, sessionKey: .SecretAccessKey, sessionToken: .SessionToken}')
+else
+  session=$(aws sts get-federation-token --profile "$slug" --name "${USER:-aws-select}" \
+      --policy-arns arn=arn:aws:iam::aws:policy/AdministratorAccess \
+      --duration-seconds 43200 --output json |
+    jq -c '.Credentials | {sessionId: .AccessKeyId, sessionKey: .SecretAccessKey, sessionToken: .SessionToken}')
+fi
+token=$(curl -fsS --get https://signin.aws.amazon.com/federation \
+  --data-urlencode Action=getSigninToken --data-urlencode "Session=$session" | jq -r .SigninToken)
+[[ -n $token && $token != null ]] || { cloud_bad "AWS would not issue a console sign-in token"; exit 1; }
+destination=$(jq -rn --arg d "https://$region.console.aws.amazon.com/console/home?region=$region" '$d | @uri')
+xdg-open "https://signin.aws.amazon.com/federation?Action=login&Issuer=aws-select&Destination=$destination&SigninToken=$token" >/dev/null 2>&1 &
+cloud_info "console opened in the browser"

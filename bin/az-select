@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+#
+# az-select -- switch this terminal to one of the Azure subscriptions in
+# env.yaml, and prove the switch worked.
+#
+#   az-select                           # pick from a list
+#   az-select --profile acme-prod        # by profile, or by name: "Acme Prod"
+#   az-select --profile X --yes          # no confirmation for a production account
+#   az-select --console                  # also open the subscription in the portal
+#   az-select --current                  # which subscription this terminal is on
+#   az-select --list                     # every Azure account in env.yaml
+#   az-select --clear                    # back to no account
+#
+# Each env.yaml entry signs in as a service principal: an app registration
+# with a client secret and a role on the subscription. Your own user cannot be
+# automated -- Azure has required MFA for changes made from the CLI by people
+# since October 2025, and service principals are exempt -- which is why a new
+# machine can sign in to every account without anyone typing anything.
+#
+# Every switch ends with a real request to Azure Resource Manager, listing the
+# subscription's resource groups, and prints ✓ with what Azure answered or ✗
+# with its error, in which case nothing changes. `az account show` alone would
+# prove nothing: it only reads the local cache.
+#
+# Each account gets an AZURE_CONFIG_DIR of its own, so its login is kept
+# between switches and switching never signs anything else out. The shell
+# function of the same name in shell/bashrc exports that directory on success,
+# for this terminal; new terminals start on the last account picked.
+
+set -euo pipefail
+
+DOTFILES=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)
+# shellcheck source=../lib/env.sh
+source "$DOTFILES/lib/env.sh"
+# shellcheck source=../lib/cloud.sh
+source "$DOTFILES/lib/cloud.sh"
+
+usage() {
+  awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; next } NR > 2 { exit }' "$0"
+  exit "${1:-0}"
+}
+
+query="" yes=false console=false mode=switch
+while (( $# )); do
+  case $1 in
+    --profile)   [[ -n ${2:-} ]] || die "--profile needs a name"; query=$2; shift 2 ;;
+    --profile=*) query=${1#*=}; shift ;;
+    -y|--yes)    yes=true; shift ;;
+    --console)   console=true; shift ;;
+    --current)   mode=current; shift ;;
+    --list)      mode=list; shift ;;
+    --clear)     mode=clear; shift ;;
+    -h|--help)   usage 0 ;;
+    *)           die "unknown argument: $1  (try --help)" ;;
+  esac
+done
+
+command -v az >/dev/null || die "az is not installed -- setup/install.sh installs it"
+cloud_sync || exit 1
+
+case $mode in
+  list)
+    cloud_list azure
+    exit 0 ;;
+  current)
+    slug=${AZURE_CONFIG_DIR-}; slug=${slug#"$CLOUD_STATE/azure/"}
+    if [[ -z ${AZURE_CONFIG_DIR-} || $slug == "${AZURE_CONFIG_DIR-}" ]]; then
+      echo "Azure: no account selected"
+    elif line=$(cloud_resolve azure "$slug") && [[ -n $line ]]; then
+      IFS=$'\t' read -r _ _ name prod _ _ <<<"$line"
+      echo "Azure: $name$(cloud_prod_tag "$prod")  ($slug)"
+    else
+      echo "Azure: $slug (no longer in env.yaml)"
+    fi
+    exit 0 ;;
+  clear)
+    cloud_clear_current azure
+    cloud_ok "Azure: no account selected"
+    exit 0 ;;
+esac
+
+current=${AZURE_CONFIG_DIR-}; current=${current#"$CLOUD_STATE/azure/"}
+if [[ -n $query ]]; then
+  line=$(cloud_resolve azure "$query")
+  [[ -n $line ]] || { cloud_bad "no Azure account called '$query' in env.yaml"; cloud_list azure; exit 1; }
+else
+  line=$(cloud_pick azure "Azure subscription" "$current") || exit 1
+fi
+IFS=$'\t' read -r _ slug name prod subscription tenant <<<"$line"
+
+[[ $prod == true ]] && { cloud_confirm_prod "$name" "$yes" || exit 1; }
+
+export AZURE_CONFIG_DIR="$CLOUD_STATE/azure/$slug"
+( umask 077; mkdir -p "$AZURE_CONFIG_DIR" )
+
+# The secret is read from env.yaml only when a login is needed, and handed to
+# az on its command line, which is the only way az takes one -- visible to
+# this user's own processes for the second the login takes.
+login() {
+  local app secret
+  { read -r app; read -r secret; } < <(env_json | jq -r --arg s "$slug" "$CLOUD_JQ_DEFS"'
+    [.azure[] | select((.name | slug) == $s)][0] | .client_id, .client_secret')
+  az login --service-principal --username "$app" --password "$secret" \
+    --tenant "$tenant" --allow-no-subscriptions --output none 2>&1
+}
+
+# Resource groups, because listing them is an authenticated ARM request against
+# this subscription: it proves the secret, the tenant, and the role assignment.
+verify() {
+  az account set --subscription "$subscription" 2>&1 &&
+    timeout 60 az group list --subscription "$subscription" --query 'length(@)' --output tsv 2>&1
+}
+
+# A cached login is tried first. If it no longer works -- an expired or
+# rotated secret -- sign in again once from env.yaml before calling it a
+# failure.
+if ! groups=$(verify); then
+  if ! out=$(login); then
+    cloud_bad "Azure  $name$(cloud_prod_tag "$prod") -- the service principal could not sign in"
+    sed 's/^/    /' <<<"$out" | head -n 6
+    exit 1
+  fi
+  if ! groups=$(verify); then
+    cloud_bad "Azure  $name$(cloud_prod_tag "$prod") -- signed in, but the subscription is out of reach"
+    sed 's/^/    /' <<<"$groups" | head -n 6
+    exit 1
+  fi
+fi
+
+show=$(az account show --output json)
+cloud_set_current azure "$line"
+cloud_ok "Azure  $name$(cloud_prod_tag "$prod")"
+cloud_info "subscription $(jq -r .name <<<"$show") ($subscription)"
+cloud_info "tenant $(jq -r .tenantId <<<"$show") · as app $(jq -r .user.name <<<"$show") · $groups resource group(s)"
+
+$console || exit 0
+# The portal signs in as you, in the browser; a service principal cannot.
+xdg-open "https://portal.azure.com/#@$tenant/resource/subscriptions/$subscription/overview" >/dev/null 2>&1 &
+cloud_info "portal opened in the browser"

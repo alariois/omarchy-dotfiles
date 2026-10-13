@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+#
+# Refuse a commit that would put env.yaml in the history, or that leaves
+# env.example.yaml behind env.yaml. Linked to .git/hooks/pre-commit by
+# setup/install.sh. `git commit --no-verify` overrides it, deliberately.
+#
+# Only structure is compared -- the keys, not the values -- and sops leaves
+# keys readable, so this never needs the age key.
+
+set -uo pipefail
+
+DOTFILES=$(git rev-parse --show-toplevel)
+
+# .gitignore already keeps env.yaml out of `git add .`; this is for the
+# `git add -f` that gitignore cannot stop.
+if git diff --cached --name-only | grep -qx 'env.yaml'; then
+  echo "pre-commit: env.yaml is staged. It must never be committed:" >&2
+  echo "  git restore --staged env.yaml" >&2
+  exit 1
+fi
+
+[[ -f $DOTFILES/env.yaml ]] || exit 0
+if ! command -v yq >/dev/null; then
+  echo "pre-commit: yq is not installed, so env.example.yaml was not checked against env.yaml" >&2
+  exit 0
+fi
+
+# shellcheck source=../lib/env.sh
+source "$DOTFILES/lib/env.sh"
+if ! diff=$(env_structure_diff); then
+  echo "pre-commit: env.example.yaml no longer matches env.yaml:" >&2
+  sed 's/^/  /' <<<"$diff" >&2
+  echo "Update env.example.yaml with made-up values, or commit with --no-verify." >&2
+  exit 1
+fi

@@ -151,6 +151,13 @@ setup/install.sh                          assert every block, link, build, packa
 setup/doctor.sh                           report state and unmanaged drift
 hooks/post-update.d/reapply-dotfiles.hook re-assert blocks after `omarchy update`
 vm/omarchy-vm                             disposable Omarchy VM for testing all of the above
+env.example.yaml                          the shape of env.yaml, made-up values (tracked)
+lib/env.sh                                reading env.yaml: decryption, structure check
+lib/cloud.sh                              AWS/Azure profiles generated from env.yaml
+bin/aws-select, bin/az-select             switch this terminal to an account (linked)
+bin/aws-env-credentials                   credential_process for key-based AWS profiles (linked)
+bin/env-secrets                           init/edit/check env.yaml, keep its key (linked)
+git-hooks/pre-commit                      env.yaml never committed, example kept in step (linked)
 ```
 
 ## Usage
@@ -167,9 +174,13 @@ the machine-local seed, the compiled `hypr-nav` binary, the packages a stock
 Omarchy lacks, the no-ligature font, the Omarchy post-update hook, and a
 Hyprland reload to make it all live.
 
-The packages are `himalaya`, `python` and `kdeconnect` (`PACKAGES` in
+The packages are `himalaya`, `python` and `kdeconnect`, and for the cloud
+accounts `aws-cli-v2`, `azure-cli`, `sops`, `age` and `go-yq` (`PACKAGES` in
 `setup/targets.sh`), installed in one `omarchy-pkg-add`, so sudo asks for your
-password once if it has none cached. That happens only when you run it from a
+password once if it has none cached. AWS CLI v1 is removed first when pacman
+has it: v2 conflicts with it, and `--noconfirm` answers pacman's "Remove
+aws-cli?" with no (`REPLACED` in the same file). A v1 that pacman did not
+install is reported, never deleted. That happens only when you run it from a
 terminal. The post-update hook runs it unattended, where a password prompt
 would hang an `omarchy update`, so there it only warns and names the package.
 `jq`, `less`, `wl-clipboard` and `xdg-terminal-exec` are not listed because
@@ -266,6 +277,47 @@ so what gets tested is the repo as it is now, not as of the last commit.
    rule is a single drop-in, `/etc/sudoers.d/90-omarchy-vm`, which is fine for
    a disposable guest and never something to copy to a real machine.
 
+Or skip all of that: **`vm/omarchy-vm autoinstall`** builds the base with
+nobody at the keyboard. The Omarchy ISO installs itself when a drive labelled
+`cidata` carries its configurator's answers, so the script writes those -- the
+4.0.2 configurator's own format, an unencrypted disk, user `test`, a generated
+password kept in `~/.local/share/omarchy-vm/guest-password` -- plus your ssh
+key, builds the drive with `bsdtar`, lets the ISO install and reboot, and adds
+the passwordless sudo `prep-base` would. 10-20 minutes, no input.
+
+### The test
+
+```bash
+vm/omarchy-vm test             # everything, unattended, with a verdict
+vm/omarchy-vm test --keep      # and leave the machine up afterwards to look at
+```
+
+`test` is the whole loop above with checks in between, and it needs nothing
+from you: it downloads the ISO if there is none, builds the base with
+`autoinstall` if there is none, then boots a fresh machine off it and runs
+`omarchy update -y`, `install.sh` twice (the second run must change nothing),
+`doctor.sh`, and a simulated migration that the post-update hook has to
+repair. It also puts AWS CLI v1 in the guest first, so the upgrade to v2 is
+tested rather than assumed.
+
+The cloud accounts are tested too. With an `env.yaml` here and its key in the
+keyring, the encrypted file is copied in, the key is passed on stdin per
+command (never written to the guest's disk), and every account is switched to
+for real. Without one, the plumbing is tested on `env.example.yaml`
+encrypted to a throwaway key: profiles generated, production guard refusing,
+and every switch failing with a clean ✗ -- placeholder credentials that
+worked would be the bug.
+
+Output is TAP (`ok 3 - ...` / `not ok 4 - ...`), exit 0 when everything
+passed, 1 when a check failed, 2 when the test could not get far enough to
+judge. Each run gets its own directory under
+`~/.local/share/omarchy-vm/test-runs/` with its overlay, serial log and every
+step's output, and never touches the overlay `run` uses. Without a display it
+runs headless (`--headless` forces it): no window, plain `virtio-vga`, which
+is how Omarchy's own ISO tests run in CI. That, plus `OMARCHY_ENV_AGE_KEY` for
+the key where there is no keyring, is what a CI job needs: KVM, `qemu-desktop`
+and `edk2-ovmf`, and about 8GB of memory.
+
 ### When the guest misbehaves
 
 `console` attaches to the serial console (Ctrl-] detaches), the way in when
@@ -277,6 +329,73 @@ Memory, CPUs, disk size, ssh port and ISO version can all be overridden with
 environment variables, listed in `vm/omarchy-vm --help`. The reasoning behind
 each choice (USB input, `virtio-vga-gl`, the ssh and firewall steps) is in the
 script's comments.
+
+## Cloud accounts
+
+Every AWS and Azure account is defined once, in `env.yaml`, and a new machine
+gets all of them from that one file -- no logins typed.
+
+```bash
+aws-select                         # pick an AWS account for this terminal
+aws-select --profile superhands    # or name it; tab completes profile names
+az-select --profile "Acme Prod" --yes  # --yes: no question for production
+aws-select --console               # also open the console, signed in
+aws-select --current | --list | --clear
+```
+
+Each switch ends with a real request -- `aws sts get-caller-identity`, or an
+Azure Resource Manager call listing the subscription's resource groups -- and
+prints ✓ with what the cloud answered, or ✗ with its error, in which case
+nothing changes. `az account show` alone would prove nothing; it reads a local
+cache.
+
+The switch is for this terminal: `aws-select` exports `AWS_PROFILE`,
+`az-select` an `AZURE_CONFIG_DIR` of the account's own (so each Azure account
+keeps its login, and switching never signs another out). New terminals start
+on the last account picked; open ones keep theirs. The active accounts show
+at the start of the prompt, production ones in red, added after Starship
+builds the prompt so Omarchy's `starship.toml` stays stock.
+
+**Logins with nobody typing.** AWS accounts use access keys -- one IAM user
+per account, or one IAM user whose keys assume a role in each other account
+(fewer keys, sessions that expire on their own). Azure accounts use a service
+principal per tenant: since October 2025 Azure requires MFA for changes made
+from the CLI by people, and service principals are exempt. The generated AWS
+profiles read their keys through `aws-env-credentials` at the moment the CLI
+needs them, so there is no plaintext copy in `~/.aws/credentials`; `az` does
+keep its own copy of a service principal's secret under its config directory,
+which cannot be avoided. Billing pages stay hidden from every IAM identity
+until the account's root user turns on "IAM user and role access to Billing
+information", once per account.
+
+**`env.yaml`** sits in the repo root, gitignored, and encrypted with sops to
+an age key: the file can be copied anywhere and is useless without the key.
+The key is one line kept in the keyring, read through `SOPS_AGE_KEY_CMD` so
+nothing prompts -- and kept in your password manager too, because nothing else
+can open the file.
+
+```bash
+env-secrets init         # first time: key into the keyring, env.yaml from the example, encrypted
+env-secrets show-key     # copy the key into your password manager
+env-secrets edit         # fill in the accounts
+env-secrets import-key   # on a new machine, before setup/install.sh
+env-secrets check        # encrypted, openable, complete, in step with the example
+```
+
+`env.example.yaml` is the tracked twin, with made-up values -- never a real
+one, and never a real client name, since this repo is public. A key added to
+`env.yaml` must appear there too, and a section removed from one must go from
+the other; fields inside a list entry are per entry, so the example may show
+ones no entry uses. sops leaves keys readable and encrypts only values, so
+this is checked without the key: by `env-secrets check`, `install.sh`,
+`doctor.sh`, and `git-hooks/pre-commit`, which also refuses any commit that
+stages `env.yaml` itself.
+
+`install.sh` regenerates everything derived from `env.yaml` on each run: the
+profiles in a managed block of `~/.aws/config`, and an account list without
+secrets in `~/.local/state/omarchy-dotfiles/cloud/` that the picker, tab
+completion and prompt read. `doctor.sh` warns 30 days before an Azure secret's
+`secret_expires`.
 
 ## Adding a delta
 

@@ -60,3 +60,90 @@ if [[ -n ${TERM_HERE_LINE-} ]]; then
 
   printf '\e7\e[5n'
 fi
+
+# Cloud accounts: aws-select and az-select (bin/) switch THIS terminal to an
+# account from env.yaml, and a new terminal starts on the last one picked.
+#
+# A script cannot change its parent shell's environment, so each is wrapped in
+# a function that runs it and, if the switch succeeded, re-reads the account
+# it recorded: AWS_PROFILE for AWS, AZURE_CONFIG_DIR -- one directory per
+# account, each with its own login -- for Azure. Terminals already open keep
+# whatever they had.
+__cloud_state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-dotfiles/cloud
+
+# sops reads env.yaml's age key from the keyring through this; see lib/env.sh.
+[[ -n ${SOPS_AGE_KEY-}${SOPS_AGE_KEY_CMD-} ]] ||
+  export SOPS_AGE_KEY_CMD="secret-tool lookup service omarchy-dotfiles key sops-age"
+
+# $1 says whether a missing record should clear the variable. After a switch
+# or --clear it should; at shell start it should not, so an AWS_PROFILE
+# inherited from somewhere else survives a terminal that never picked one.
+__cloud_load() {
+  local slug name prod rest
+  if IFS=$'\t' read -r _ slug name prod rest 2>/dev/null <"$__cloud_state/aws-current"; then
+    export AWS_PROFILE=$slug
+    __cloud_aws_prod=$prod
+  elif [[ $1 == clear ]]; then
+    unset AWS_PROFILE __cloud_aws_prod
+  fi
+  if IFS=$'\t' read -r _ slug name prod rest 2>/dev/null <"$__cloud_state/azure-current"; then
+    export AZURE_CONFIG_DIR=$__cloud_state/azure/$slug
+    __cloud_az_prod=$prod
+  elif [[ $1 == clear ]]; then
+    unset AZURE_CONFIG_DIR __cloud_az_prod
+  fi
+}
+__cloud_load keep
+
+aws-select() { command aws-select "$@" && __cloud_load clear; }
+az-select()  { command az-select "$@" && __cloud_load clear; }
+
+# The active accounts at the start of the prompt line, production ones in
+# red. Starship rewrites PS1 on every prompt from its own precmd, which runs
+# first in PROMPT_COMMAND, so this runs after it and adds to what it built --
+# leaving Omarchy's starship.toml stock. Starship's prompt opens with a blank
+# line; the label goes after it, on the line with the path.
+__cloud_prompt() {
+  declare -F starship_precmd >/dev/null || return 0
+  local label="" slug
+  if [[ -n ${AWS_PROFILE-} ]]; then
+    if [[ ${__cloud_aws_prod-} == true ]]; then
+      label+='\[\e[1;97;41m\] aws:'$AWS_PROFILE' \[\e[0m\] '
+    else
+      label+='\[\e[33m\]aws:'$AWS_PROFILE'\[\e[0m\] '
+    fi
+  fi
+  if [[ ${AZURE_CONFIG_DIR-} == "$__cloud_state/azure/"* ]]; then
+    slug=${AZURE_CONFIG_DIR#"$__cloud_state/azure/"}
+    if [[ ${__cloud_az_prod-} == true ]]; then
+      label+='\[\e[1;97;41m\] az:'$slug' \[\e[0m\] '
+    else
+      label+='\[\e[34m\]az:'$slug'\[\e[0m\] '
+    fi
+  fi
+  [[ -n $label ]] || return 0
+  if [[ $PS1 == $'\n'* ]]; then
+    PS1=$'\n'$label${PS1#$'\n'}
+  else
+    PS1=$label$PS1
+  fi
+}
+[[ ${PROMPT_COMMAND-} == *__cloud_prompt* ]] ||
+  PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}__cloud_prompt"
+
+# Tab completion: options, and after --profile the profile names, read from
+# the index the scripts keep -- which holds no secrets, so completing never
+# decrypts env.yaml.
+__cloud_complete() {
+  local cloud=$1 cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
+  if [[ $prev == --profile ]]; then
+    mapfile -t COMPREPLY < <(compgen -W "$(awk -F'\t' -v c="$cloud" '$1 == c { print $2 }' \
+      "$__cloud_state/profiles.tsv" 2>/dev/null)" -- "$cur")
+  else
+    mapfile -t COMPREPLY < <(compgen -W "--profile --yes --console --current --list --clear --help" -- "$cur")
+  fi
+}
+__cloud_complete_aws() { __cloud_complete aws; }
+__cloud_complete_az()  { __cloud_complete azure; }
+complete -F __cloud_complete_aws aws-select
+complete -F __cloud_complete_az az-select
