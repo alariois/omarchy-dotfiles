@@ -30,15 +30,19 @@ set -euo pipefail
 # for itself, so the peek cannot drift from the launch: it is the same code,
 # the same branch, and the same value that would have been passed to the
 # terminal a line later.
+#
+# Three tab-separated fields: the directory, the pre-typed line, and the
+# selected files as absolute paths, one per line. The last is for the
+# clipboard, where a path relative to a folder you are not in means nothing.
 print_only=false
 if [[ ${1:-} == --print ]]; then
   print_only=true
   shift
 fi
 
-answer() { # <directory> [pre-typed line]
+answer() { # <directory> [pre-typed line] [selected paths, one per line]
   $print_only || return 0
-  printf '%s\t%s\n' "$1" "${2-}"
+  printf '%s\t%s\t%s\n' "$1" "${2-}" "${3-}"
   exit 0
 }
 
@@ -100,7 +104,7 @@ for path in ${selection[@]+"${selection[@]}"}; do
   line+=" $(printf %q "$path")"
 done
 
-answer "$folder" "$line"
+answer "$folder" "$line" "$(printf '%s\n' ${selection[@]+"${selection[@]}"})"
 
 if [[ -z $line ]]; then
   # Same launch as omarchy-launch-terminal, with our directory instead of the

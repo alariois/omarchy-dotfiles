@@ -43,7 +43,7 @@ escape() {
 # parameter and can never become a flag.
 #
 # --exec rides along as the toast's default action: clicking it, or pressing
-# SUPER+ALT+comma ("Invoke last notification"), puts the directory on the
+# SUPER+ALT+comma ("Invoke last notification"), puts the path on the
 # clipboard and dismisses the toast. The shell runs that argv directly, with no
 # shell in between, so a directory with a space or a quote in it stays one
 # argument -- which is also why --exec has to come last and be written as
@@ -64,7 +64,9 @@ toast() { # <headline> <body> [urgency] [path to copy on invoke]
 
 printed=$(term-here --print 2>/dev/null) || printed=""
 term_dir=${printed%%$'\t'*}
-term_line=${printed#*$'\t'}
+rest=${printed#*$'\t'}
+term_line=${rest%%$'\t'*}
+selected=${rest#*$'\t'}
 
 files_dir=$(files-here --print 2>/dev/null) || files_dir=""
 
@@ -90,4 +92,10 @@ else
   body+="Files opens $(escape "$(tilde "$files_dir")")"
 fi
 
-toast "$(escape "$(tilde "$headline")")" "$body" "" "$headline"
+# With files selected in Nautilus it is those that get copied, not the folder
+# they are in: the toast already names them under "Terminal types", and a file
+# is what you were pointing at. Several go one per line.
+copy=$headline
+[[ -n $selected ]] && copy=$selected
+
+toast "$(escape "$(tilde "$headline")")" "$body" "" "$copy"
