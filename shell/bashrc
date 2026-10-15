@@ -153,3 +153,85 @@ __cloud_complete_aws() { __cloud_complete aws; }
 __cloud_complete_az()  { __cloud_complete azure; }
 complete -F __cloud_complete_aws aws-select
 complete -F __cloud_complete_az az-select
+
+# Bitwarden: bwu unlocks the vault in this terminal -- the master password the
+# first time, and after that a fingerprint, through sudo, for each terminal
+# (bin/bw-session). `bwu get` picks an item with fzf from an encrypted cache of
+# the vault and prints or copies its secret; `bwu update` syncs and caches the
+# vault anew (bin/bw-vault; bwu get --help). The session key and the cache's key
+# are plain shell variables, never exported: these functions hand them to bw
+# and bw-vault for their run alone, so no other program run here inherits
+# them. `bw lock`, or `bwu lock`, locks the vault for every terminal and
+# deletes the cache.
+bwu() {
+  local update=false sub
+  if [[ ${1-} == --update ]]; then
+    update=true
+    shift
+  fi
+  sub=${1-}
+  case $sub in
+    "")
+      if $update; then __bwu_vault update; else __bwu_unlock; fi ;;
+    get|update)
+      shift
+      # Help needs no vault.
+      if [[ " $* " == *" -h "* || " $* " == *" --help "* ]]; then
+        command bw-vault "$sub" --help
+        return
+      fi
+      if $update && [[ $sub == get ]]; then
+        set -- --update "$@"
+      fi
+      __bwu_vault "$sub" "$@" ;;
+    lock)
+      bw lock ;;
+    -h|--help)
+      command bw-vault --help ;;
+    *)
+      echo "bwu: unknown command '$sub' -- bwu, bwu get, bwu update or bwu lock (bwu --help)" >&2
+      return 2 ;;
+  esac
+}
+__bwu_unlock() {
+  local out
+  if [[ -n ${__bw_session-} ]] &&
+     BW_SESSION=$__bw_session command bw unlock --check >/dev/null 2>&1; then
+    echo "Bitwarden: already unlocked in this terminal" >&2
+    return 0
+  fi
+  out=$(command bw-session) || return 1
+  __bw_session=${out%%$'\n'*}
+  __bw_cache_key=""
+  [[ $out != *$'\n'* ]] || __bw_cache_key=${out#*$'\n'}
+  echo "Bitwarden: unlocked in this terminal" >&2
+}
+__bwu_vault() {
+  local rc=0
+  [[ -n ${__bw_session-} ]] || __bwu_unlock || return
+  BW_SESSION=$__bw_session BW_CACHE_KEY=${__bw_cache_key-} command bw-vault "$@" || rc=$?
+  # 3: the session key stopped working -- the vault was locked, or unlocked
+  # somewhere else since. Unlock again, and try once more.
+  if (( rc == 3 )); then
+    unset __bw_session __bw_cache_key
+    __bwu_unlock || return
+    rc=0
+    BW_SESSION=$__bw_session BW_CACHE_KEY=${__bw_cache_key-} command bw-vault "$@" || rc=$?
+  fi
+  return "$rc"
+}
+complete -W 'get update lock --update --username --password --copy --help' bwu
+bw() {
+  local rc=0
+  if [[ -n ${__bw_session-} ]]; then
+    BW_SESSION=$__bw_session command bw "$@" || rc=$?
+  else
+    command bw "$@" || rc=$?
+  fi
+  # Both keys are worthless after either, and the cache goes with them.
+  if [[ ${1-} == lock || ${1-} == logout ]]; then
+    unset __bw_session __bw_cache_key
+    command bw-vault forget
+  fi
+  return "$rc"
+}

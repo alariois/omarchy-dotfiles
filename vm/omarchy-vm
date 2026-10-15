@@ -1374,6 +1374,16 @@ cmd_test() {
     t_fail "PACKAGES or RELEASES commands missing after install.sh" "$missing"
   fi
 
+  # bwu, from the hooked .bashrc, all the way to bw: nobody is logged in to bw
+  # here, which it must say rather than ask for a password.
+  local bwu_out
+  bwu_out=$(guest_ssh "bash -ic 'bwu' 2>&1 </dev/null" 2>&1 | tr -d '\r' || true)
+  if grep -q 'bw is not logged in -- bw login first' <<<"$bwu_out"; then
+    t_ok "bwu runs, and says to log in to bw first"
+  else
+    t_fail "bwu did not get as far as bw" "$bwu_out"
+  fi
+
   local aws_state
   aws_state=$(guest_ssh 'aws --version 2>&1 | head -n 1; [ "$(pacman -Qq aws-cli 2>/dev/null)" = aws-cli ] && echo "aws-cli: still installed" || echo "aws-cli: not installed"' 2>&1 || true)
   if grep -q '^aws-cli/2\.' <<<"$aws_state" && grep -q 'aws-cli: not installed' <<<"$aws_state"; then

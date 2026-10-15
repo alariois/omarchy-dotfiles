@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+#
+# bw-session -- the Bitwarden session key behind bwu: one key for every
+# terminal, kept where only root can read it, so the master password is typed
+# once and sudo -- a fingerprint -- hands the key to each terminal after that.
+#
+#   bw-session            # print a session key that unlocks the vault, and
+#                         # on a second line the key to bw-vault's cache
+#
+# Not for running by hand. bwu, the shell function in shell/bashrc, runs it and
+# keeps both keys in that one shell, unexported; the functions there pass them
+# to bw and bw-vault alone.
+#
+# First the stored key: sudo reads it, and bw checks it still unlocks the
+# vault. A key stops working when the vault is locked (`bw lock`) or logged
+# out, and when it is unlocked again some other way, since every unlock makes
+# the previous key worthless. Only then does bw ask for the master password,
+# and the key that unlock returns is stored for the next terminal.
+#
+# The store is a root-only file rather than the keyring: anything running as
+# you can read the keyring while you are logged in, and this takes sudo. The
+# master password is never stored. The key opens only this machine's copy of
+# the vault, and `bw lock` makes it worthless.
+#
+# Beside the session key the store keeps an age identity, made new with every
+# unlock: the key to bw-vault's encrypted cache of the vault. A cache written
+# under one unlock is therefore unreadable under the next.
+
+set -euo pipefail
+
+# BW_SESSION_STORE is for tests; the real one is root's alone.
+STORE=${BW_SESSION_STORE:-/var/lib/omarchy-dotfiles/bw-session-$USER}
+
+die() { echo "bw-session: $*" >&2; exit 1; }
+
+command -v bw >/dev/null || die "bw is not installed -- setup/install.sh installs it"
+for tool in jq age-keygen; do
+  command -v "$tool" >/dev/null || die "$tool is not installed"
+done
+
+# Does a key unlock the vault? bw is asked with the key in its environment
+# and nowhere else.
+unlocks() { BW_SESSION=$1 bw unlock --check >/dev/null 2>&1; }
+
+new_cache_key() { age-keygen 2>/dev/null | grep '^AGE-SECRET-KEY-'; }
+
+# Written by root, readable by root alone, in a directory only root can enter:
+# the session key, then the cache key.
+store() {
+  printf '%s\n%s\n' "$1" "$2" |
+    sudo sh -c 'umask 077 && mkdir -p -- "$(dirname -- "$1")" && cat > "$1"' sh "$STORE"
+}
+
+# Once up front, so a refused sudo ends this before any password is asked for.
+sudo -v || die "sudo refused -- the stored key is root's to read"
+
+if stored=$(sudo cat -- "$STORE" 2>/dev/null); then
+  key=$(sed -n 1p <<<"$stored")
+  cache_key=$(sed -n 2p <<<"$stored")
+  unset stored
+  if [[ -n $key ]] && unlocks "$key"; then
+    # A store from before the cache: give it its key now.
+    if [[ $cache_key != AGE-SECRET-KEY-* ]]; then
+      cache_key=$(new_cache_key) || die "age-keygen failed"
+      store "$key" "$cache_key" || die "could not store the cache key"
+    fi
+    printf '%s\n%s\n' "$key" "$cache_key"
+    exit 0
+  fi
+fi
+
+# `bw unlock --check` says "locked" when nobody is logged in at all, so ask
+# bw status which it is.
+case $(bw status 2>/dev/null | jq -r '.status // empty' 2>/dev/null || true) in
+  unauthenticated) die "bw is not logged in -- bw login first, then bwu" ;;
+  locked|unlocked) ;;
+  *)               die "bw status did not answer" ;;
+esac
+
+# bw prompts on stderr, so its output here is the key alone.
+key=$(bw unlock --raw) || die "the vault stays locked"
+[[ -n $key ]] || die "bw unlock gave no session key"
+
+cache_key=$(new_cache_key) || die "age-keygen failed"
+if ! store "$key" "$cache_key"; then
+  echo "bw-session: could not store the key -- this terminal is unlocked, the next one asks again" >&2
+fi
+printf '%s\n%s\n' "$key" "$cache_key"

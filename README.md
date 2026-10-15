@@ -224,6 +224,40 @@ the same file) rather than its default, bitwarden.com. bw only allows that
 while logged out, so a `bw` logged in to another server is reported -- `bw
 logout`, then run `install.sh` again -- and never logged out for you.
 
+`bwu` unlocks the vault in the terminal it is run in: the master password the
+first time, and in every terminal after that a fingerprint, or your password,
+for sudo. `bin/bw-session` keeps the session key `bw unlock` returns in a file
+only root can read -- never the master password -- and a `bw` shell function
+hands the key to bw alone, so nothing else run in that terminal inherits it.
+`bw lock` locks the vault for every terminal, and the next `bwu` asks for the
+master password again.
+
+```bash
+bwu get                 # pick with fzf; print the username and password
+bwu get github          # the same, the search started with "github"
+bwu get -u   / -p       # the username alone / the password alone
+bwu get -c              # copy the password instead (-c -u: the username)
+bwu update              # sync with the server, and cache the vault anew
+bwu --update get        # the same, then pick
+bwu lock                # lock the vault everywhere, and delete the cache
+```
+
+`bwu get` picks from a cache of the vault, so the list is there at once and
+bw does not run. The cache holds every item, secrets included, encrypted with
+age to a key made new with every unlock and kept the way the session key is:
+in root's store, and unexported in the terminals unlocked with it. A cache from
+an earlier unlock cannot be read, and `bw lock` deletes it, so a lock still
+locks everything. Only when there is no cache it can read does `bwu get` sync
+with the server and write one; changes made elsewhere, in the browser or on
+the phone, show up after `bwu update`.
+
+The list shows every item: a login with its username and website, anything
+else by its name. The search covers the name, username and website, so a note
+is found by its title and its text is never searched. A note prints its text,
+a card its number, expiry and code. A copy is marked sensitive for clipboard
+managers, and cleared after 45 seconds unless something else has been copied
+since.
+
 Two things it deliberately does not do, because it cannot:
 
 1. **The two mail passwords**, which belong in the keyring and nowhere else:

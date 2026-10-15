@@ -1,0 +1,282 @@
+#!/usr/bin/env bash
+#
+# bw-vault -- the Bitwarden vault behind `bwu get` and `bwu update`: an
+# encrypted cache of it, and an fzf picker over that cache.
+#
+#   bwu get                # pick; print the username and password
+#   bwu get github         # the same, the search started with "github"
+#   bwu get -u | -p        # the username alone, or the password alone
+#   bwu get -c             # copy instead of print: the password, or with -u
+#                          # the username -- the username is printed alongside
+#   bwu update             # sync with the server, and cache the vault anew
+#   bwu --update get       # the same, then pick
+#
+# Run through bwu, the shell function in shell/bashrc, which unlocks the vault
+# first and hands this the session key and the cache key for its run alone;
+# not by hand.
+#
+# The cache holds every item, secrets included, encrypted with age to a key
+# made new with every unlock (bin/bw-session). The key is kept as the session
+# key is: in root's store, and unexported in the terminals unlocked with it.
+# So a cache from an earlier unlock cannot be read, and `bw lock` deletes it.
+# `bwu get` reads the cache and never runs bw; only when there is none it can
+# read does it sync with the server and write one. Changes made elsewhere --
+# the browser, the phone -- show up after `bwu update`.
+#
+# The list shows every item: a login with its username and website, anything
+# else by its name. The search covers the name, username and website, so a
+# note is found by its title, and its text is never searched.
+#
+# What an item yields: a login its username and password; a note its text; a
+# card its number, expiry and code (-p: the number); an SSH key its private
+# key. -u is a login's username, or a card's holder.
+#
+# A copy goes to the clipboard marked sensitive, which clipboard managers
+# that honour the hint keep out of their history, and is cleared after 45
+# seconds unless something else has been copied over it.
+
+set -euo pipefail
+
+# What `bwu --help` shows -- for using bwu, where the comment above is for
+# reading this file. Headings in bold on a terminal.
+usage() {
+  local b="" r=""
+  [[ -t 1 ]] && b=$'\e[1m' r=$'\e[0m'
+  cat <<EOF
+${b}bwu${r} -- Bitwarden in the terminal: unlock once, then find and copy secrets.
+
+${b}Usage${r}
+  bwu                       unlock the vault in this terminal
+  bwu get [options] [text]  pick an item with fzf, print its secret
+  bwu update                sync with the server, cache the vault anew
+  bwu --update get ...      the same, then pick
+  bwu lock                  lock the vault everywhere, delete the cache
+  bwu --help                this
+
+${b}Options for get${r}
+  -u, --username   the username alone
+  -p, --password   the password alone (a note's text, a card's number)
+  -c, --copy       copy instead of print, cleared after ${CLEAR_AFTER} s; with
+                   neither -u nor -p, prints the username, copies the password
+      --update     sync and cache the vault anew first
+  text             start the search with it; one match is picked at once
+  Short options combine: -cp, -cu.
+
+${b}Examples${r}
+  bwu get github            username and password for GitHub
+  bwu get -cp aws           copy the AWS password
+  bwu get -u gitlab         just the GitLab username
+  bwu get "home wifi"       a note's text
+
+${b}How it works${r}
+  The first bwu asks for your master password; each terminal after that
+  needs only your fingerprint, or your password, for sudo. bwu get picks
+  from an encrypted cache of the vault, so the list opens at once -- changes
+  made elsewhere, in the browser or on the phone, arrive with bwu update.
+  The search covers names, usernames and websites; a note is found by its
+  title alone. bw lock, or bwu lock, locks the vault for every terminal.
+  First time on a machine: bw login.
+EOF
+  exit "${1:-0}"
+}
+die() { echo "bwu: $*" >&2; exit 1; }
+
+# BW_CLEAR_AFTER is for tests.
+CLEAR_AFTER=${BW_CLEAR_AFTER:-45}
+CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-dotfiles/bw-vault.age
+
+sub=${1-}
+(( $# )) && shift
+case $sub in
+  get|update|forget) ;;
+  -h|--help|"")      usage 0 ;;
+  *)                 die "unknown command: $sub  (try --help)" ;;
+esac
+
+if [[ $sub == forget ]]; then
+  rm -f -- "$CACHE"
+  exit 0
+fi
+
+want=both copy=false query="" update=false
+while (( $# )); do
+  case $1 in
+    -u|--username) want=user; shift ;;
+    -p|--password) want=secret; shift ;;
+    -c|--copy)     copy=true; shift ;;
+    --update)      update=true; shift ;;
+    -[upc][upc]*)
+      # -cp and the like: short options together.
+      for (( i = 1; i < ${#1}; i++ )); do
+        case ${1:i:1} in
+          u) want=user ;;
+          p) want=secret ;;
+          c) copy=true ;;
+        esac
+      done
+      shift ;;
+    -h|--help)     usage 0 ;;
+    -*)            die "unknown option: $1  (try --help)" ;;
+    *)             query+="${query:+ }$1"; shift ;;
+  esac
+done
+[[ $sub == get || ( $want == both && $copy == false && -z $query ) ]] ||
+  die "bwu update takes no options"
+
+for tool in bw jq age age-keygen; do
+  command -v "$tool" >/dev/null || die "$tool is not installed"
+done
+[[ $sub == update ]] || command -v fzf >/dev/null || die "fzf is not installed"
+! $copy || command -v wl-copy >/dev/null || die "wl-copy is not installed, so -c cannot copy"
+[[ -n ${BW_SESSION-} && -n ${BW_CACHE_KEY-} ]] ||
+  die "the vault is not unlocked -- run this as 'bwu get' or 'bwu update', which unlock it first"
+
+# The cache, decrypted -- or nothing, when there is none, or it was written
+# under another unlock.
+read_cache() {
+  [[ -f $CACHE ]] || return 1
+  age --decrypt -i <(printf '%s\n' "$BW_CACHE_KEY") "$CACHE" 2>/dev/null
+}
+
+# Sync with the server, cache everything bw then holds, and print it. Exits 3
+# when the session key no longer works -- locked, or unlocked elsewhere since
+# -- which tells bwu to unlock and run this again.
+refresh() {
+  local items folders recipient tmp now
+  if ! bw sync >/dev/null 2>&1; then
+    bw unlock --check >/dev/null 2>&1 || exit 3
+    echo "bwu: could not reach the server -- caching what bw already has" >&2
+  fi
+  if ! items=$(bw list items 2>/dev/null); then
+    bw unlock --check >/dev/null 2>&1 || exit 3
+    die "bw could not list the vault"
+  fi
+  folders=$(bw list folders 2>/dev/null) || folders='[]'
+  now=$(date +%s)
+  recipient=$(printf '%s\n' "$BW_CACHE_KEY" | age-keygen -y) || die "the cache key is not an age key"
+  mkdir -p "$(dirname "$CACHE")"
+  chmod 700 "$(dirname "$CACHE")"
+  tmp=$(mktemp "$CACHE.XXXXXX") || die "cannot write the cache in $(dirname "$CACHE")"
+  # printf is a builtin, so the vault goes to age through a pipe and never
+  # onto a command line, where ps would show it.
+  if printf '{"cached":%s,"items":%s,"folders":%s}\n' "$now" "$items" "$folders" |
+       age --encrypt -r "$recipient" > "$tmp"; then
+    chmod 600 "$tmp"
+    mv -f -- "$tmp" "$CACHE"
+  else
+    rm -f -- "$tmp"
+    die "could not write the cache"
+  fi
+  printf '{"cached":%s,"items":%s,"folders":%s}\n' "$now" "$items" "$folders"
+}
+
+if [[ $sub == update ]]; then
+  data=$(refresh) || exit $?
+  echo "Bitwarden: synced; $(jq '.items | length' <<<"$data") items cached" >&2
+  exit 0
+fi
+
+if $update || ! data=$(read_cache); then
+  data=$(refresh) || exit $?
+fi
+
+ago() {
+  local s=$(( $(date +%s) - $1 ))
+  if (( s < 60 )); then echo "just now"
+  elif (( s < 3600 )); then echo "$(( s / 60 )) min ago"
+  elif (( s < 86400 )); then echo "$(( s / 3600 )) h ago"
+  else echo "$(( s / 86400 )) days ago"; fi
+}
+cached=$(ago "$(jq '.cached' <<<"$data")")
+
+# One line per item: its id, hidden, then the name, username and website,
+# padded into columns, and the kind and folder, dimmed and not searched.
+# fzf shows a tab as one space here (--tabstop=1), so the padding lines up.
+list=$(jq -r '
+  (INDEX((.folders // [])[]; .id // "") | map_values(.name)) as $f
+  | def kind: {"1": "login", "2": "note", "3": "card", "4": "identity", "5": "ssh key"}[.type | tostring] // "item";
+    def site: (.login.uris // [])[0].uri // "" | sub("^[a-z]+://"; "") | sub("/.*$"; "");
+    def cut($n): if length > $n then .[0:$n - 1] + "…" else . end;
+    def pad($n): . + (" " * ([$n - length, 0] | max));
+    .items
+  | map({id, name: (.name // "" | cut(40)),
+         user: (if .type == 1 then .login.username // "" else "" end | cut(32)),
+         site: (if .type == 1 then site else "" end | cut(32)),
+         tag: (kind + (($f[.folderId // ""] // "") | if . != "" then " · " + . else "" end))})
+  | sort_by(.name | ascii_downcase)
+  | (map(.name | length) + [4] | max) as $wn
+  | (map(.user | length) + [8] | max) as $wu
+  | (map(.site | length) + [4] | max) as $ws
+  | (["", ("NAME" | pad($wn)), ("USERNAME" | pad($wu)), ("SITE" | pad($ws)), "TYPE"] | join("\t")),
+    (.[] | [.id, (.name | pad($wn)), (.user | pad($wu)), (.site | pad($ws)), "\u001b[2m\(.tag)\u001b[0m"] | join("\t"))
+' <<<"$data")
+(( $(wc -l <<<"$list") > 1 )) || die "the vault is empty"
+
+# --select-1: a search that already names one item needs no picking.
+rc=0
+line=$(fzf --ansi --delimiter=$'\t' --with-nth=2.. --nth=1,2,3 --tabstop=1 \
+         --header-lines=1 --header="cached $cached -- bwu update for changes made elsewhere" \
+         --layout=reverse --height=60% --prompt='bw> ' \
+         --query="$query" --select-1 --exit-0 <<<"$list") || rc=$?
+case $rc in
+  0)   ;;
+  1)   die "nothing matches '$query'" ;;
+  130) exit 130 ;;
+  *)   die "fzf failed" ;;
+esac
+id=${line%%$'\t'*}
+item=$(jq -c --arg id "$id" '.items[] | select(.id == $id)' <<<"$data")
+unset data list
+[[ -n $item ]] || die "the item picked is no longer in the list"
+
+name=$(jq -r '.name' <<<"$item")
+type=$(jq -r '.type' <<<"$item")
+user=$(jq -r '(if .type == 1 then .login.username elif .type == 3 then .card.cardholderName else null end) // ""' <<<"$item")
+secret=$(jq -r '(if .type == 1 then .login.password elif .type == 2 then .notes
+                 elif .type == 3 then .card.number elif .type == 5 then .sshKey.privateKey
+                 else null end) // ""' <<<"$item")
+
+# Into the clipboard, out again after a while -- but only if it is still
+# there: anything copied since is left alone.
+copy_out() {
+  local what=$1 value=$2
+  printf '%s' "$value" | wl-copy --sensitive
+  ( sleep "$CLEAR_AFTER"
+    [[ $(wl-paste --no-newline 2>/dev/null) == "$value" ]] && wl-copy --clear
+  ) >/dev/null 2>&1 &
+  disown
+  echo "$name: $what copied, cleared in ${CLEAR_AFTER}s" >&2
+}
+
+case $want in
+  user)
+    [[ -n $user ]] || die "$name has no username"
+    if $copy; then copy_out username "$user"; else printf '%s\n' "$user"; fi ;;
+  secret)
+    [[ -n $secret ]] || die "$name has nothing to show for -p"
+    if $copy; then copy_out "$( [[ $type == 2 ]] && echo note || echo password )" "$secret"; else printf '%s\n' "$secret"; fi ;;
+  both)
+    case $type in
+      1)
+        [[ -z $user ]] || printf 'username  %s\n' "$user"
+        if [[ -z $secret ]]; then
+          echo "$name has no password" >&2
+        elif $copy; then
+          copy_out password "$secret"
+        else
+          printf 'password  %s\n' "$secret"
+        fi ;;
+      3)
+        if $copy; then
+          [[ -z $user ]] || printf 'holder    %s\n' "$user"
+          copy_out "card number" "$secret"
+        else
+          jq -r '.card | [["holder", .cardholderName], ["number", .number],
+                          ["expires", (if .expMonth then "\(.expMonth)/\(.expYear)" else null end)], ["code", .code]]
+                       | .[] | select(.[1] != null and .[1] != "") | "\(.[0] | . + " " * (10 - length))\(.[1])"' <<<"$item"
+        fi ;;
+      *)
+        [[ -n $secret ]] || die "$name has nothing to show"
+        if $copy; then copy_out "$( [[ $type == 2 ]] && echo note || echo key )" "$secret"; else printf '%s\n' "$secret"; fi ;;
+    esac ;;
+esac
