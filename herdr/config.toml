@@ -1,0 +1,12 @@
+# Personal herdr settings, copied to the top of ~/.config/herdr/config.toml
+# by setup/install.sh (the `toml` hook style in setup/targets.sh).
+#
+# herdr's first run asks how background notifications should reach you, then
+# writes both of these. Having them here answers it once for every machine.
+
+# The first-run notification setup is done.
+onboarding = false
+
+[ui.toast]
+# Straight to the desktop's notification service, not herdr's in-app toast.
+delivery = "system"

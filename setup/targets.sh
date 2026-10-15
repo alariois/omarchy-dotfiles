@@ -13,10 +13,19 @@
 #   lua  -> `--` comments, `dofile("<path>")`
 #   ini  -> `#`  comments, `[main]` + `include=<path>` (foot)
 #   xcompose -> `#` comments, `include "<path>"` (X Compose)
+#   toml -> `#`  comments, the payload's text itself, at the top (herdr)
 #
 # The block is appended last, so an include that reassigns a setting the stock
 # file above it already set wins. That is how nvim/options.lua overrides
 # Omarchy's relativenumber.
+#
+# toml is the exception on both counts. TOML has no include, so the block holds
+# a copy of the payload, and install.sh must re-run after editing it. And it
+# goes first, because a key appended after the stock tables would land inside
+# the last of them. A toml block cannot override anything either -- TOML
+# rejects a key set twice -- so it may only add settings the stock file leaves
+# unset. install.sh refuses to write a result that is not exactly stock plus
+# the payload.
 #
 # LINKS -- files and directories Omarchy never writes. The live path becomes a
 # symlink into this repo, so no drift is possible: the live file *is* the repo
@@ -36,6 +45,10 @@ HOOKS=(
   "$HOME/.config/hypr/input.lua|lua|hypr/input.lua"
   "$HOME/.config/hypr/looknfeel.lua|lua|hypr/looknfeel.lua"
   "$HOME/.config/foot/foot.ini|ini|foot/foot.ini"
+
+  # Omarchy only seeds this one (migration 1786273938), but omarchy-refresh-herdr
+  # and `omarchy refresh config` cp the stock file over it, so it is a hook.
+  "$HOME/.config/herdr/config.toml|toml|herdr/config.toml"
 
   # A hook, not a link, though it was a link until a fresh 4.0.2 machine said
   # otherwise. install/user/xcompose.sh does `tee ~/.XCompose` during the

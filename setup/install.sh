@@ -6,7 +6,8 @@
 # of an Omarchy file. Two lanes, declared in setup/targets.sh:
 #
 #   HOOKS -- Omarchy-owned files get one managed block holding a single include
-#            that points back into this repo. An `omarchy update` migration can
+#            that points back into this repo (or, in TOML, which has no
+#            include, a copy of the repo file). An `omarchy update` migration can
 #            clobber that block (migrations `mv` a temp file over the target),
 #            but it can never touch our actual configuration -- and the
 #            post-update hook re-asserts the block afterwards.
@@ -61,9 +62,40 @@ source "$DOTFILES/lib/cloud.sh"
 hypr_dirty=0
 note_if_hypr() { [[ $1 == "$HOME/.config/hypr/"* ]] && hypr_dirty=1; return 0; }
 
+# Succeeds when <whole> parses as TOML and means exactly <rest> plus
+# <payload>; otherwise says why. Two ways it fails, both seen on the first
+# hooking of herdr's config, which still had its own copy of our two settings:
+# a key set both in the block and outside it makes the file invalid, and herdr
+# then loads none of it; and a top-level key below the block silently becomes
+# a key of the block's last table -- `onboarding` turned into
+# `ui.toast.onboarding`.
+toml_adds_up() {
+  python3 -c '
+import sys, tomllib
+
+def load(path):
+    with open(path, "rb") as f:
+        return tomllib.load(f)
+
+def merged(a, b):
+    out = dict(a)
+    for k, v in b.items():
+        both = isinstance(v, dict) and isinstance(a.get(k), dict)
+        out[k] = merged(a[k], v) if both else v
+    return out
+
+try:
+    whole, rest, ours = load(sys.argv[1]), load(sys.argv[2]), load(sys.argv[3])
+except tomllib.TOMLDecodeError as e:
+    sys.exit(e)
+if whole != merged(rest, ours):
+    sys.exit("a top-level key below the block lands inside one of its tables")
+' "$@"
+}
+
 ensure_hook() {
   local target=$1 style=$2 payload=$3
-  local abs="$DOTFILES/$payload" open close include tmp
+  local abs="$DOTFILES/$payload" open close include tmp err
 
   if [[ ! -f $abs ]]; then
     echo "MISSING payload: $abs" >&2
@@ -90,6 +122,10 @@ ensure_hook() {
           # wanted here because $abs is already absolute.
     xcompose) open="# >>> $MARKER >>>";  close="# <<< $MARKER <<<"
           include="include \"$abs\"" ;;
+          # No include in TOML, so the block is a copy of the payload, and it
+          # goes at the top -- see the styles in setup/targets.sh.
+    toml) open="# >>> $MARKER >>>";  close="# <<< $MARKER <<<"
+          include=$(toml_block_body "$abs") ;;
     *)    echo "unknown comment style: $style" >&2; return 1 ;;
   esac
 
@@ -116,7 +152,22 @@ ensure_hook() {
       $0 == c { skip = 0; next }
       !skip' "$target" > "$tmp"
   fi
-  printf '%s\n%s\n%s\n' "$open" "$include" "$close" >> "$tmp"
+  if [[ $style == toml ]]; then
+    { printf '%s\n%s\n%s\n' "$open" "$include" "$close"; cat "$tmp"; } > "$tmp.top"
+    # Unchecked only without python3: a new machine's first run, before the
+    # Packages pass installs it. The run after that checks.
+    if command -v python3 >/dev/null && ! err=$(toml_adds_up "$tmp.top" "$tmp" "$abs" 2>&1); then
+      changed "  CONFLICT ${target/#"$HOME"/\~}   -> would not mean stock plus $payload:"
+      changed "             $err"
+      changed "           fix or remove what sits outside the block, then re-run"
+      conflicts=$((conflicts + 1))
+      rm -f "$tmp" "$tmp.top"
+      return 0
+    fi
+    mv "$tmp.top" "$tmp"
+  else
+    printf '%s\n%s\n%s\n' "$open" "$include" "$close" >> "$tmp"
+  fi
 
   if [[ -f $target ]] && cmp -s "$tmp" "$target"; then
     say "  ok       ${target/#"$HOME"/\~}"

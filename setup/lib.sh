@@ -1,13 +1,14 @@
 # Shared helpers for install.sh and doctor.sh.
 #
-# Both scripts have to answer the same two questions, and have to answer them
+# Both scripts have to answer the same questions, and have to answer them
 # identically, or `doctor.sh` reports a problem `install.sh` will not fix:
 #
 #   1. Is the installed binary the one this source builds?
 #   2. Is the Hyprland config the live session is running the one in this repo?
+#   3. Is a toml hook block a current copy of its payload?
 #
-# Neither can be answered from mtimes, which is what both used to do. See the
-# two sections below.
+# The first two cannot be answered from mtimes, which is what both used to do.
+# See the sections below.
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-dotfiles"
 
@@ -156,6 +157,24 @@ hypr_ctl() {
   local sig
   sig=$(hypr_signature) || return 1
   HYPRLAND_INSTANCE_SIGNATURE="$sig" hyprctl "$@"
+}
+
+# ── toml hooks ────────────────────────────────────────────────────────
+#
+# Every other hook block holds one include line, and an include is always
+# current: editing the payload is the change. A toml block holds a copy,
+# because TOML has no include, and a copy can fall behind its payload. So
+# doctor.sh compares the block against what install.sh would write, and both
+# render it here.
+#
+# The first line names the payload's absolute path, which is also what
+# doctor.sh greps for to tell this checkout's blocks from another's.
+
+toml_block_body() {
+  local abs=$1
+  printf '# Copied from %s by setup/install.sh,\n' "$abs"
+  printf '# since TOML has no include. Edit it there and re-run install.sh.\n'
+  cat "$abs"
 }
 
 # ── FONTS ─────────────────────────────────────────────────────────────

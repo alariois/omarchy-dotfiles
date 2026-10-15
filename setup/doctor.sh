@@ -37,6 +37,14 @@ DIFF_CAP=20
 
 tilde() { echo "${1/#"$HOME"/\~}"; }
 
+# The lines between our markers in a hooked file.
+our_block() {
+  awk -v m="$MARKER" '
+    index($0, ">>> " m " >>>") { inblock = 1; next }
+    index($0, "<<< " m " <<<") { inblock = 0; next }
+    inblock' "$1" 2>/dev/null
+}
+
 # shellcheck source=targets.sh
 source "$DOTFILES/setup/targets.sh"
 # shellcheck source=lib.sh
@@ -57,18 +65,20 @@ foreign=0
 for entry in "${HOOKS[@]}"; do
   IFS='|' read -r target style payload <<< "$entry"
   if grep -qF ">>> $MARKER >>>" "$target" 2>/dev/null; then
-    if grep -qF "$DOTFILES/$payload" "$target" 2>/dev/null; then
-      echo "  present  $(tilde "$target")  ->  $payload"
-    else
+    if ! grep -qF "$DOTFILES/$payload" "$target" 2>/dev/null; then
       echo "  FOREIGN  $(tilde "$target")   -> block points at another checkout:"
       # Read the path out of OUR block only. Grepping the whole file matched
       # Omarchy's own include line in foot.ini and a stray tmux directive,
       # reporting paths that had nothing to do with us.
-      awk -v m="$MARKER" '
-        index($0, ">>> " m " >>>") { inblock = 1; next }
-        index($0, "<<< " m " <<<") { inblock = 0; next }
-        inblock' "$target" 2>/dev/null | sed 's/^/             /'
+      our_block "$target" | sed 's/^/             /'
       foreign=$((foreign + 1))
+    # A toml block is a copy, so it can lag its payload, or be edited in place
+    # by the app that owns the file.
+    elif [[ $style == toml && $(our_block "$target") != "$(toml_block_body "$DOTFILES/$payload")" ]]; then
+      echo "  STALE    $(tilde "$target")   -> block differs from $payload: port any"
+      echo "           edit made in the block to the repo, then run setup/install.sh"
+    else
+      echo "  present  $(tilde "$target")  ->  $payload"
     fi
   else
     echo "  MISSING  $(tilde "$target")   -> run setup/install.sh"

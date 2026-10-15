@@ -19,7 +19,8 @@ for each — plus a third for source we compile.
 ### `HOOKS` — files Omarchy owns
 
 `~/.bashrc`, `~/.config/tmux/tmux.conf`, `hypr/*.lua`, `shell.json`, terminal
-configs. These are left stock in place and get one appended managed block:
+configs, herdr's `config.toml`. These are left stock in place and get one
+appended managed block:
 
 ```bash
 # >>> omarchy-dotfiles >>>
@@ -35,6 +36,15 @@ A migration can clobber the block — it can never touch our config. And
 The block is always appended **last**, which is what lets an include override a
 setting the stock file above it already made. `nvim/options.lua` relies on this:
 stock sets `relativenumber = false`, our `dofile` runs after it and sets `true`.
+
+**TOML is the exception** (`toml` style, used for herdr). TOML has no include,
+so the block holds a *copy* of the repo file: edit `herdr/config.toml`, then
+re-run `install.sh`, and `doctor.sh` reports the block `STALE` until you do. It
+goes at the **top**, not the bottom, since a key appended after the stock
+tables would land inside the last of them. And it cannot override anything —
+TOML rejects a key set twice — so it may only add settings stock leaves unset.
+`install.sh` refuses to write a file that would not parse as exactly stock plus
+our settings, which is what a leftover hand-edited copy of one of them causes.
 
 ### `LINKS` — files Omarchy never writes
 
@@ -128,6 +138,7 @@ hypr/bindings.lua                         Hyprland keybindings (hooked)
 hypr/input.lua                            keyboard remapping, key repeat, touchpad scroll (hooked)
 hypr/looknfeel.lua                        gaps and corner rounding (hooked)
 foot/foot.ini                             terminal font (hooked, `ini` style)
+herdr/config.toml                         herdr's notification setup (hooked, `toml` style)
 xkb/                                      custom xkb options behind it (linked)
 nvim/plugins/*.lua                        added LazyVim plugin specs (linked)
 nvim-chad/                                standalone nvim config (linked wholesale)
