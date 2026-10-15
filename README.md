@@ -137,6 +137,7 @@ nvim/options.lua                          nvim options (hooked into Omarchy's La
 hypr/bindings.lua                         Hyprland keybindings (hooked)
 hypr/input.lua                            keyboard remapping, key repeat, touchpad scroll (hooked)
 hypr/looknfeel.lua                        gaps and corner rounding (hooked)
+hypr/hyprland.lua                         window rules: Slack on workspace 5 (hooked)
 foot/foot.ini                             terminal font (hooked, `ini` style)
 herdr/config.toml                         herdr's notification setup (hooked, `toml` style)
 xkb/                                      custom xkb options behind it (linked)

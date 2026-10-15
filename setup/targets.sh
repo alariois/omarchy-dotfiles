@@ -41,6 +41,7 @@ HOOKS=(
   "$HOME/.bashrc|sh|shell/bashrc"
   "$HOME/.config/tmux/tmux.conf|tmux|tmux/tmux.conf"
   "$HOME/.config/nvim/lua/config/options.lua|lua|nvim/options.lua"
+  "$HOME/.config/hypr/hyprland.lua|lua|hypr/hyprland.lua"
   "$HOME/.config/hypr/bindings.lua|lua|hypr/bindings.lua"
   "$HOME/.config/hypr/input.lua|lua|hypr/input.lua"
   "$HOME/.config/hypr/looknfeel.lua|lua|hypr/looknfeel.lua"
