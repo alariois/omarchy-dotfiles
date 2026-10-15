@@ -9,7 +9,8 @@
 #                     `aws --profile <name>` works anywhere, not only in
 #                     aws-select
 #   profiles.tsv      the account list, without a single secret in it, so the
-#                     picker, tab completion and the prompt never decrypt
+#                     picker, tab completion and aws-whoami/az-whoami never
+#                     decrypt
 #   azure/<profile>/  one AZURE_CONFIG_DIR per Azure entry, so each keeps its
 #                     own login and switching never logs anything else out
 #

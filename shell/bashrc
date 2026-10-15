@@ -63,6 +63,7 @@ fi
 
 # Cloud accounts: aws-select and az-select (bin/) switch THIS terminal to an
 # account from env.yaml, and a new terminal starts on the last one picked.
+# aws-whoami and az-whoami say which one a terminal is on; the prompt does not.
 #
 # A script cannot change its parent shell's environment, so each is wrapped in
 # a function that runs it and, if the switch succeeded, re-reads the account
@@ -79,18 +80,16 @@ __cloud_state=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-dotfiles/cloud
 # or --clear it should; at shell start it should not, so an AWS_PROFILE
 # inherited from somewhere else survives a terminal that never picked one.
 __cloud_load() {
-  local slug name prod rest
-  if IFS=$'\t' read -r _ slug name prod rest 2>/dev/null <"$__cloud_state/aws-current"; then
+  local slug rest
+  if IFS=$'\t' read -r _ slug rest 2>/dev/null <"$__cloud_state/aws-current"; then
     export AWS_PROFILE=$slug
-    __cloud_aws_prod=$prod
   elif [[ $1 == clear ]]; then
-    unset AWS_PROFILE __cloud_aws_prod
+    unset AWS_PROFILE
   fi
-  if IFS=$'\t' read -r _ slug name prod rest 2>/dev/null <"$__cloud_state/azure-current"; then
+  if IFS=$'\t' read -r _ slug rest 2>/dev/null <"$__cloud_state/azure-current"; then
     export AZURE_CONFIG_DIR=$__cloud_state/azure/$slug
-    __cloud_az_prod=$prod
   elif [[ $1 == clear ]]; then
-    unset AZURE_CONFIG_DIR __cloud_az_prod
+    unset AZURE_CONFIG_DIR
   fi
 }
 __cloud_load keep
@@ -98,38 +97,43 @@ __cloud_load keep
 aws-select() { command aws-select "$@" && __cloud_load clear; }
 az-select()  { command az-select "$@" && __cloud_load clear; }
 
-# The active accounts at the start of the prompt line, production ones in
-# red. Starship rewrites PS1 on every prompt from its own precmd, which runs
-# first in PROMPT_COMMAND, so this runs after it and adds to what it built --
-# leaving Omarchy's starship.toml stock. Starship's prompt opens with a blank
-# line; the label goes after it, on the line with the path.
-__cloud_prompt() {
-  declare -F starship_precmd >/dev/null || return 0
-  local label="" slug
-  if [[ -n ${AWS_PROFILE-} ]]; then
-    if [[ ${__cloud_aws_prod-} == true ]]; then
-      label+='\[\e[1;97;41m\] aws:'$AWS_PROFILE' \[\e[0m\] '
-    else
-      label+='\[\e[33m\]aws:'$AWS_PROFILE'\[\e[0m\] '
-    fi
+# Which account this terminal is on: the variable the switch set, looked up in
+# the account list the scripts keep for its name and details. Nothing is
+# decrypted and nothing asks the cloud, so it answers at once -- whether the
+# account still signs in is for aws-select and az-select to prove.
+__cloud_whoami() {
+  local cloud=$1 label=$2 slug=$3 line name prod d1 d2 tag=""
+  line=$(awk -F'\t' -v c="$cloud" -v s="$slug" '$1 == c && $2 == s' "$__cloud_state/profiles.tsv" 2>/dev/null)
+  if [[ -z $line ]]; then
+    echo "$label: $slug -- not an account in env.yaml"
+    return 0
   fi
-  if [[ ${AZURE_CONFIG_DIR-} == "$__cloud_state/azure/"* ]]; then
-    slug=${AZURE_CONFIG_DIR#"$__cloud_state/azure/"}
-    if [[ ${__cloud_az_prod-} == true ]]; then
-      label+='\[\e[1;97;41m\] az:'$slug' \[\e[0m\] '
-    else
-      label+='\[\e[34m\]az:'$slug'\[\e[0m\] '
-    fi
+  IFS=$'\t' read -r _ _ name prod d1 d2 <<<"$line"
+  if [[ $prod == true ]]; then
+    tag=" PROD"
+    [[ -t 1 ]] && tag=$' \e[1;41;97m PROD \e[0m'
   fi
-  [[ -n $label ]] || return 0
-  if [[ $PS1 == $'\n'* ]]; then
-    PS1=$'\n'$label${PS1#$'\n'}
+  case $cloud in
+    aws)   echo "$label: $name$tag -- account $d1, $d2" ;;
+    azure) echo "$label: $name$tag -- subscription $d1, tenant $d2" ;;
+  esac
+}
+aws-whoami() {
+  if [[ -z ${AWS_PROFILE-} ]]; then
+    echo "AWS: none selected in this terminal -- aws uses its default profile"
   else
-    PS1=$label$PS1
+    __cloud_whoami aws AWS "$AWS_PROFILE"
   fi
 }
-[[ ${PROMPT_COMMAND-} == *__cloud_prompt* ]] ||
-  PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}__cloud_prompt"
+az-whoami() {
+  if [[ -z ${AZURE_CONFIG_DIR-} ]]; then
+    echo "Azure: none selected in this terminal -- az uses your own az login"
+  elif [[ $AZURE_CONFIG_DIR != "$__cloud_state/azure/"* ]]; then
+    echo "Azure: AZURE_CONFIG_DIR is $AZURE_CONFIG_DIR -- not an account in env.yaml"
+  else
+    __cloud_whoami azure Azure "${AZURE_CONFIG_DIR#"$__cloud_state/azure/"}"
+  fi
+}
 
 # Tab completion: options, and after --profile the profile names, read from
 # the index the scripts keep -- which holds no secrets, so completing never

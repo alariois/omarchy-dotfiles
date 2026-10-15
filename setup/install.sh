@@ -412,8 +412,8 @@ package_ok() {
 
 # env.yaml: the encrypted file of accounts and secrets. Its structure is
 # checked against env.example.yaml, and everything derived from it -- the AWS
-# profiles in ~/.aws/config and the account list the scripts and the prompt
-# read -- is regenerated. A machine without env.yaml skips all of it.
+# profiles in ~/.aws/config and the account list the scripts and the shell
+# functions read -- is regenerated. A machine without env.yaml skips all of it.
 ensure_env() {
   local diff errs line
   if [[ ! -f $ENV_FILE ]]; then

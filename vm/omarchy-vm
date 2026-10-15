@@ -1449,6 +1449,7 @@ test_cloud_accounts() {
     fi
   done < <(guest_ssh "cat $index" 2>/dev/null)
   test_add_needs_login "$key"
+  test_whoami
   [[ -n $first ]] || return 0
   if out=$(guest_keyed "$key" "bash -ic 'aws-select --profile $first --yes >/dev/null && echo AWS_PROFILE=\$AWS_PROFILE' 2>/dev/null" 2>&1) &&
      grep -qx "AWS_PROFILE=$first" <<<"$(tr -d '\r' <<<"$out")"; then
@@ -1508,7 +1509,23 @@ test_cloud_plumbing() {
   fi
 
   test_add_needs_login "$key"
+  test_whoami
   guest_ssh "rm -f $repo/env.yaml" 2>/dev/null || true
+}
+
+# aws-whoami and az-whoami, in a real interactive shell, where .bashrc's hook
+# defines them: none on a terminal that picked nothing, and the account's name
+# on one that did. They read only the account list, so no key is needed.
+test_whoami() {
+  local slug name out
+  IFS=$'\t' read -r slug name < <(guest_ssh "grep -m1 '^aws' ~/.local/state/omarchy-dotfiles/cloud/profiles.tsv | cut -f2,3" 2>/dev/null)
+  out=$(guest_ssh "bash -ic 'unset AWS_PROFILE AZURE_CONFIG_DIR; aws-whoami; az-whoami; AWS_PROFILE=$slug aws-whoami' 2>/dev/null" 2>&1 | tr -d '\r')
+  if grep -q '^AWS: none selected' <<<"$out" && grep -q '^Azure: none selected' <<<"$out" &&
+     [[ -n $name ]] && grep -qF "AWS: $name" <<<"$out"; then
+    t_ok "aws-whoami and az-whoami name the account, or say there is none"
+  else
+    t_fail "aws-whoami and az-whoami did not answer as expected" "$out"
+  fi
 }
 
 # The guest has no az or aws login of anyone's, so az-add and aws-add must stop

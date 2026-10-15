@@ -354,6 +354,7 @@ aws-select                         # pick an AWS account for this terminal
 aws-select --profile superhands    # or name it; tab completes profile names
 az-select --profile "Acme Prod" --yes  # --yes: no question for production
 aws-select --console               # also open the console, signed in
+aws-whoami; az-whoami              # which account this terminal is on, if any
 aws-select --current | --list | --clear
 ```
 
@@ -366,9 +367,11 @@ cache.
 The switch is for this terminal: `aws-select` exports `AWS_PROFILE`,
 `az-select` an `AZURE_CONFIG_DIR` of the account's own (so each Azure account
 keeps its login, and switching never signs another out). New terminals start
-on the last account picked; open ones keep theirs. The active accounts show
-at the start of the prompt, production ones in red, added after Starship
-builds the prompt so Omarchy's `starship.toml` stays stock.
+on the last account picked; open ones keep theirs. The prompt shows none of
+it: `aws-whoami` and `az-whoami` say which account a terminal is on, marking
+production ones -- or that it is on none, and so what `aws` or `az` falls
+back to. They read the account list, so they answer at once and never ask
+the cloud.
 
 **Logins with nobody typing.** AWS accounts use access keys -- one IAM user
 per account, or one IAM user whose keys assume a role in each other account
