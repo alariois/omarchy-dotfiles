@@ -1,0 +1,608 @@
+#!/usr/bin/env bash
+#
+# az-add -- put the Azure subscription you are signed in to into env.yaml, so
+# az-select can sign in to it from any machine with nobody typing; or, for one
+# already there, make sure it still can.
+#
+#   az-add                              # the subscription `az login` is on
+#   az-add --subscription NAME|ID       # another one your login can see
+#   az-add --profile superhands         # an env.yaml entry: check, repair, renew
+#   az-add --renew                      # a new secret even if the old one works
+#   az-add --name "Acme Prod" --prod --email you@acme.com --role Contributor \
+#          --years 2 --yes              # answers up front, defaults for the rest
+#
+# Your own login cannot go into env.yaml: it is tied to this machine, and Azure
+# asks people for MFA. So az-add uses it to give the subscription a service
+# principal -- an app identity with a role on the subscription and a client
+# secret -- which is what az-select signs in as. It looks before it creates:
+#
+#   - In env.yaml, its secret working, more than 30 days left: nothing to
+#     create. In a terminal it asks whether to change the entry's settings --
+#     the questions below, its own answers filled in; --name, --prod,
+#     --no-prod or --email change them straight away.
+#   - In env.yaml, but the secret fails, ends within 30 days, or --renew: a new
+#     secret for the same app, written to every entry that shares the app. The
+#     old one is deleted once the new one signs in.
+#   - Not in env.yaml, or in it with no real app behind it (the example's
+#     client_id): the app another entry in this tenant already signs in as;
+#     else the app an earlier run made, "omarchy-dotfiles (<your login>)";
+#     else a new one. It gets a role on the subscription unless it has one, and
+#     a secret unless env.yaml holds one that works.
+#
+# The questions -- name, production or not, email, role, how long the secret
+# lasts -- all come before anything is created, then a summary to confirm. An
+# entry already in env.yaml is asked about too, its own answers the defaults:
+# one az-add has to finish was perhaps never more than a guess. The
+# secret goes straight into the encrypted env.yaml and is never printed. If a
+# step fails before env.yaml has it, whatever this run created is deleted
+# again. Last, az-select signs in to prove the entry works, retried for up to
+# three minutes, since Azure takes a while to accept a new app, role or secret.
+# Which account new terminals start on is left as it was.
+#
+# After a renewal, copy env.yaml to your other machines: theirs still holds the
+# secret that was just deleted.
+
+set -euo pipefail
+
+DOTFILES=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)
+# shellcheck source=../lib/env.sh
+source "$DOTFILES/lib/env.sh"
+# shellcheck source=../lib/cloud.sh
+source "$DOTFILES/lib/cloud.sh"
+
+usage() {
+  awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; next } NR > 2 { exit }' "$0"
+  exit "${1:-0}"
+}
+
+# The same 30 days doctor.sh warns at.
+RENEW_DAYS=30
+VERIFY_TRIES=18 VERIFY_PAUSE=10
+
+query="" profile="" renew=false yes=false
+opt_name="" opt_prod="" opt_email="" opt_role="" opt_years=""
+while (( $# )); do
+  case $1 in
+    --subscription)   [[ -n ${2:-} ]] || die "--subscription needs a name or id"; query=$2; shift 2 ;;
+    --subscription=*) query=${1#*=}; shift ;;
+    --profile)        [[ -n ${2:-} ]] || die "--profile needs a name"; profile=$2; shift 2 ;;
+    --profile=*)      profile=${1#*=}; shift ;;
+    --renew)          renew=true; shift ;;
+    --name)           [[ -n ${2:-} ]] || die "--name needs a value"; opt_name=$2; shift 2 ;;
+    --name=*)         opt_name=${1#*=}; shift ;;
+    --prod)           opt_prod=true; shift ;;
+    --no-prod)        opt_prod=false; shift ;;
+    --email)          [[ -n ${2:-} ]] || die "--email needs a value"; opt_email=$2; shift 2 ;;
+    --email=*)        opt_email=${1#*=}; shift ;;
+    --role)           [[ -n ${2:-} ]] || die "--role needs a role name"; opt_role=$2; shift 2 ;;
+    --role=*)         opt_role=${1#*=}; shift ;;
+    --years)          [[ -n ${2:-} ]] || die "--years needs a number"; opt_years=$2; shift 2 ;;
+    --years=*)        opt_years=${1#*=}; shift ;;
+    -y|--yes)         yes=true; shift ;;
+    -h|--help)        usage 0 ;;
+    *)                die "unknown argument: $1  (try --help)" ;;
+  esac
+done
+[[ -z $query || -z $profile ]] || die "--subscription and --profile both name the subscription; give one"
+[[ -z $opt_years || $opt_years =~ ^[1-9][0-9]?$ ]] || die "--years takes a whole number of years"
+CLOUD_YES=$yes
+
+for tool in az jq yq sops; do
+  command -v "$tool" >/dev/null || die "$tool is not installed -- setup/install.sh installs it"
+done
+[[ -f $ENV_FILE ]] || die "no env.yaml yet -- 'env-secrets init' creates one"
+env_is_encrypted || die "env.yaml is not encrypted, and this would put a secret in it -- 'env-secrets init' first"
+json=$(env_json) || die "could not open env.yaml -- is its age key here? (env-secrets check)"
+
+# ── your login ───────────────────────────────────────────────────────
+
+# Your own login, never one of az-select's: in a terminal switched to an
+# account, AZURE_CONFIG_DIR points at that account's service principal login.
+if [[ ${AZURE_CONFIG_DIR-} == "$CLOUD_STATE/azure/"* ]]; then
+  unset AZURE_CONFIG_DIR
+fi
+
+entry=""
+if [[ -n $profile ]]; then
+  entry=$(jq -c --arg q "$profile" "$CLOUD_JQ_DEFS"'
+    ($q | ascii_downcase) as $q |
+    [(.azure // [])[] | select((.name | slug) == $q or (.name | ascii_downcase) == $q)][0] // empty' <<<"$json")
+  [[ -n $entry ]] || { cloud_bad "no Azure account called '$profile' in env.yaml"; cloud_list azure; exit 1; }
+  query=$(jq -r .subscription_id <<<"$entry")
+fi
+
+if ! account=$(az account show ${query:+--subscription "$query"} --output json 2>&1); then
+  if [[ -n $query ]]; then
+    cloud_bad "your az login cannot see subscription $query"
+    tenant_hint=""
+    [[ -z $entry ]] || tenant_hint=$(jq -r '.tenant_id // empty' <<<"$entry")
+    cloud_info "sign in to its tenant first: az login${tenant_hint:+ --tenant $tenant_hint}"
+  else
+    cloud_bad "az is not signed in -- run 'az login' first, as yourself"
+  fi
+  exit 1
+fi
+[[ $(jq -r .user.type <<<"$account") == user ]] ||
+  die "az is signed in as a service principal, not as you -- run 'az login' as yourself first"
+sub=$(jq -r .id <<<"$account")
+sub_name=$(jq -r .name <<<"$account")
+tenant=$(jq -r .tenantId <<<"$account")
+login=$(jq -r .user.name <<<"$account")
+
+# `az account show` only reads a cache. Two real token requests, one for each
+# API this uses, say whether the login behind it still works.
+if ! out=$(az account get-access-token --subscription "$sub" --output none 2>&1) ||
+   ! out=$(az account get-access-token --resource-type ms-graph --tenant "$tenant" --output none 2>&1); then
+  cloud_bad "your az login has run out -- sign in again: az login --tenant $tenant"
+  sed 's/^/    /' <<<"$out" | head -n 4
+  exit 1
+fi
+
+# What this run created, newest last, as "kind id". Undone in reverse if the
+# run ends before env.yaml holds the secret -- after that, env.yaml is the one
+# record of it, and undoing would only break what was written.
+undo=()
+written=false
+rollback() {
+  local i kind id
+  $written && return 0
+  (( ${#undo[@]} )) || return 0
+  echo
+  cloud_bad "stopped before env.yaml was written -- removing what this run created"
+  for (( i = ${#undo[@]} - 1; i >= 0; i-- )); do
+    read -r kind id <<<"${undo[i]}"
+    case $kind in
+      app)    az ad app delete --id "$id" >/dev/null 2>&1 && cloud_info "deleted app $id" || cloud_bad "could not delete app $id -- delete it in the portal" ;;
+      sp)     az ad sp delete --id "$id" >/dev/null 2>&1 && cloud_info "deleted service principal $id" || cloud_bad "could not delete service principal $id" ;;
+      role)   az role assignment delete --ids "$id" >/dev/null 2>&1 && cloud_info "removed the role assignment" || cloud_bad "could not remove role assignment $id" ;;
+      secret) az ad app credential delete --id "$app" --key-id "$id" >/dev/null 2>&1 && cloud_info "deleted the new secret" || cloud_bad "could not delete secret $id of app $app" ;;
+    esac
+  done
+}
+
+# `az ad` works in the tenant of your default subscription, whatever
+# --subscription says. So the subscription being added is the default for this
+# run, and the one that was the default before is put back at the end.
+default_sub=$(az account show --query id --output tsv)
+if [[ $default_sub != "$sub" ]]; then
+  az account set --subscription "$sub"
+else
+  default_sub=""
+fi
+on_exit() {
+  rollback
+  [[ -z $default_sub ]] || az account set --subscription "$default_sub" >/dev/null 2>&1 || true
+}
+trap on_exit EXIT
+
+if [[ -z $entry ]]; then
+  entry=$(jq -c --arg s "$sub" '[(.azure // [])[] | select(.subscription_id == $s)][0] // empty' <<<"$json")
+fi
+
+# ── what is already there ────────────────────────────────────────────
+
+# Azure's error, indented, and a hint for the refusals people actually hit.
+explain() {
+  sed 's/^/    /' <<<"$1" | grep -v '^    $' | head -n 6
+  if grep -qiE 'Authorization_RequestDenied|Insufficient privileges' <<<"$1"; then
+    cloud_info "this tenant does not let your account manage apps; an admin can allow app"
+    cloud_info "registrations, or give you the Application Developer role"
+  elif grep -qiE 'AuthorizationFailed|does not have authorization' <<<"$1"; then
+    cloud_info "giving a role takes Owner or User Access Administrator on the subscription"
+  fi
+}
+
+# The service principal's object id for an app id, or nothing when this tenant
+# has none -- as for the example's made-up client_id.
+sp_object() {
+  local out
+  if out=$(az ad sp show --id "$1" --query id --output tsv 2>&1); then
+    printf '%s\n' "$out"
+  elif ! grep -qiE 'does not exist|ResourceNotFound|Invalid object identifier' <<<"$out"; then
+    cloud_bad "could not look up app $1" >&2
+    explain "$out" >&2
+    return 1
+  fi
+}
+
+# The roles a principal holds on the subscription, inherited ones included.
+# None, when they cannot be read: then the role is given, and if that is not
+# allowed either, its error says why.
+roles_of() {
+  az role assignment list --assignee-object-id "$1" --scope "/subscriptions/$sub" \
+    --include-inherited --fill-principal-name false --query '[].roleDefinitionName' --output tsv 2>/dev/null || true
+}
+
+# The app's secrets that start like $1, as keyId<TAB>end date. Azure keeps a
+# secret's first three characters as its hint, and that is all it keeps.
+secret_records() {
+  { az ad app credential list --id "$app" --output json 2>/dev/null || echo '[]'; } |
+    jq -r --arg h "${1:0:3}" '.[] | select(.hint == $h) | [.keyId, .endDateTime[0:10]] | @tsv'
+}
+
+# Does a client secret sign in? Tried in a config directory of its own, which
+# goes again straight after, since az keeps a copy of the secret in it.
+secret_works() {
+  local dir rc=0
+  dir=$(mktemp -d) || return 1
+  AZURE_CONFIG_DIR=$dir az login --service-principal --username "$app" --password "$1" \
+    --tenant "$tenant" --allow-no-subscriptions --output none >/dev/null 2>&1 || rc=$?
+  rm -rf "$dir"
+  return $rc
+}
+
+days_until() { echo $(( ( $(date -d "$1" +%s) - $(date +%s) ) / 86400 )); }
+
+display="omarchy-dotfiles ($login)"
+app="" app_obj="" app_from=""
+
+# 1. The app the entry already names, when it is real.
+if [[ -n $entry ]]; then
+  cid=$(jq -r '.client_id // ""' <<<"$entry")
+  if [[ -n $cid ]]; then
+    obj=$(sp_object "$cid") || exit 1
+    [[ -n $obj ]] && app=$cid app_obj=$obj app_from=entry
+  fi
+fi
+
+# 2. An app another entry in this tenant signs in as -- one that already holds
+#    a role on this subscription, if any does.
+if [[ -z $app ]]; then
+  while IFS= read -r cid; do
+    obj=$(sp_object "$cid") || exit 1
+    [[ -n $obj ]] || continue
+    if [[ -n $(roles_of "$obj") ]]; then
+      app=$cid app_obj=$obj app_from=tenant
+      break
+    fi
+    [[ -n $app ]] || { app=$cid app_obj=$obj app_from=tenant; }
+  done < <(jq -r --arg t "$tenant" '[(.azure // [])[] | select(.tenant_id == $t) | .client_id // empty] | unique | .[]' <<<"$json")
+fi
+
+# 3. The app an earlier run made, whose secret this env.yaml never got: an
+#    earlier run on another machine, or one that failed after creating it.
+if [[ -z $app ]]; then
+  if ! apps=$(az ad app list --display-name "$display" --output json 2>&1); then
+    cloud_bad "could not look for an app called \"$display\""
+    explain "$apps"
+    exit 1
+  fi
+  cid=$(jq -r --arg d "$display" '[.[] | select(.displayName == $d)][0].appId // empty' <<<"$apps")
+  if [[ -n $cid ]]; then
+    app=$cid app_from=earlier
+    app_obj=$(sp_object "$cid") || exit 1
+  fi
+fi
+
+# 4. Otherwise a new one.
+[[ -n $app ]] || app_from=new
+
+need_role=true
+roles=""
+if [[ -n $app_obj ]]; then
+  roles=$(roles_of "$app_obj" | sort -u | paste -sd, -)
+  [[ -z $roles ]] || need_role=false
+fi
+
+# The secret env.yaml holds for this app, if any, and whether it is still good.
+known_secret="" expires="" secret_why=""
+if [[ $app_from == entry || $app_from == tenant ]]; then
+  known_secret=$(jq -r --arg a "$app" '[(.azure // [])[] | select(.client_id == $a) | .client_secret // empty][0] // empty' <<<"$json")
+fi
+need_secret=true
+if [[ -z $known_secret ]]; then
+  secret_why="no secret for it in env.yaml"
+elif $renew; then
+  secret_why="--renew"
+elif ! secret_works "$known_secret"; then
+  secret_why="the secret in env.yaml does not sign in"
+else
+  expires=$(secret_records "$known_secret" | sort -k2 | tail -n 1 | cut -f2)
+  [[ -n $expires ]] ||
+    expires=$(jq -r --arg a "$app" '[(.azure // [])[] | select(.client_id == $a) | .secret_expires // empty | tostring][0] // empty' <<<"$json")
+  if [[ -n $expires ]] && (( $(days_until "$expires") < RENEW_DAYS )); then
+    secret_why="the secret ends on $expires"
+  else
+    need_secret=false
+  fi
+fi
+
+# Every secret env.yaml holds for this app now: what a renewal replaces, and
+# deletes from Azure once the new one is proven.
+mapfile -t old_secrets < <(jq -r --arg a "$app" '[(.azure // [])[] | select(.client_id == $a) | .client_secret // empty] | unique | .[]' <<<"$json")
+
+slug_of() { jq -rn --arg n "$1" "$CLOUD_JQ_DEFS"' $n | slug'; }
+
+# ── nothing to do ────────────────────────────────────────────────────
+
+# The account new terminals start on, put back after az-select proves the
+# entry: adding an account is not switching to it.
+current_file=$(cloud_current_file azure)
+previous_current=$(cat "$current_file" 2>/dev/null || true)
+restore_current() {
+  local line
+  if [[ -n $previous_current ]]; then
+    # New terminals start on the entry this run renamed or re-marked: its
+    # line in the index, which az-select has just rebuilt, is the new one.
+    if [[ -n ${old_slug-} && $(cut -f2 <<<"$previous_current") == "$old_slug" ]]; then
+      line=$(cloud_lines azure | awk -F'\t' -v s="$slug" '$2 == s')
+      [[ -z $line ]] || previous_current=$line
+    fi
+    cloud_set_current azure "$previous_current"
+  else
+    cloud_clear_current azure
+  fi
+}
+
+# az-select, until it signs in or three minutes are up -- after something was
+# created, which Azure can be slow to accept. Otherwise it gets one go.
+prove() {
+  local slug=$1 tries=${2:-$VERIFY_TRIES} i out
+  for (( i = 1; i <= tries; i++ )); do
+    if out=$("$DOTFILES/bin/az-select" --profile "$slug" --yes 2>&1); then
+      restore_current
+      printf '%s\n' "$out"
+      return 0
+    fi
+    (( i == 1 && tries > 1 )) && cloud_info "waiting for Azure to accept it -- this can take a few minutes"
+    (( i < tries )) && sleep "$VERIFY_PAUSE"
+  done
+  restore_current
+  printf '%s\n' "$out"
+  return 1
+}
+
+if [[ -n $entry && $app_from == entry ]] && ! $need_role && ! $need_secret &&
+   [[ -z $opt_name$opt_prod$opt_email ]]; then
+  name=$(jq -r .name <<<"$entry")
+  cloud_ok "already in env.yaml as \"$name\" -- app $app, $roles on $sub_name${expires:+, secret good until $expires}"
+  # A secret_expires that disagrees with Azure would have doctor.sh warn at
+  # the wrong time, or not at all.
+  if [[ -n $expires && $expires != "$(jq -r '.secret_expires // "" | tostring' <<<"$entry")" ]]; then
+    APP=$app EXPIRES=$expires env_update '
+      (.azure[] | select(.client_id == strenv(APP))) |= (.secret_expires = strenv(EXPIRES)) |
+      (.azure[] | select(.client_id == strenv(APP)) | .secret_expires) style="double"'
+    cloud_info "noted the secret's end date, $expires, in env.yaml"
+  fi
+  if ! ask_to_change "Change the settings of \"$name\" -- name, production, email?"; then
+    prove "$(slug_of "$name")" 1 || exit 1
+    exit 0
+  fi
+fi
+
+# ── questions, then a summary ────────────────────────────────────────
+
+# The entry as it stands, when there is one: its answers are the defaults.
+new_entry=true old_name="" old_slug="" old_prod=false old_email=$login
+if [[ -n $entry ]]; then
+  new_entry=false
+  old_name=$(jq -r .name <<<"$entry")
+  old_slug=$(slug_of "$old_name")
+  old_prod=$(jq -r '.prod == true' <<<"$entry")
+  old_email=$(jq -r '.email // ""' <<<"$entry")
+fi
+taken=$(jq -r --arg own "$old_slug" "$CLOUD_JQ_DEFS"' [(.azure // [])[] | .name // empty | slug | select(. != $own)] | .[]' <<<"$json")
+name=$opt_name
+while :; do
+  [[ -n $name ]] || name=$(ask_text "Name for \"$sub_name\" in az-select (env.yaml keeps its subscription and tenant ids as well)" "${old_name:-$sub_name}")
+  slug=$(slug_of "$name")
+  if [[ -z $slug ]]; then
+    cloud_bad "\"$name\" has no letters or digits to make a profile name of"
+  elif grep -qxF "$slug" <<<"$taken"; then
+    cloud_bad "env.yaml already has an Azure account called $slug"
+  else
+    break
+  fi
+  [[ -z $opt_name ]] && can_ask || exit 1
+  name=""
+done
+prod=${opt_prod:-$(ask_yes_no "Is \"$name\" a production account?" "$old_prod")}
+email=${opt_email:-$(ask_text "Email for \"$name\" (a note for you; empty for none)" "$old_email")}
+
+role=""
+if $need_role; then
+  role=${opt_role:-$(ask_choice "Role for the service principal on \"$sub_name\"" Owner Owner Contributor)}
+fi
+years=""
+if $need_secret; then
+  if [[ -n $opt_years ]]; then
+    years=$opt_years
+  else
+    years=$(ask_choice "How long the client secret lasts" "2 years" "1 year" "2 years" "5 years")
+    years=${years%% *}
+  fi
+fi
+
+# What a run on an entry already there would change in it.
+changes=()
+if ! $new_entry; then
+  [[ $slug == "$old_slug" ]] || changes+=("rename it \"$name\" ($slug)")
+  [[ $name == "$old_name" || $slug != "$old_slug" ]] || changes+=("call it \"$name\"")
+  [[ $prod == "$old_prod" ]] || changes+=("$([[ $prod == true ]] && echo "mark it production" || echo "mark it not production")")
+  [[ $email == "$old_email" ]] || changes+=("$([[ -n $email ]] && echo "set its email to $email" || echo "drop its email")")
+fi
+# Whether anything is made in Azure, or only env.yaml changes.
+creates=false
+[[ $app_from == entry ]] && ! $need_role && ! $need_secret || creates=true
+if ! $new_entry && ! $creates && (( ${#changes[@]} == 0 )); then
+  echo "No changes -- env.yaml is left as it was."
+  prove "$slug" 1 || exit 1
+  exit 0
+fi
+
+echo
+echo "Azure  $sub_name ($sub)"
+echo "       tenant $tenant, signed in as $login"
+echo
+case $app_from in
+  new)     echo "  - create the app \"$display\" and its service principal" ;;
+  earlier) echo "  - use the app \"$display\", which an earlier az-add made ($app)"
+           [[ -n $app_obj ]] || echo "  - create its service principal" ;;
+  tenant)  echo "  - use app $app, which env.yaml already signs in to this tenant as" ;;
+  entry)   echo "  - keep app $app, which the entry already names" ;;
+esac
+$need_role && echo "  - give it $role on $sub_name"
+if $need_secret; then
+  echo "  - make it a new client secret, valid $years year(s) -- $secret_why"
+  (( ${#old_secrets[@]} )) && [[ $app_from != earlier ]] &&
+    echo "  - delete the secret env.yaml held until now, once the new one signs in"
+fi
+if $new_entry; then
+  echo "  - add \"$name\" ($slug) to env.yaml$([[ $prod == true ]] && printf ', marked production')"
+else
+  list=""
+  for c in "${changes[@]}"; do list+="${list:+, }$c"; done
+  echo "  - update \"$old_name\" ($old_slug) in env.yaml${list:+: $list}"
+fi
+others=$(jq -r --arg a "$app" --arg s "$sub" '[(.azure // [])[] | select(.client_id == $a and .subscription_id != $s) | .name] | join(", ")' <<<"$json")
+$need_secret && [[ -n $others ]] && echo "  - and to $others, on the same app: the new secret replaces theirs too"
+echo
+
+if can_ask && [[ $(ask_yes_no "Go ahead?" true) != true ]]; then
+  echo "Nothing was changed."
+  exit 0
+fi
+
+# ── create, then write, then prove ───────────────────────────────────
+
+
+# Retried: a service principal or role made a moment ago is not visible
+# everywhere at once, and the next step can be told it does not exist.
+retry() {
+  local what=$1 i out; shift
+  for i in 1 2 3 4 5 6; do
+    if out=$("$@" 2>&1); then printf '%s\n' "$out"; return 0; fi
+    grep -qiE 'does not exist|not found|PrincipalNotFound' <<<"$out" || break
+    sleep 5
+  done
+  cloud_bad "could not $what" >&2
+  explain "$out" >&2
+  return 1
+}
+
+if [[ $app_from == new ]]; then
+  app=$(retry "create the app \"$display\"" az ad app create --display-name "$display" --query appId --output tsv)
+  undo+=("app $app")
+  cloud_ok "created the app \"$display\" ($app)"
+fi
+if [[ -z $app_obj ]]; then
+  app_obj=$(retry "create the service principal" az ad sp create --id "$app" --query id --output tsv)
+  [[ $app_from == new ]] || undo+=("sp $app_obj")
+  cloud_ok "created its service principal"
+fi
+if $need_role; then
+  assignment=$(retry "give it $role on $sub_name" az role assignment create \
+    --assignee-object-id "$app_obj" --assignee-principal-type ServicePrincipal \
+    --role "$role" --scope "/subscriptions/$sub" --query id --output tsv)
+  undo+=("role $assignment")
+  cloud_ok "gave it $role on $sub_name"
+fi
+
+secret=$known_secret new_key=""
+if $need_secret; then
+  # Not through retry(): its output is the secret, which nothing here prints.
+  # Only the error output is kept to show.
+  # The ids of the secrets the app has now: the new one is the id that was
+  # not there before. Its hint cannot tell, being three characters.
+  before=$(az ad app credential list --id "$app" --query '[].keyId' --output json 2>/dev/null || echo '[]')
+  errs=$(mktemp)
+  if ! out=$(az ad app credential reset --id "$app" --append --years "$years" \
+      --display-name "env.yaml, $(date +%F)" --query password --output tsv 2>"$errs") || [[ -z $out ]]; then
+    cloud_bad "could not make a new secret for app $app"
+    explain "$(grep -v '^WARNING' "$errs")"
+    rm -f "$errs"
+    exit 1
+  fi
+  rm -f "$errs"
+  secret=$out
+  unset out
+  record=$({ az ad app credential list --id "$app" --output json 2>/dev/null || echo '[]'; } |
+    jq -r --argjson before "$before" '[.[] | select(.keyId as $k | $before | any(. == $k) | not)]
+      | sort_by(.endDateTime) | last // empty | [.keyId, .endDateTime[0:10]] | @tsv')
+  new_key=${record%%$'\t'*}
+  expires=${record##*$'\t'}
+  [[ -n $new_key ]] && undo+=("secret $new_key")
+  [[ -n $expires ]] || expires=$(date -d "+$years years" +%F)
+  cloud_ok "made a new secret, valid until $expires"
+fi
+
+# One rewrite of env.yaml: the entry gets this tenant and app, a new entry is
+# added, and every entry on the app gets the secret and its end date. Values
+# go in through the environment; only the shape of the edit is built here.
+edit='.azure = (.azure // []) |
+  (.azure[] | select(.subscription_id == strenv(SUB))) |= (.tenant_id = strenv(TENANT) | .client_id = strenv(APP))'
+if $new_entry; then
+  edit+=' | .azure += [{"name": strenv(E_NAME), "prod": (strenv(E_PROD) == "true")'
+  [[ -z ${email:-} ]] || edit+=', "email": strenv(E_EMAIL)'
+  edit+=', "tenant_id": strenv(TENANT), "subscription_id": strenv(SUB), "client_id": strenv(APP)}]'
+fi
+# An entry already there: only the answers that changed, so the rest keep
+# their place and quoting.
+if ! $new_entry; then
+  fields=()
+  [[ $prod == "$old_prod" ]] || fields+=('.prod = (strenv(E_PROD) == "true")')
+  if [[ $email != "$old_email" ]]; then
+    [[ -n $email ]] && fields+=('.email = strenv(E_EMAIL)') || fields+=('del(.email)')
+  fi
+  [[ $name == "$old_name" ]] || fields+=('.name = strenv(E_NAME)')
+  if (( ${#fields[@]} )); then
+    edit+=" | (.azure[] | select(.name == strenv(E_OLD_NAME))) |= ($(IFS='|'; echo "${fields[*]}"))"
+  fi
+fi
+edit+=' | (.azure[] | select(.client_id == strenv(APP))) |= (.client_secret = strenv(SECRET))'
+if [[ -n $expires ]]; then
+  edit+=' | (.azure[] | select(.client_id == strenv(APP))) |= (.secret_expires = strenv(EXPIRES))
+    | (.azure[] | select(.client_id == strenv(APP)) | .secret_expires) style="double"'
+fi
+SUB=$sub TENANT=$tenant APP=$app SECRET=$secret EXPIRES=$expires \
+  E_NAME=$name E_PROD=${prod:-false} E_EMAIL=${email:-} E_OLD_NAME=$old_name env_update "$edit" || exit 1
+written=true
+unset secret
+$new_entry && cloud_ok "added \"$name\" to env.yaml" || cloud_ok "updated env.yaml"
+
+# A renamed entry signs in from a directory of its new name; the old one goes,
+# with the copy of the secret az keeps in it.
+if [[ -n $old_slug && $slug != "$old_slug" ]]; then
+  rm -rf -- "${CLOUD_STATE:?}/azure/${old_slug:?}"
+  cloud_info "terminals switched to $old_slug: az-select $slug"
+fi
+
+# Fresh sign-ins for every entry on this app, so the proof below uses the new
+# secret, and no cached login keeps a copy of the old one.
+if $need_secret; then
+  while IFS= read -r s; do
+    [[ -n $s ]] && rm -rf -- "${CLOUD_STATE:?}/azure/${s:?}"
+  done < <(env_json | jq -r --arg a "$app" "$CLOUD_JQ_DEFS"' (.azure // [])[] | select(.client_id == $a) | .name | slug')
+fi
+
+echo
+tries=1
+! $creates || tries=$VERIFY_TRIES
+if ! prove "$slug" "$tries"; then
+  echo
+  cloud_bad "env.yaml has the entry, but it does not sign in yet"
+  cloud_info "Azure can be slow to accept a new role; try 'az-select --profile $slug' in a few minutes"
+  (( ${#old_secrets[@]} )) && $need_secret && cloud_info "the old secret was kept, and still works where it is used"
+  exit 1
+fi
+
+# The new secret signs in; the old ones env.yaml held go. Only those: any other
+# secret on the app belongs to something this run knows nothing about.
+if $need_secret && (( ${#old_secrets[@]} )); then
+  deleted=false
+  for old in "${old_secrets[@]}"; do
+    while IFS=$'\t' read -r key end; do
+      [[ -n $key && $key != "$new_key" ]] || continue
+      if az ad app credential delete --id "$app" --key-id "$key" >/dev/null 2>&1; then
+        cloud_ok "deleted the old secret (it would have ended on $end)"
+        deleted=true
+      else
+        cloud_bad "could not delete the old secret $key -- it ends on its own on $end"
+      fi
+    done < <(secret_records "$old")
+  done
+  if $deleted; then
+    echo
+    echo "Copy env.yaml to your other machines: the secret theirs holds no longer works."
+  fi
+fi

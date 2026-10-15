@@ -209,10 +209,13 @@ LINKS=(
 
   # Cloud accounts from env.yaml: switch this terminal to one (the shell
   # functions in shell/bashrc wrap the first two), the credential_process the
-  # generated AWS profiles call, and the command for env.yaml itself. All
-  # four are ours alone. See lib/cloud.sh and lib/env.sh.
+  # generated AWS profiles call, the command for env.yaml itself, and the two
+  # that add an AWS account or an Azure subscription to it. All ours alone.
+  # See lib/cloud.sh and lib/env.sh.
   "$HOME/.local/bin/aws-select|bin/aws-select"
   "$HOME/.local/bin/az-select|bin/az-select"
+  "$HOME/.local/bin/aws-add|bin/aws-add"
+  "$HOME/.local/bin/az-add|bin/az-add"
   "$HOME/.local/bin/aws-env-credentials|bin/aws-env-credentials"
   "$HOME/.local/bin/env-secrets|bin/env-secrets"
 )

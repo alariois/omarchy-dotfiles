@@ -1,5 +1,6 @@
 # AWS and Azure accounts from env.yaml, shared by aws-select, az-select,
-# aws-env-credentials and setup/install.sh. Source lib/env.sh first.
+# aws-add, az-add, aws-env-credentials and setup/install.sh. Source
+# lib/env.sh first.
 #
 # env.yaml is the one place an account is defined. What the clouds' own tools
 # need is derived from it here and kept beside them:
@@ -201,3 +202,51 @@ cloud_list() {
 }
 
 die() { echo "${0##*/}: $*" >&2; exit 1; }
+
+# Questions, for aws-add and az-add. Every one has a default, which --yes
+# takes: the script sets CLOUD_YES. Without a terminal, and without --yes,
+# there is no one to ask, and that is an error. Whether there is a terminal is
+# decided here, when the script sources this: the questions run inside $(...),
+# where stdout is never one.
+CLOUD_YES=false
+CLOUD_TERMINAL=false
+if [[ -t 0 && -t 1 ]] && command -v gum >/dev/null; then
+  CLOUD_TERMINAL=true
+fi
+can_ask() {
+  $CLOUD_YES && return 1
+  $CLOUD_TERMINAL && return 0
+  die "no terminal to ask in -- pass --yes to take the defaults, with any answers as flags"
+}
+
+# gum exits 130 when the question is dismissed: that ends the run, before
+# anything has been created.
+ask_text() {
+  local header=$1 value=$2 rc=0 answer
+  can_ask || { printf '%s\n' "$value"; return; }
+  answer=$(gum input --header "$header" --value "$value" --width 60) || rc=$?
+  (( rc == 0 )) || die "cancelled -- nothing was changed"
+  printf '%s\n' "$answer"
+}
+ask_yes_no() {
+  local question=$1 default=$2 rc=0
+  can_ask || { printf '%s\n' "$default"; return; }
+  gum confirm --default="$default" "$question" || rc=$?
+  case $rc in 0) echo true ;; 1) echo false ;; *) die "cancelled -- nothing was changed" ;; esac
+}
+ask_choice() {
+  local header=$1 value=$2 rc=0 answer; shift 2
+  can_ask || { printf '%s\n' "$value"; return; }
+  answer=$(gum choose --header "$header" --selected "$value" "$@") || rc=$?
+  (( rc == 0 )) || die "cancelled -- nothing was changed"
+  printf '%s\n' "$answer"
+}
+
+# For an entry that needs nothing: go through the questions anyway, to change
+# its settings? Asked only in a terminal and without --yes, and no is the
+# default -- anywhere else the entry is simply left as it is.
+ask_to_change() {
+  $CLOUD_YES && return 1
+  $CLOUD_TERMINAL || return 1
+  [[ $(ask_yes_no "$1" false) == true ]]
+}

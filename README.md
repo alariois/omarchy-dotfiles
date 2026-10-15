@@ -167,6 +167,8 @@ env.example.yaml                          the shape of env.yaml, made-up values 
 lib/env.sh                                reading env.yaml: decryption, structure check
 lib/cloud.sh                              AWS/Azure profiles generated from env.yaml
 bin/aws-select, bin/az-select             switch this terminal to an account (linked)
+bin/aws-add                               add an AWS account to env.yaml, or renew its key (linked)
+bin/az-add                                add an Azure subscription to env.yaml, or renew its secret (linked)
 bin/aws-env-credentials                   credential_process for key-based AWS profiles (linked)
 bin/env-secrets                           init/edit/check env.yaml, keep its key (linked)
 git-hooks/pre-commit                      env.yaml never committed, example kept in step (linked)
@@ -408,6 +410,71 @@ profiles in a managed block of `~/.aws/config`, and an account list without
 secrets in `~/.local/state/omarchy-dotfiles/cloud/` that the picker, tab
 completion and prompt read. `doctor.sh` warns 30 days before an Azure secret's
 `secret_expires`.
+
+### Adding an Azure subscription: `az-add`
+
+```bash
+az login                            # as yourself, once
+az-add                              # the subscription az login is on
+az-add --subscription "Acme Prod"   # another one your login can see
+az-add --profile acme-prod          # an entry already in env.yaml: check, repair, renew
+az-add --renew                      # a new secret now, even if the old one is fine
+```
+
+Your own `az login` cannot go in `env.yaml` -- it belongs to this machine, and
+Azure asks people for MFA -- so `az-add` uses it once to give the subscription
+a service principal, and writes that into `env.yaml` straight from Azure,
+never printed. It looks before it creates: an entry whose secret works and has
+over 30 days left is left alone; one whose secret fails or is running out gets
+a new secret, and the old one is deleted once the new one signs in; a
+subscription in a tenant `env.yaml` already has an app for reuses that app.
+Only a tenant with none gets a new app, `omarchy-dotfiles (<your login>)`,
+and an earlier run's app of that name is found and reused rather than
+duplicated. Name, production or not, email, role (Owner or Contributor) and
+the secret's lifetime are asked first, then a summary to confirm -- for an
+entry being repaired too, its own answers the defaults; `--yes` takes the
+defaults, and flags (`--name`, `--prod`, `--no-prod`, `--email`, `--role`,
+`--years`) give answers up front. For an entry that already works there is
+nothing to create, so in a terminal it asks whether to change the settings,
+with the entry's own filled in; `--name`, `--prod`, `--no-prod` and `--email`
+change them without asking. A run that fails before `env.yaml` is written
+deletes what it created. The last step is `az-select`,
+retried for a few minutes while Azure catches up with a new app or role.
+
+### Adding an AWS account: `aws-add`
+
+```bash
+aws login                           # as yourself -- root, or an admin -- once
+aws-add                             # the account aws login is on
+aws-add --profile acme-prod         # an entry already in env.yaml: check, repair, renew
+aws-add --renew                     # a new access key now, even if the old one works
+```
+
+An `aws login` session belongs to this machine and runs out, and root's own
+access keys are ones AWS says never to make -- so `aws-add` uses the login
+once to give the account an IAM user, `omarchy-dotfiles`, with
+`AdministratorAccess` (or `PowerUserAccess`, `ReadOnlyAccess`, or any managed
+policy named with `--policy`) and an access key, written into `env.yaml`
+straight from AWS, never printed. It looks before it creates: an entry for the
+account whose key signs in is left alone; one whose key fails gets a new key
+for the same IAM user, and the old one is deleted once the new one signs in;
+an earlier run's `omarchy-dotfiles` user is reused rather than duplicated.
+Entries with no `account_id` are asked by signing in, so a key typed in by
+hand is found too, and a root key found that way is replaced and pointed out,
+never deleted. An entry that assumes a role has no key to repair -- its keys
+are its `source` entry's -- so for it there are only the settings. AWS
+allows an IAM user two keys; with two already, `aws-add` lists them and
+stops, rather than guess which one to delete. Whatever the entry is named,
+the account's number is kept in `account_id`, as an Azure entry keeps its
+`subscription_id` and `tenant_id`. The questions -- asked again for an
+account already there, to change its settings -- `--yes` and the flags
+(`--name`, `--prod`, `--no-prod`, `--email`, `--region`, `--policy`) work as
+in `az-add`, as do the rollback and the proof: `aws-select`, retried for up
+to a minute while a new key starts to work.
+
+Both need `env.yaml` encrypted first (`env-secrets init`). After a renewal,
+copy `env.yaml` to your other machines: the secret or key theirs holds was
+just deleted.
 
 ## Adding a delta
 

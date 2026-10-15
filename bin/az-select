@@ -95,7 +95,10 @@ export AZURE_CONFIG_DIR="$CLOUD_STATE/azure/$slug"
 
 # The secret is read from env.yaml only when a login is needed, and handed to
 # az on its command line, which is the only way az takes one -- visible to
-# this user's own processes for the second the login takes.
+# this user's own processes for the second the login takes. az then keeps its
+# own plaintext copy in AZURE_CONFIG_DIR, for as long as the login lasts:
+# that is how it renews the hourly token. On Linux it has no other way -- its
+# encrypted store keeps every config directory under one keyring entry.
 login() {
   local app secret
   { read -r app; read -r secret; } < <(env_json | jq -r --arg s "$slug" "$CLOUD_JQ_DEFS"'

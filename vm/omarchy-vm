@@ -1448,6 +1448,7 @@ test_cloud_accounts() {
       t_fail "$cmd $slug does not sign in ($name)" "$(tr -d '\r' <<<"$out")"
     fi
   done < <(guest_ssh "cat $index" 2>/dev/null)
+  test_add_needs_login "$key"
   [[ -n $first ]] || return 0
   if out=$(guest_keyed "$key" "bash -ic 'aws-select --profile $first --yes >/dev/null && echo AWS_PROFILE=\$AWS_PROFILE' 2>/dev/null" 2>&1) &&
      grep -qx "AWS_PROFILE=$first" <<<"$(tr -d '\r' <<<"$out")"; then
@@ -1505,7 +1506,27 @@ test_cloud_plumbing() {
   else
     t_fail "az-select failed, but not with a clear ✗" "$(tr -d '\r' <<<"$out")"
   fi
+
+  test_add_needs_login "$key"
   guest_ssh "rm -f $repo/env.yaml" 2>/dev/null || true
+}
+
+# The guest has no az or aws login of anyone's, so az-add and aws-add must stop
+# at that, before they create anything -- having got as far as opening the
+# encrypted env.yaml. Safe with the real one too: nothing is written before
+# the login is checked.
+test_add_needs_login() {
+  local key=$1 cmd cli out
+  for cmd in az-add aws-add; do
+    cli=${cmd%-add}
+    if out=$(guest_keyed "$key" "~/.local/bin/$cmd --yes" 2>&1); then
+      t_fail "$cmd ran without an $cli login" "$(tr -d '\r' <<<"$out")"
+    elif grep -q "$cli login" <<<"$out"; then
+      t_ok "$cmd without an $cli login says to run $cli login"
+    else
+      t_fail "$cmd failed, but not at the missing login" "$(tr -d '\r' <<<"$out")"
+    fi
+  done
 }
 
 # However the test ends, its guest goes away and its disk with it, unless

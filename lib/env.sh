@@ -42,6 +42,33 @@ env_json() {
   fi
 }
 
+# Rewrite env.yaml through a yq expression, with no plaintext copy on disk at
+# any point: decrypted into a pipe, edited, encrypted again to the same
+# recipients, and moved over the old file only once the new one decrypts.
+# Values the expression needs, secrets above all, come in through the
+# environment (strenv), never on a command line. `sops set` would be the
+# obvious tool, but it counts comments as list entries, so in a commented
+# list like env.yaml's it writes to the wrong one.
+env_update() {
+  local expr=$1 recipients tmp
+  env_is_encrypted || { echo "env.yaml is not encrypted -- 'env-secrets init' first" >&2; return 1; }
+  recipients=$(yq -r '.sops.age[].recipient' "$ENV_FILE" | paste -sd, -)
+  [[ -n $recipients ]] || { echo "env.yaml names no age recipient to encrypt to" >&2; return 1; }
+  env_key_env
+  tmp=$(mktemp "$ENV_FILE.XXXXXX") || return 1
+  if ( set -o pipefail
+       sops --decrypt "$ENV_FILE" | yq "$expr" |
+         sops --encrypt --input-type yaml --output-type yaml --age "$recipients" /dev/stdin > "$tmp" &&
+       sops --decrypt --input-type yaml --output-type yaml "$tmp" >/dev/null ); then
+    chmod 600 "$tmp"
+    mv "$tmp" "$ENV_FILE"
+  else
+    rm -f "$tmp"
+    echo "could not rewrite env.yaml -- it is unchanged" >&2
+    return 1
+  fi
+}
+
 # The key paths of a YAML file with list indices folded to [] -- its
 # structure, not its content. sops encrypts values and leaves keys readable,
 # so this works on the encrypted file without the key. sops's own metadata is

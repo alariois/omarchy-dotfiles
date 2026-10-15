@@ -223,17 +223,18 @@ else
       else
         echo "  STALE    cloud profiles   -> env.yaml changed since; any aws-select, az-select or setup/install.sh regenerates them"
       fi
-      # Client secrets expire -- Azure's after two years at most -- and an
-      # expired one fails as a plain login error. Thirty days of warning.
-      while IFS=$'\t' read -r name expires; do
+      # Client secrets expire, after the years az-add was given, and an
+      # expired one fails as a plain login error. Thirty days of warning, the
+      # same thirty days within which az-add renews one by itself.
+      while IFS=$'\t' read -r name slug expires; do
         [[ -n $expires ]] || continue
         days=$(( ( $(date -d "$expires" +%s 2>/dev/null || echo 0) - $(date +%s) ) / 86400 ))
         if (( days < 0 )); then
-          echo "  BROKEN   $name   -> its client secret expired on $expires"
+          echo "  BROKEN   $name   -> its client secret expired on $expires; az-add --profile $slug"
         elif (( days < 30 )); then
-          echo "  STALE    $name   -> its client secret expires in $days day(s), on $expires"
+          echo "  STALE    $name   -> its client secret expires in $days day(s), on $expires; az-add --profile $slug"
         fi
-      done < <(jq -r '(.azure // [])[] | [.name, (.secret_expires // "" | tostring)] | @tsv' <<< "$env_data")
+      done < <(jq -r "$CLOUD_JQ_DEFS"' (.azure // [])[] | [.name, (.name | slug), (.secret_expires // "" | tostring)] | @tsv' <<< "$env_data")
       unset env_data
     else
       echo "  MISSING  the age key   -> env.yaml cannot be opened here; env-secrets import-key"

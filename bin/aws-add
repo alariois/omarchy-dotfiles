@@ -1,0 +1,594 @@
+#!/usr/bin/env bash
+#
+# aws-add -- put the AWS account you are signed in to into env.yaml, so
+# aws-select can sign in to it from any machine with nobody typing; or, for
+# one already there, make sure it still can.
+#
+#   aws-add                             # the account `aws login` is on
+#   aws-add --profile superhands        # an env.yaml entry: check, repair, rotate
+#   aws-add --renew                     # a new access key even if the old one works
+#   aws-add --name "Acme Prod" --prod --email root@acme.com --region eu-north-1 \
+#           --policy ReadOnlyAccess --yes   # answers up front, defaults for the rest
+#
+# Your own login cannot go into env.yaml: an `aws login` or SSO session
+# belongs to this machine and runs out, and root's own access keys are ones
+# AWS says never to make. So aws-add uses it to give the account an IAM user,
+# omarchy-dotfiles, with a policy and an access key -- which is what
+# aws-select signs in as. It looks before it creates:
+#
+#   - In env.yaml, its key working: nothing to create. In a terminal it asks
+#     whether to change the entry's settings -- the questions below, its own
+#     answers filled in; --name, --prod, --no-prod, --email or --region
+#     change them straight away.
+#   - In env.yaml, but the key fails, or --renew: a new access key for the
+#     same IAM user. The old one is deleted once the new one signs in.
+#   - Not in env.yaml, or in it with a key this account does not know: the
+#     IAM user an earlier run made, else a new one. It gets AdministratorAccess,
+#     or the policy asked for, unless it has a policy already, and a key.
+#
+# An entry that signs in by assuming a role has no key of its own -- its keys
+# are those of the entry its `source` names, and that is the one to repair --
+# so for it there are only the settings to change.
+#
+# The questions -- name, production or not, email, region, policy -- all come
+# before anything is created, then a summary to confirm. An entry already in
+# env.yaml is asked about too, its own answers the defaults. The secret key
+# goes straight into the encrypted env.yaml and is never printed. If a step
+# fails before env.yaml has it, whatever this run created is deleted again.
+# Last, aws-select signs in to prove the entry works, retried for up to a
+# minute, since a new key takes a few seconds to work everywhere. Which
+# account new terminals start on is left as it was.
+#
+# Your login is the default profile, or the one AWS_PROFILE names -- unless
+# that is an env.yaml account, as it is in a terminal switched with aws-select.
+#
+# After a renewal, copy env.yaml to your other machines: theirs still holds
+# the key that was just deleted.
+
+set -euo pipefail
+
+DOTFILES=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)
+# shellcheck source=../lib/env.sh
+source "$DOTFILES/lib/env.sh"
+# shellcheck source=../lib/cloud.sh
+source "$DOTFILES/lib/cloud.sh"
+
+usage() {
+  awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; next } NR > 2 { exit }' "$0"
+  exit "${1:-0}"
+}
+
+IAM_USER=omarchy-dotfiles
+VERIFY_TRIES=12 VERIFY_PAUSE=5
+# Output goes to variables and the terminal, never through less.
+export AWS_PAGER=""
+
+profile="" renew=false yes=false
+opt_name="" opt_prod="" opt_email="" opt_region="" opt_policy=""
+while (( $# )); do
+  case $1 in
+    --profile)   [[ -n ${2:-} ]] || die "--profile needs a name"; profile=$2; shift 2 ;;
+    --profile=*) profile=${1#*=}; shift ;;
+    --renew)     renew=true; shift ;;
+    --name)      [[ -n ${2:-} ]] || die "--name needs a value"; opt_name=$2; shift 2 ;;
+    --name=*)    opt_name=${1#*=}; shift ;;
+    --prod)      opt_prod=true; shift ;;
+    --no-prod)   opt_prod=false; shift ;;
+    --email)     [[ -n ${2:-} ]] || die "--email needs a value"; opt_email=$2; shift 2 ;;
+    --email=*)   opt_email=${1#*=}; shift ;;
+    --region)    [[ -n ${2:-} ]] || die "--region needs a region"; opt_region=$2; shift 2 ;;
+    --region=*)  opt_region=${1#*=}; shift ;;
+    --policy)    [[ -n ${2:-} ]] || die "--policy needs a policy name"; opt_policy=$2; shift 2 ;;
+    --policy=*)  opt_policy=${1#*=}; shift ;;
+    -y|--yes)    yes=true; shift ;;
+    -h|--help)   usage 0 ;;
+    *)           die "unknown argument: $1  (try --help)" ;;
+  esac
+done
+[[ -z $opt_region || $opt_region =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || die "--region takes a region like eu-north-1"
+[[ -z $opt_policy || $opt_policy =~ ^[A-Za-z0-9+=,.@_-]+$ ]] || die "--policy takes an AWS managed policy's name, like ReadOnlyAccess"
+CLOUD_YES=$yes
+
+for tool in aws jq yq sops; do
+  command -v "$tool" >/dev/null || die "$tool is not installed -- setup/install.sh installs it"
+done
+[[ -f $ENV_FILE ]] || die "no env.yaml yet -- 'env-secrets init' creates one"
+env_is_encrypted || die "env.yaml is not encrypted, and this would put a secret in it -- 'env-secrets init' first"
+json=$(env_json) || die "could not open env.yaml -- is its age key here? (env-secrets check)"
+
+# ── your login ───────────────────────────────────────────────────────
+
+# Your own login, never one of aws-select's: in a terminal switched to an
+# account, AWS_PROFILE names that account's profile.
+if [[ -n ${AWS_PROFILE-} ]] &&
+   jq -e --arg p "$AWS_PROFILE" "$CLOUD_JQ_DEFS"' any((.aws // [])[]; (.name | slug) == $p)' <<<"$json" >/dev/null; then
+  unset AWS_PROFILE
+fi
+
+if ! ident=$(aws sts get-caller-identity --output json 2>&1); then
+  cloud_bad "aws is not signed in, or its login has run out -- run 'aws login' first, as yourself"
+  sed 's/^/    /' <<<"$ident" | grep -v '^    $' | head -n 4
+  exit 1
+fi
+account=$(jq -r .Account <<<"$ident")
+arn=$(jq -r .Arn <<<"$ident")
+partition=$(cut -d: -f2 <<<"$arn")
+case $arn in
+  *:root)           login="the root user" ;;
+  *:assumed-role/*) login="role ${arn#*:assumed-role/}" ;;
+  *)                login=${arn#*:iam::"$account":} ;;
+esac
+[[ $arn != *":user/$IAM_USER" ]] ||
+  die "aws is signed in as $IAM_USER, the user env.yaml's keys are for -- sign in as yourself first: aws login"
+
+entry=""
+if [[ -n $profile ]]; then
+  entry=$(jq -c --arg q "$profile" "$CLOUD_JQ_DEFS"'
+    ($q | ascii_downcase) as $q |
+    [(.aws // [])[] | select((.name | slug) == $q or (.name | ascii_downcase) == $q)][0] // empty' <<<"$json")
+  [[ -n $entry ]] || { cloud_bad "no AWS account called '$profile' in env.yaml"; cloud_list aws; exit 1; }
+  e_account=$(jq -r '.account_id // "" | tostring' <<<"$entry")
+  [[ -z $e_account || $e_account == "$account" ]] ||
+    die "$(jq -r .name <<<"$entry") is account $e_account, but your aws login is on $account -- sign in to $e_account first: aws login"
+else
+  # An entry with keys of its own before one that assumes a role.
+  entry=$(jq -c --arg a "$account" '
+    [(.aws // [])[] | select((.account_id // "" | tostring) == $a)] |
+    (map(select(.role_arn | not)) + .)[0] // empty' <<<"$json")
+fi
+
+# ── what is already there ────────────────────────────────────────────
+
+# AWS's error, indented, and a hint for the refusals people actually hit.
+explain() {
+  sed 's/^/    /' <<<"$1" | grep -v '^    $' | head -n 6
+  if grep -qiE 'AccessDenied|not authorized' <<<"$1"; then
+    cloud_info "managing IAM users takes AdministratorAccess or IAMFullAccess -- or the root user"
+  elif grep -qi 'LimitExceeded' <<<"$1"; then
+    cloud_info "an IAM user can have at most two access keys"
+  fi
+}
+
+# The identity a key pair signs in as, as an ARN, or nothing when it does not
+# sign in. Tried with no config or credentials file, so nothing of this
+# machine's can stand in for it, and the secret only in the environment.
+keys_arn() {
+  ( unset AWS_PROFILE AWS_DEFAULT_PROFILE AWS_SESSION_TOKEN
+    AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_REGION=${region_hint:-us-east-1} \
+      AWS_ACCESS_KEY_ID=$1 AWS_SECRET_ACCESS_KEY=$2 \
+      aws sts get-caller-identity --query Arn --output text 2>/dev/null ) || true
+}
+
+region_hint=""
+[[ -z $entry ]] || region_hint=$(jq -r '.region // empty' <<<"$entry")
+
+# Keyed entries with no account_id say which account they are only by
+# signing in, so ask them -- one of them may be this account already.
+if [[ -z $entry ]]; then
+  while IFS=$'\t' read -r e_id e_secret e_index; do
+    [[ -n $e_id ]] || continue
+    if [[ $(keys_arn "$e_id" "$e_secret" | cut -d: -f5) == "$account" ]]; then
+      entry=$(jq -c --argjson i "$e_index" '.aws[$i]' <<<"$json")
+      break
+    fi
+  done < <(jq -r '(.aws // []) | to_entries[] | .value as $e
+    | select(($e.account_id // "" | tostring) == "" and $e.access_key_id and $e.secret_access_key)
+    | [$e.access_key_id, $e.secret_access_key, .key] | @tsv' <<<"$json")
+  unset e_secret
+fi
+
+slug_of() { jq -rn --arg n "$1" "$CLOUD_JQ_DEFS"' $n | slug'; }
+
+# The account new terminals start on, put back after aws-select proves the
+# entry: adding an account is not switching to it.
+current_file=$(cloud_current_file aws)
+previous_current=$(cat "$current_file" 2>/dev/null || true)
+restore_current() {
+  local line
+  if [[ -n $previous_current ]]; then
+    # New terminals start on the entry this run renamed or re-marked: its
+    # line in the index, which aws-select has just rebuilt, is the new one.
+    if [[ -n ${old_slug-} && $(cut -f2 <<<"$previous_current") == "$old_slug" ]]; then
+      line=$(cloud_lines aws | awk -F'\t' -v s="$slug" '$2 == s')
+      [[ -z $line ]] || previous_current=$line
+    fi
+    cloud_set_current aws "$previous_current"
+  else
+    cloud_clear_current aws
+  fi
+}
+
+# The proof: aws-select signs in as the entry, the way every terminal will,
+# and checks the account. A new key can be turned away for a few seconds, so
+# after one is made the proof is retried; an entry already there gets one go.
+prove() {
+  local slug=$1 tries=${2:-$VERIFY_TRIES} i out
+  for (( i = 1; i <= tries; i++ )); do
+    if out=$("$DOTFILES/bin/aws-select" --profile "$slug" --yes 2>&1); then
+      restore_current
+      printf '%s\n' "$out"
+      return 0
+    fi
+    (( i == 1 && tries > 1 )) && cloud_info "waiting for AWS to accept it -- this can take a minute"
+    (( i < tries )) && sleep "$VERIFY_PAUSE"
+  done
+  restore_current
+  printf '%s\n' "$out"
+  return 1
+}
+
+# A role entry: its keys are its source's, which is where a repair goes.
+role_entry=false role_arn="" source_name=""
+if [[ -n $entry && -n $(jq -r '.role_arn // empty' <<<"$entry") ]]; then
+  role_entry=true
+  name=$(jq -r .name <<<"$entry")
+  role_arn=$(jq -r .role_arn <<<"$entry")
+  source_name=$(jq -r '.source // ""' <<<"$entry")
+  if $renew || [[ -n $opt_policy ]]; then
+    die "$name signs in by assuming a role with the keys of $source_name -- those are renewed with 'aws-add --profile $(slug_of "$source_name")'"
+  fi
+  if [[ -z $opt_name$opt_prod$opt_email$opt_region ]]; then
+    echo "In env.yaml already as \"$name\": through $role_arn, with the keys of $source_name."
+    if ! ask_to_change "Change the settings of \"$name\" -- name, production, email, region?"; then
+      if ! prove "$(slug_of "$name")" 1; then
+        cloud_info "the keys are $source_name's: aws-add --profile $(slug_of "$source_name") checks them; the role must also trust them"
+        exit 1
+      fi
+      exit 0
+    fi
+  fi
+fi
+
+# The key env.yaml holds for this account, and whom it signs in as.
+known_id="" known_secret="" key_arn=""
+if [[ -n $entry ]] && ! $role_entry; then
+  known_id=$(jq -r '.access_key_id // ""' <<<"$entry")
+  known_secret=$(jq -r '.secret_access_key // ""' <<<"$entry")
+  [[ -z $known_id || -z $known_secret ]] || key_arn=$(keys_arn "$known_id" "$known_secret")
+fi
+key_account=$(cut -d: -f5 <<<"$key_arn")
+
+# The IAM user the key belongs to. A key that signs in says; one that does
+# not may still be this account's -- with a secret env.yaml lost, or
+# deactivated -- and IAM says whose, while a key it does not know is denied.
+owner=""
+if [[ $key_account == "$account" ]]; then
+  case $key_arn in
+    *:root)   owner=root ;;
+    *:user/*) owner=${key_arn##*/} ;;
+  esac
+elif [[ -n $known_id ]]; then
+  owner=$(aws iam get-access-key-last-used --access-key-id "$known_id" --query UserName --output text 2>/dev/null || true)
+  [[ $owner != None ]] || owner=""
+fi
+
+need_key=true key_why=""
+if $role_entry; then
+  need_key=false
+elif [[ -z $known_id || -z $known_secret ]]; then
+  key_why="no access key for it in env.yaml"
+elif [[ $owner == root ]]; then
+  key_why="the key in env.yaml is the root user's own, which AWS says never to use"
+elif [[ -z $key_arn ]]; then
+  key_why="the key in env.yaml does not sign in"
+elif [[ $key_account != "$account" ]]; then
+  key_why="the key in env.yaml signs in to account $key_account"
+elif $renew; then
+  key_why="--renew"
+else
+  need_key=false
+fi
+
+# Does an IAM user exist? Anything but "no such user" is an error to show.
+user_exists() {
+  local out
+  if out=$(aws iam get-user --user-name "$1" --output json 2>&1); then
+    return 0
+  elif grep -q NoSuchEntity <<<"$out"; then
+    return 1
+  fi
+  cloud_bad "could not look up the IAM user $1"
+  explain "$out"
+  exit 1
+}
+
+# What a user may do: its managed and inline policies and its groups. None,
+# when they cannot be read: then a policy is attached, and if that is not
+# allowed either, its error says why.
+policies_of() {
+  { aws iam list-attached-user-policies --user-name "$1" --output json 2>/dev/null | jq -r '.AttachedPolicies[].PolicyName'
+    aws iam list-user-policies --user-name "$1" --output json 2>/dev/null | jq -r '.PolicyNames[]'
+    aws iam list-groups-for-user --user-name "$1" --output json 2>/dev/null | jq -r '.Groups[] | "group \(.GroupName)"'
+  } | paste -sd, - || true
+}
+
+# The user to give a key: the one env.yaml's key belongs to; else the one an
+# earlier run made, on another machine or one that failed after making it;
+# else a new one. Root is never one: its keys are what this replaces. A role
+# entry has no user of its own.
+user="" user_from=role need_policy=false policies="" user_keys='[]' old_key=""
+if ! $role_entry; then
+  if [[ -n $owner && $owner != root ]] && user_exists "$owner"; then
+    user=$owner user_from=entry
+  elif user_exists "$IAM_USER"; then
+    user=$IAM_USER user_from=earlier
+  else
+    user=$IAM_USER user_from=new
+  fi
+
+  need_policy=true
+  if [[ $user_from != new ]]; then
+    policies=$(policies_of "$user")
+    [[ -z $policies ]] || need_policy=false
+  fi
+
+  # The user's keys now: AWS allows two, and a new one needs a free place.
+  # Only the key env.yaml held is ever deleted, and only after the new one
+  # signs in -- so with two already, which to give up is yours to decide.
+  if [[ $user_from != new ]]; then
+    if ! user_keys=$(aws iam list-access-keys --user-name "$user" --output json 2>&1); then
+      cloud_bad "could not list the access keys of $user"
+      explain "$user_keys"
+      exit 1
+    fi
+    user_keys=$(jq -c '.AccessKeyMetadata' <<<"$user_keys")
+  fi
+  [[ $owner != "$user" ]] || old_key=$(jq -r --arg k "$known_id" 'map(select(.AccessKeyId == $k))[0].AccessKeyId // empty' <<<"$user_keys")
+fi
+if $need_key && (( $(jq length <<<"$user_keys") >= 2 )); then
+  cloud_bad "$user has two access keys already, all AWS allows, so there is no room for a new one"
+  jq -r --arg k "$known_id" '.[] | "  \(.AccessKeyId)  \(.Status | ascii_downcase), made \(.CreateDate[0:10])\(if .AccessKeyId == $k then "  -- the one env.yaml holds" else "" end)"' <<<"$user_keys"
+  cloud_info "delete one that nothing uses, then run this again:"
+  cloud_info "aws iam delete-access-key --user-name $user --access-key-id <id>"
+  exit 1
+fi
+
+# ── nothing to do ────────────────────────────────────────────────────
+
+if [[ -n $entry ]] && ! $role_entry && ! $need_key && ! $need_policy &&
+   [[ -z $opt_name$opt_prod$opt_email$opt_region ]]; then
+  name=$(jq -r .name <<<"$entry")
+  cloud_ok "already in env.yaml as \"$name\" -- IAM user $owner${policies:+, $policies}"
+  if ! ask_to_change "Change the settings of \"$name\" -- name, production, email, region?"; then
+    prove "$(slug_of "$name")" 1 || exit 1
+    exit 0
+  fi
+fi
+
+# ── questions, then a summary ────────────────────────────────────────
+
+alias=$(aws iam list-account-aliases --query 'AccountAliases[0]' --output text 2>/dev/null || true)
+[[ $alias != None ]] || alias=""
+login_region=$(aws configure get region 2>/dev/null || true)
+
+# The entry as it stands, when there is one: its answers are the defaults.
+new_entry=true old_name="" old_slug="" old_prod=false old_email="" old_region="" old_account=""
+if [[ -n $entry ]]; then
+  new_entry=false
+  old_name=$(jq -r .name <<<"$entry")
+  old_slug=$(slug_of "$old_name")
+  old_prod=$(jq -r '.prod == true' <<<"$entry")
+  old_email=$(jq -r '.email // ""' <<<"$entry")
+  old_region=$(jq -r '.region // ""' <<<"$entry")
+  old_account=$(jq -r '.account_id // "" | tostring' <<<"$entry")
+fi
+taken=$(jq -r --arg own "$old_slug" "$CLOUD_JQ_DEFS"' [(.aws // [])[] | .name // empty | slug | select(. != $own)] | .[]' <<<"$json")
+name=$opt_name
+while :; do
+  [[ -n $name ]] || name=$(ask_text "Name for AWS account $account in aws-select (env.yaml keeps the account id as well)" "${old_name:-${alias:-AWS $account}}")
+  slug=$(slug_of "$name")
+  if [[ -z $slug ]]; then
+    cloud_bad "\"$name\" has no letters or digits to make a profile name of"
+  elif grep -qxF "$slug" <<<"$taken"; then
+    cloud_bad "env.yaml already has an AWS account called $slug"
+  else
+    break
+  fi
+  [[ -z $opt_name ]] && can_ask || exit 1
+  name=""
+done
+prod=${opt_prod:-$(ask_yes_no "Is \"$name\" a production account?" "$old_prod")}
+email=${opt_email:-$(ask_text "Email for \"$name\" (a note for you, such as the root user's; empty for none)" "$old_email")}
+region=${opt_region:-}
+while [[ -z $region ]]; do
+  region=$(ask_text "Region for \"$name\"" "${old_region:-${login_region:-us-east-1}}")
+  [[ $region =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] && break
+  cloud_bad "\"$region\" is not a region name, like eu-north-1"
+  can_ask || exit 1
+  region=""
+done
+
+policy=""
+if $need_policy; then
+  policy=${opt_policy:-$(ask_choice "Policy for the IAM user $user" AdministratorAccess \
+    AdministratorAccess PowerUserAccess ReadOnlyAccess)}
+fi
+
+# What a run on an entry already there would change in it.
+changes=()
+if ! $new_entry; then
+  [[ $slug == "$old_slug" ]] || changes+=("rename it \"$name\" ($slug)")
+  [[ $name == "$old_name" || $slug != "$old_slug" ]] || changes+=("call it \"$name\"")
+  [[ $prod == "$old_prod" ]] || changes+=("$([[ $prod == true ]] && echo "mark it production" || echo "mark it not production")")
+  [[ $email == "$old_email" ]] || changes+=("$([[ -n $email ]] && echo "set its email to $email" || echo "drop its email")")
+  [[ $region == "$old_region" ]] || changes+=("move it to $region")
+  [[ $old_account == "$account" ]] || changes+=("note its account id")
+fi
+# Whether anything is made in AWS, or only env.yaml changes.
+creates=false
+[[ $user_from == entry || $user_from == role ]] && ! $need_policy && ! $need_key || creates=true
+if ! $new_entry && ! $creates && (( ${#changes[@]} == 0 )); then
+  echo "No changes -- env.yaml is left as it was."
+  prove "$slug" 1 || exit 1
+  exit 0
+fi
+
+echo
+echo "AWS  account $account${alias:+ ($alias)}"
+echo "     signed in as $login"
+echo
+case $user_from in
+  new)     echo "  - create the IAM user \"$user\"" ;;
+  earlier) echo "  - use the IAM user \"$user\", which an earlier aws-add made" ;;
+  entry)   echo "  - keep the IAM user \"$user\", whose key the entry holds" ;;
+  role)    echo "  - keep signing in through $role_arn, with the keys of $source_name" ;;
+esac
+$need_policy && echo "  - give it $policy"
+if $need_key; then
+  echo "  - make it a new access key -- $key_why"
+  [[ -z $old_key ]] || echo "  - delete the key env.yaml held until now, $old_key, once the new one signs in"
+fi
+if $new_entry; then
+  echo "  - add \"$name\" ($slug) to env.yaml$([[ $prod == true ]] && printf ', marked production')"
+else
+  list=""
+  for c in "${changes[@]}"; do list+="${list:+, }$c"; done
+  echo "  - update \"$old_name\" ($old_slug) in env.yaml${list:+: $list}"
+fi
+echo
+
+if can_ask && [[ $(ask_yes_no "Go ahead?" true) != true ]]; then
+  echo "Nothing was changed."
+  exit 0
+fi
+
+# ── create, then write, then prove ───────────────────────────────────
+
+# What this run created, newest last, as "kind id". Undone in reverse if the
+# run ends before env.yaml holds the key -- after that, env.yaml is the one
+# record of it, and undoing would only break what was written.
+undo=()
+written=false
+rollback() {
+  local i kind id
+  $written && return 0
+  (( ${#undo[@]} )) || return 0
+  echo
+  cloud_bad "stopped before env.yaml was written -- removing what this run created"
+  for (( i = ${#undo[@]} - 1; i >= 0; i-- )); do
+    read -r kind id <<<"${undo[i]}"
+    case $kind in
+      user)   aws iam delete-user --user-name "$id" >/dev/null 2>&1 && cloud_info "deleted the IAM user $id" || cloud_bad "could not delete the IAM user $id -- delete it in the console" ;;
+      policy) aws iam detach-user-policy --user-name "$user" --policy-arn "$id" >/dev/null 2>&1 && cloud_info "took the policy off again" || cloud_bad "could not detach $id from $user" ;;
+      key)    aws iam untag-user --user-name "$user" --tag-keys "$id" >/dev/null 2>&1 || true
+              aws iam delete-access-key --user-name "$user" --access-key-id "$id" >/dev/null 2>&1 && cloud_info "deleted the new key" || cloud_bad "could not delete the access key $id of $user" ;;
+    esac
+  done
+}
+trap rollback EXIT
+
+# Retried: a user made a moment ago is not visible everywhere at once, and
+# the next step can be told it does not exist.
+retry() {
+  local what=$1 i out; shift
+  for i in 1 2 3 4 5 6; do
+    if out=$("$@" 2>&1); then printf '%s\n' "$out"; return 0; fi
+    grep -qi 'NoSuchEntity' <<<"$out" || break
+    sleep 5
+  done
+  cloud_bad "could not $what" >&2
+  explain "$out" >&2
+  return 1
+}
+
+if [[ $user_from == new ]]; then
+  retry "create the IAM user $user" aws iam create-user --user-name "$user" \
+    --tags "Key=purpose,Value=aws-select signs in as this user with a key kept in env.yaml" >/dev/null
+  undo+=("user $user")
+  cloud_ok "created the IAM user $user"
+fi
+if $need_policy; then
+  policy_arn="arn:$partition:iam::aws:policy/$policy"
+  retry "give it $policy" aws iam attach-user-policy --user-name "$user" --policy-arn "$policy_arn" >/dev/null
+  undo+=("policy $policy_arn")
+  cloud_ok "gave it $policy"
+fi
+
+secret=$known_secret new_key=""
+if $need_key; then
+  # Not through retry(): its output is the secret, which nothing here prints.
+  # Only the error output is kept to show.
+  errs=$(mktemp) || exit 1
+  if ! out=$(aws iam create-access-key --user-name "$user" \
+      --query 'AccessKey.[AccessKeyId, SecretAccessKey]' --output text 2>"$errs") || [[ -z $out ]]; then
+    cloud_bad "could not make a new access key for $user"
+    explain "$(cat "$errs")"
+    rm -f "$errs"
+    exit 1
+  fi
+  rm -f "$errs"
+  IFS=$'\t' read -r new_key secret <<<"$out"
+  unset out
+  undo+=("key $new_key")
+  # The console shows a tag named after a key as that key's description.
+  aws iam tag-user --user-name "$user" --tags "Key=$new_key,Value=env.yaml $(date +%F)" >/dev/null 2>&1 || true
+  cloud_ok "made a new access key, $new_key"
+fi
+
+# One rewrite of env.yaml: a new entry is added, or the entry's changed
+# answers are written, and the entry gets the key. Values go in through the
+# environment; only the shape of the edit is built here.
+edit='.aws = (.aws // [])'
+if $new_entry; then
+  edit+=' | .aws += [{"name": strenv(E_NAME), "prod": (strenv(E_PROD) == "true")'
+  [[ -z $email ]] || edit+=', "email": strenv(E_EMAIL)'
+  edit+=', "account_id": strenv(ACCOUNT), "region": strenv(E_REGION)}]'
+else
+  # Only the answers that changed, so the rest keep their place and quoting.
+  fields=()
+  [[ $prod == "$old_prod" ]] || fields+=('.prod = (strenv(E_PROD) == "true")')
+  if [[ $email != "$old_email" ]]; then
+    [[ -n $email ]] && fields+=('.email = strenv(E_EMAIL)') || fields+=('del(.email)')
+  fi
+  [[ $old_account == "$account" ]] || fields+=('.account_id = strenv(ACCOUNT)')
+  [[ $region == "$old_region" ]] || fields+=('.region = strenv(E_REGION)')
+  [[ $name == "$old_name" ]] || fields+=('.name = strenv(E_NAME)')
+  if (( ${#fields[@]} )); then
+    edit+=" | (.aws[] | select(.name == strenv(E_OLD_NAME))) |= ($(IFS='|'; echo "${fields[*]}"))"
+  fi
+fi
+if $need_key; then
+  edit+=' | (.aws[] | select(.name == strenv(E_NAME))) |= (.access_key_id = strenv(KEY_ID) | .secret_access_key = strenv(KEY_SECRET))'
+fi
+# Quoted: as a number, an account id would lose its leading zeros.
+edit+=' | (.aws[] | select(.name == strenv(E_NAME)) | .account_id) style="double"'
+ACCOUNT=$account KEY_ID=$new_key KEY_SECRET=$secret E_OLD_NAME=$old_name \
+  E_NAME=$name E_PROD=$prod E_EMAIL=$email E_REGION=$region env_update "$edit" || exit 1
+written=true
+unset secret known_secret
+$new_entry && cloud_ok "added \"$name\" to env.yaml" || cloud_ok "updated env.yaml"
+[[ -z $old_slug || $slug == "$old_slug" ]] || cloud_info "terminals switched to $old_slug: aws-select $slug"
+
+echo
+tries=1
+! $need_key || tries=$VERIFY_TRIES
+if ! prove "$slug" "$tries"; then
+  echo
+  if $role_entry; then
+    cloud_bad "env.yaml has the entry, but it does not sign in"
+    cloud_info "the keys are $source_name's: aws-add --profile $(slug_of "$source_name") checks them; the role must also trust them"
+    exit 1
+  fi
+  cloud_bad "env.yaml has the entry, but it does not sign in yet"
+  cloud_info "AWS can be slow to accept a new key; try 'aws-select --profile $slug' in a minute"
+  [[ -n $old_key ]] && $need_key && cloud_info "the old key was kept, and still works where it is used"
+  exit 1
+fi
+
+# The new key signs in; the one env.yaml held goes. Only that one: any other
+# key of the user belongs to something this run knows nothing about.
+if $need_key && [[ -n $old_key ]]; then
+  if aws iam delete-access-key --user-name "$user" --access-key-id "$old_key" >/dev/null 2>&1; then
+    aws iam untag-user --user-name "$user" --tag-keys "$old_key" >/dev/null 2>&1 || true
+    cloud_ok "deleted the old key, $old_key"
+    echo
+    echo "Copy env.yaml to your other machines: the key theirs holds no longer works."
+  else
+    cloud_bad "could not delete the old key $old_key -- delete it in the console"
+  fi
+fi
+if [[ $owner == root ]]; then
+  echo
+  cloud_info "env.yaml no longer holds the root user's key $known_id. Unless something"
+  cloud_info "else uses it, delete it: console, your name, Security credentials."
+fi

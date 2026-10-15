@@ -22,3 +22,5 @@ hypr-nav/test_hypr_nav
 # committed. env.example.yaml is the tracked twin; git-hooks/pre-commit
 # refuses a commit that stages this file anyway.
 /env.yaml
+# env_update's encrypted copy, between writing it and moving it into place.
+/env.yaml.*
