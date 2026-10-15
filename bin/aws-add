@@ -36,8 +36,8 @@
 # goes straight into the encrypted env.yaml and is never printed. If a step
 # fails before env.yaml has it, whatever this run created is deleted again.
 # Last, aws-select signs in to prove the entry works, retried for up to a
-# minute, since a new key takes a few seconds to work everywhere. Which
-# account new terminals start on is left as it was.
+# minute, since a new key takes a few seconds to work everywhere. No
+# terminal is switched to the account.
 #
 # Your login is the default profile, or the one AWS_PROFILE names -- unless
 # that is an env.yaml account, as it is in a terminal switched with aws-select.
@@ -179,25 +179,6 @@ fi
 
 slug_of() { jq -rn --arg n "$1" "$CLOUD_JQ_DEFS"' $n | slug'; }
 
-# The account new terminals start on, put back after aws-select proves the
-# entry: adding an account is not switching to it.
-current_file=$(cloud_current_file aws)
-previous_current=$(cat "$current_file" 2>/dev/null || true)
-restore_current() {
-  local line
-  if [[ -n $previous_current ]]; then
-    # New terminals start on the entry this run renamed or re-marked: its
-    # line in the index, which aws-select has just rebuilt, is the new one.
-    if [[ -n ${old_slug-} && $(cut -f2 <<<"$previous_current") == "$old_slug" ]]; then
-      line=$(cloud_lines aws | awk -F'\t' -v s="$slug" '$2 == s')
-      [[ -z $line ]] || previous_current=$line
-    fi
-    cloud_set_current aws "$previous_current"
-  else
-    cloud_clear_current aws
-  fi
-}
-
 # The proof: aws-select signs in as the entry, the way every terminal will,
 # and checks the account. A new key can be turned away for a few seconds, so
 # after one is made the proof is retried; an entry already there gets one go.
@@ -205,14 +186,12 @@ prove() {
   local slug=$1 tries=${2:-$VERIFY_TRIES} i out
   for (( i = 1; i <= tries; i++ )); do
     if out=$("$DOTFILES/bin/aws-select" --profile "$slug" --yes 2>&1); then
-      restore_current
       printf '%s\n' "$out"
       return 0
     fi
     (( i == 1 && tries > 1 )) && cloud_info "waiting for AWS to accept it -- this can take a minute"
     (( i < tries )) && sleep "$VERIFY_PAUSE"
   done
-  restore_current
   printf '%s\n' "$out"
   return 1
 }

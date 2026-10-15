@@ -187,9 +187,16 @@ cloud_confirm_prod() {
     "$name is a PRODUCTION account. Switch to it?"
 }
 
-cloud_current_file() { printf '%s/%s-current\n' "$CLOUD_STATE" "$1"; }
-cloud_set_current() { ( umask 077; mkdir -p "$CLOUD_STATE"; printf '%s\n' "$2" > "$(cloud_current_file "$1")" ); }
-cloud_clear_current() { rm -f "$(cloud_current_file "$1")"; }
+# The account a switch picked goes to the shell function that ran the script,
+# and to nothing else: the function in shell/bashrc names a file of its own in
+# CLOUD_PICK for each run, and exports what is written there into its own
+# terminal -- the account's line in the index, or "-" for --clear. Run any
+# other way, by hand or by aws-add proving an entry, a switch proves the
+# account and changes no terminal.
+cloud_hand_over() {
+  [[ -n ${CLOUD_PICK-} ]] || return 0
+  printf '%s\n' "$1" > "$CLOUD_PICK"
+}
 
 # Every account of one cloud, for --list.
 cloud_list() {

@@ -25,7 +25,7 @@
 # Each account gets an AZURE_CONFIG_DIR of its own, so its login is kept
 # between switches and switching never signs anything else out. The shell
 # function of the same name in shell/bashrc exports that directory on success,
-# for this terminal; new terminals start on the last account picked.
+# in that terminal alone; a new one starts on no account.
 
 set -euo pipefail
 
@@ -74,7 +74,7 @@ case $mode in
     fi
     exit 0 ;;
   clear)
-    cloud_clear_current azure
+    cloud_hand_over -
     cloud_ok "Azure: no account selected"
     exit 0 ;;
 esac
@@ -131,7 +131,7 @@ if ! groups=$(verify); then
 fi
 
 show=$(az account show --output json)
-cloud_set_current azure "$line"
+cloud_hand_over "$line"
 cloud_ok "Azure  $name$(cloud_prod_tag "$prod")"
 cloud_info "subscription $(jq -r .name <<<"$show") ($subscription)"
 cloud_info "tenant $(jq -r .tenantId <<<"$show") · as app $(jq -r .user.name <<<"$show") · $groups resource group(s)"

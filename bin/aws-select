@@ -19,8 +19,9 @@
 #
 # "This terminal" is the shell function of the same name in shell/bashrc. A
 # script cannot change the environment of the shell that ran it, so the
-# function runs this, and on success exports AWS_PROFILE. New terminals start
-# on the last account picked; terminals already open keep theirs.
+# function runs this, and on success exports AWS_PROFILE -- in that terminal
+# alone; a new one starts on no account. Run as a script rather than through
+# the function, it proves the account and changes nothing.
 #
 # The profiles are generated from env.yaml into a managed block of
 # ~/.aws/config, so `aws --profile <name>` works anywhere, not only here. Ones
@@ -73,7 +74,7 @@ case $mode in
     fi
     exit 0 ;;
   clear)
-    cloud_clear_current aws
+    cloud_hand_over -
     cloud_ok "AWS: no account selected"
     exit 0 ;;
 esac
@@ -102,7 +103,7 @@ if [[ -n $account && $got != "$account" ]]; then
   exit 1
 fi
 
-cloud_set_current aws "$line"
+cloud_hand_over "$line"
 cloud_ok "AWS  $name$(cloud_prod_tag "$prod")"
 cloud_info "account $got · $region"
 cloud_info "as $arn"

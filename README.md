@@ -366,9 +366,9 @@ cache.
 
 The switch is for this terminal: `aws-select` exports `AWS_PROFILE`,
 `az-select` an `AZURE_CONFIG_DIR` of the account's own (so each Azure account
-keeps its login, and switching never signs another out). New terminals start
-on the last account picked; open ones keep theirs. The prompt shows none of
-it: `aws-whoami` and `az-whoami` say which account a terminal is on, marking
+keeps its login, and switching never signs another out). Only that terminal:
+every other one keeps its own, and a new one starts on no account, so run
+`aws-select` or `az-select` again there. The prompt shows none of it: `aws-whoami` and `az-whoami` say which account a terminal is on, marking
 production ones -- or that it is on none, and so what `aws` or `az` falls
 back to. They read the account list, so they answer at once and never ask
 the cloud.

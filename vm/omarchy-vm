@@ -1457,6 +1457,13 @@ test_cloud_accounts() {
   else
     t_fail "aws-select did not set AWS_PROFILE in the calling shell" "$(tr -d '\r' <<<"$out")"
   fi
+  # ... and in no other: a terminal opened after it starts on no account.
+  if out=$(guest_ssh "bash -ic 'echo AWS_PROFILE=\${AWS_PROFILE:-none}' 2>/dev/null" 2>&1) &&
+     grep -qx "AWS_PROFILE=none" <<<"$(tr -d '\r' <<<"$out")"; then
+    t_ok "a new terminal after that starts on no account"
+  else
+    t_fail "a new terminal started on an account another one picked" "$(tr -d '\r' <<<"$out")"
+  fi
 }
 
 # No real accounts to hand: the plumbing alone, on env.example.yaml encrypted
@@ -1514,12 +1521,13 @@ test_cloud_plumbing() {
 }
 
 # aws-whoami and az-whoami, in a real interactive shell, where .bashrc's hook
-# defines them: none on a terminal that picked nothing, and the account's name
-# on one that did. They read only the account list, so no key is needed.
+# defines them: none in a new terminal -- even after the switches above, since
+# a pick belongs to the terminal that made it -- and the account's name on one
+# that picked it. They read only the account list, so no key is needed.
 test_whoami() {
   local slug name out
   IFS=$'\t' read -r slug name < <(guest_ssh "grep -m1 '^aws' ~/.local/state/omarchy-dotfiles/cloud/profiles.tsv | cut -f2,3" 2>/dev/null)
-  out=$(guest_ssh "bash -ic 'unset AWS_PROFILE AZURE_CONFIG_DIR; aws-whoami; az-whoami; AWS_PROFILE=$slug aws-whoami' 2>/dev/null" 2>&1 | tr -d '\r')
+  out=$(guest_ssh "bash -ic 'aws-whoami; az-whoami; AWS_PROFILE=$slug aws-whoami' 2>/dev/null" 2>&1 | tr -d '\r')
   if grep -q '^AWS: none selected' <<<"$out" && grep -q '^Azure: none selected' <<<"$out" &&
      [[ -n $name ]] && grep -qF "AWS: $name" <<<"$out"; then
     t_ok "aws-whoami and az-whoami name the account, or say there is none"

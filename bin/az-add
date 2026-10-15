@@ -37,7 +37,7 @@
 # step fails before env.yaml has it, whatever this run created is deleted
 # again. Last, az-select signs in to prove the entry works, retried for up to
 # three minutes, since Azure takes a while to accept a new app, role or secret.
-# Which account new terminals start on is left as it was.
+# No terminal is switched to the account.
 #
 # After a renewal, copy env.yaml to your other machines: theirs still holds the
 # secret that was just deleted.
@@ -315,39 +315,18 @@ slug_of() { jq -rn --arg n "$1" "$CLOUD_JQ_DEFS"' $n | slug'; }
 
 # ── nothing to do ────────────────────────────────────────────────────
 
-# The account new terminals start on, put back after az-select proves the
-# entry: adding an account is not switching to it.
-current_file=$(cloud_current_file azure)
-previous_current=$(cat "$current_file" 2>/dev/null || true)
-restore_current() {
-  local line
-  if [[ -n $previous_current ]]; then
-    # New terminals start on the entry this run renamed or re-marked: its
-    # line in the index, which az-select has just rebuilt, is the new one.
-    if [[ -n ${old_slug-} && $(cut -f2 <<<"$previous_current") == "$old_slug" ]]; then
-      line=$(cloud_lines azure | awk -F'\t' -v s="$slug" '$2 == s')
-      [[ -z $line ]] || previous_current=$line
-    fi
-    cloud_set_current azure "$previous_current"
-  else
-    cloud_clear_current azure
-  fi
-}
-
 # az-select, until it signs in or three minutes are up -- after something was
 # created, which Azure can be slow to accept. Otherwise it gets one go.
 prove() {
   local slug=$1 tries=${2:-$VERIFY_TRIES} i out
   for (( i = 1; i <= tries; i++ )); do
     if out=$("$DOTFILES/bin/az-select" --profile "$slug" --yes 2>&1); then
-      restore_current
       printf '%s\n' "$out"
       return 0
     fi
     (( i == 1 && tries > 1 )) && cloud_info "waiting for Azure to accept it -- this can take a few minutes"
     (( i < tries )) && sleep "$VERIFY_PAUSE"
   done
-  restore_current
   printf '%s\n' "$out"
   return 1
 }
