@@ -252,7 +252,8 @@ BUILDS=(
   "hypr-nav|$HOME/.local/bin/hypr-nav"
 )
 
-# PACKAGES -- commands our own tools need that a stock Omarchy does not ship.
+# PACKAGES -- commands our own tools need, or that you want on every machine,
+# that a stock Omarchy does not ship.
 #
 #   <command>|<pacman package>|<what stops working without it>[|<version prefix>]
 #
@@ -265,10 +266,12 @@ BUILDS=(
 # it only warns, because a password prompt there would hang an `omarchy
 # update`. doctor.sh lists anything still missing.
 #
-# Only genuinely missing things belong here. Verified against
-# /usr/share/omarchy/install/*.packages and pactree: jq, less, wl-clipboard and
-# xdg-terminal-exec are all on Omarchy's own base list, gawk comes with Arch's
-# `base`, and make/gcc come with base-devel, which Omarchy installs.
+# Mostly what a stock Omarchy lacks. Verified against
+# /usr/share/omarchy/install/*.packages and pactree: less, wl-clipboard and
+# xdg-terminal-exec are on Omarchy's own base list, gawk comes with Arch's
+# `base`, and make/gcc come with base-devel, which Omarchy installs. jq and fzf
+# are on that base list too, but listed anyway: wanted on every machine, and
+# bwu is built on both, so a later Omarchy that dropped them would be noticed.
 #
 # python is NOT one of those, which this list previously implied by omission.
 # It is not in `base`; it arrives only as a transitive dependency of
@@ -294,7 +297,19 @@ PACKAGES=(
   "sops|sops|env.yaml, which is encrypted -- and so everything that reads it"
   "age-keygen|age|env-secrets, which keeps env.yaml's age key"
   "yq|go-yq|env-secrets check and the pre-commit hook"
+
+  # Tools for you rather than for this repo's scripts, wanted on every machine.
+  # In Arch's own repos, so they update with `omarchy update` like the rest.
+  "bw|bitwarden-cli|you -- the Bitwarden vault from a terminal"
+  "jq|jq|you, and bwu, aws-add, az-add and the cloud scripts"
+  "fzf|fzf|you, and bwu get's picker"
 )
+
+# The Bitwarden server bw talks to: the EU cloud, not bw's own default,
+# bitwarden.com, where an EU account does not exist. install.sh sets it with
+# `bw config server`, which bw only allows while logged out -- so a bw logged
+# in somewhere else is reported, never logged out.
+BITWARDEN_SERVER=https://vault.bitwarden.eu
 
 # REPLACED -- installed packages that must go before a PACKAGES entry can come
 # in, because the two conflict.
@@ -310,6 +325,34 @@ PACKAGES=(
 # never deleted, like any file this repo does not recognise.
 REPLACED=(
   "aws-cli|aws-cli-v2|AWS CLI v1; aws-select needs v2"
+)
+
+# RELEASES -- single-binary tools no Arch repo carries, downloaded from the
+# project's own releases into ~/.local/bin.
+#
+#   <command>|<version>|<url>|<sha256, amd64>|<sha256, arm64>|<what it is for>
+#
+# {version} and {arch} in the URL are filled in, arch being amd64 or arm64.
+#
+# Pinned to a version, and to the SHA-256 of each architecture's file, both
+# checked in here: install.sh installs that file and no other. A checksum
+# fetched from the same release would only catch a broken download -- whoever
+# could swap the binary could swap the checksum beside it -- so the hash in
+# this file is the one that counts. Upgrading is a deliberate edit: the new
+# version and its hashes, from that release's checksums.txt, after a look at
+# what changed.
+#
+# install.sh records the hash of every file it installs, and replaces only a
+# file that still has one of them -- an older pin. A file of that name it did
+# not put there is reported, never overwritten. No sudo is needed, so the
+# post-update hook installs these too, as it does FONTS.
+#
+# openobserve-cli is a third party's (AngelMsger, MIT), not OpenObserve's own:
+# their o2 needs the Enterprise edition. npm has it too, but that package only
+# downloads this same binary when it installs, checked against the release's
+# own checksums.txt, and ties it to one Node version.
+RELEASES=(
+  "openobserve-cli|0.16.0|https://github.com/AngelMsger/openobserve-cli/releases/download/v{version}/openobserve-cli-linux-{arch}|b6dc112304fc4e5050206bb96c85a1e9eca0b18711f912a970ba0544eb68c202|80a83abd88d2401d09c01f23ff0b35a78ba413da75de50b6611204b83fdc93e8|you -- logs, metrics and traces in OpenObserve"
 )
 
 # FONTS -- families we ask for that Omarchy does not ship, installed per-user

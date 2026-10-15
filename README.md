@@ -114,6 +114,22 @@ update` should not report a broken install. `doctor.sh` keeps a missing family
 visible, and the run's summary reports the warning count rather than claiming
 everything is current.
 
+### `RELEASES` — single binaries no Arch repo carries
+
+`install.sh` downloads these from the project's own releases into
+`~/.local/bin` — `openobserve-cli`, so far, for querying logs, metrics and
+traces in OpenObserve. Each entry pins a version and the SHA-256 of each
+architecture's file, and only a file with that hash is installed. A checksum
+from the same release would not do: whoever could replace the binary could
+replace the checksum next to it. So upgrading is a deliberate edit to
+`setup/targets.sh` — the new version and its hashes — never "latest".
+
+`install.sh` remembers the hash of every file it installs, and replaces only
+one of those: an older pin is upgraded, a file you put there yourself is
+reported as a conflict and left alone. A download that is not the pinned file
+is a conflict too; one that fails warns, as a font's does. `doctor.sh`
+reports a missing binary, an older pin, and one that is neither.
+
 ### Keeping Hyprland in step
 
 Hyprland watches the files under `~/.config/hypr`, but our config is not there:
@@ -185,21 +201,28 @@ setup/doctor.sh       # what's hooked, what's linked, what drifted from stock
 
 `setup/install.sh` reapplies everything the repo owns: managed blocks, symlinks,
 the machine-local seed, the compiled `hypr-nav` binary, the packages a stock
-Omarchy lacks, the no-ligature font, the Omarchy post-update hook, and a
-Hyprland reload to make it all live.
+Omarchy lacks, pinned release binaries, the no-ligature font, the Omarchy
+post-update hook, and a Hyprland reload to make it all live.
 
 The packages are `himalaya`, `python` and `kdeconnect`, and for the cloud
-accounts `aws-cli-v2`, `azure-cli`, `sops`, `age` and `go-yq` (`PACKAGES` in
-`setup/targets.sh`), installed in one `omarchy-pkg-add`, so sudo asks for your
-password once if it has none cached. AWS CLI v1 is removed first when pacman
+accounts `aws-cli-v2`, `azure-cli`, `sops`, `age` and `go-yq`, and
+`bitwarden-cli` for the Bitwarden vault (`PACKAGES` in `setup/targets.sh`),
+installed in one `omarchy-pkg-add`, so sudo asks for your password once if it
+has none cached. AWS CLI v1 is removed first when pacman
 has it: v2 conflicts with it, and `--noconfirm` answers pacman's "Remove
 aws-cli?" with no (`REPLACED` in the same file). A v1 that pacman did not
 install is reported, never deleted. That happens only when you run it from a
 terminal. The post-update hook runs it unattended, where a password prompt
 would hang an `omarchy update`, so there it only warns and names the package.
-`jq`, `less`, `wl-clipboard` and `xdg-terminal-exec` are not listed because
+`jq` and `fzf` are listed though Omarchy ships them, to keep them on every
+machine. `less`, `wl-clipboard` and `xdg-terminal-exec` are not listed because
 they are all on Omarchy's own base list, `gawk` comes with Arch's `base`, and
 `make`/`gcc` come with `base-devel`.
+
+`install.sh` then points `bw` at Bitwarden's EU server (`BITWARDEN_SERVER` in
+the same file) rather than its default, bitwarden.com. bw only allows that
+while logged out, so a `bw` logged in to another server is reported -- `bw
+logout`, then run `install.sh` again -- and never logged out for you.
 
 Two things it deliberately does not do, because it cannot:
 

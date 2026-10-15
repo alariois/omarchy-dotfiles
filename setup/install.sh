@@ -540,6 +540,115 @@ ensure_font() {
   repaired=$((repaired + 1))
 }
 
+# Point bw at BITWARDEN_SERVER. The setting lives in bw's own data file, next
+# to the login, so this asks bw rather than editing the file, and changes it
+# only while logged out -- the one time bw allows it. Logged in to another
+# server is a warning: logging out is yours to decide.
+ensure_bw_server() {
+  local status server state
+  # Without bw, the packages step has already said so.
+  command -v bw >/dev/null 2>&1 || return 0
+  if ! status=$(bw status 2>/dev/null) || ! jq -e . >/dev/null 2>&1 <<<"$status"; then
+    changed "  no conf  bw  ->  bw status did not answer; set it yourself: bw config server $BITWARDEN_SERVER"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+  server=$(jq -r '.serverUrl // "https://bitwarden.com"' <<<"$status")
+  state=$(jq -r '.status' <<<"$status")
+  if [[ $server == "$BITWARDEN_SERVER" ]]; then
+    say "  ok       bw server $BITWARDEN_SERVER"
+    return 0
+  fi
+  if [[ $state != unauthenticated ]]; then
+    changed "  no conf  bw  ->  logged in to $server, not $BITWARDEN_SERVER"
+    changed "           bw logout, then re-run setup/install.sh"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+  if bw config server "$BITWARDEN_SERVER" >/dev/null 2>&1 &&
+     [[ $(bw status 2>/dev/null | jq -r '.serverUrl // empty' 2>/dev/null) == "$BITWARDEN_SERVER" ]]; then
+    changed "  set      bw server  ->  $BITWARDEN_SERVER"
+    repaired=$((repaired + 1))
+  else
+    changed "  no conf  bw  ->  could not set the server; bw config server $BITWARDEN_SERVER"
+    warnings=$((warnings + 1))
+  fi
+}
+
+# Put a pinned release binary into ~/.local/bin. Only the file whose hash
+# setup/targets.sh names is installed, and only over a file install.sh put
+# there itself -- see RELEASES there. A failed download warns, as a font's
+# does: it needs the network, and the post-update hook runs this unattended.
+# A download that is not the pinned file is a conflict: that is not an
+# outage, it is the release having changed under its version.
+ensure_release() {
+  local cmd=$1 version=$2 url=$3 sha_amd64=$4 sha_arm64=$5
+  local target="$RELEASE_DIR/$cmd" shown want have tmp
+
+  shown=${target/#"$HOME"/\~}
+  want=$(release_sha "$sha_amd64" "$sha_arm64")
+  if [[ -z $want ]]; then
+    changed "  no file  $cmd  ->  no $cmd is pinned for $(uname -m)"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+
+  if [[ -L $target || ( -e $target && ! -f $target ) ]]; then
+    changed "  CONFLICT $shown   -> not a plain file; move it away, then re-run"
+    conflicts=$((conflicts + 1))
+    return 0
+  fi
+  if [[ -f $target ]]; then
+    have=$(file_hash "$target")
+    if [[ $have == "$want" ]]; then
+      say "  ok       $cmd $version"
+      return 0
+    fi
+    if ! release_is_ours "$cmd" "$have"; then
+      changed "  CONFLICT $shown   -> install.sh did not put this file there; move it away, then re-run"
+      conflicts=$((conflicts + 1))
+      return 0
+    fi
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    changed "  no file  $cmd  ->  curl not installed"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+
+  url=$(release_url "$url" "$version")
+  mkdir -p "$RELEASE_DIR"
+  # Beside the target, so the move into place is a rename: no half-written
+  # binary is ever on PATH.
+  if ! tmp=$(mktemp "$RELEASE_DIR/.$cmd.XXXXXX"); then
+    changed "  no file  $cmd  ->  cannot write to ${RELEASE_DIR/#"$HOME"/\~}"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+  if ! curl -fsSL --retry 2 --max-time 300 -o "$tmp" "$url"; then
+    rm -f -- "$tmp"
+    changed "  no file  $cmd  ->  download failed, re-run when online"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+  have=$(file_hash "$tmp")
+  if [[ $have != "$want" ]]; then
+    rm -f -- "$tmp"
+    changed "  CONFLICT $cmd   -> ${url##*/} is not the file pinned in setup/targets.sh"
+    changed "           its sha256 is $have"
+    conflicts=$((conflicts + 1))
+    return 0
+  fi
+  chmod 755 "$tmp"
+  mv -f -- "$tmp" "$target"
+  mkdir -p "$STATE_DIR"
+  release_is_ours "$cmd" "$want" || echo "$want" >> "$(release_stamp_file "$cmd")"
+
+  changed "  release  $cmd $version  <-  ${url##*/}"
+  repaired=$((repaired + 1))
+}
+
 # Write a web app's launcher entry and fetch the icon it names.
 #
 # The entry is generated rather than tracked, because it is boilerplate around
@@ -670,6 +779,16 @@ done
 
 say "Packages:"
 ensure_packages
+
+say "Bitwarden:"
+ensure_bw_server
+
+say "Releases:"
+for entry in "${RELEASES[@]:-}"; do
+  [[ -n $entry ]] || continue
+  IFS='|' read -r cmd version url sha_amd64 sha_arm64 needs <<< "$entry"
+  ensure_release "$cmd" "$version" "$url" "$sha_amd64" "$sha_arm64"
+done
 
 say "Environment:"
 ensure_env

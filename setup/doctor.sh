@@ -197,6 +197,56 @@ for entry in "${REPLACED[@]:-}"; do
 done
 
 echo
+echo "== Bitwarden =="
+if ! command -v bw >/dev/null 2>&1; then
+  echo "  MISSING  bw   -> see Required packages"
+elif ! bw_status=$(bw status 2>/dev/null) || ! jq -e . >/dev/null 2>&1 <<<"$bw_status"; then
+  echo "  BROKEN   bw   -> bw status did not answer"
+else
+  bw_server=$(jq -r '.serverUrl // "https://bitwarden.com"' <<<"$bw_status")
+  if [[ $bw_server == "$BITWARDEN_SERVER" ]]; then
+    echo "  ok       server $bw_server"
+  elif [[ $(jq -r .status <<<"$bw_status") == unauthenticated ]]; then
+    echo "  STALE    server $bw_server   -> setup/install.sh sets $BITWARDEN_SERVER"
+  else
+    echo "  STALE    server $bw_server   -> logged in there; bw logout, then setup/install.sh"
+  fi
+fi
+
+echo
+echo "== Releases =="
+rel_count=0
+[[ -n ${RELEASES+x} ]] && rel_count=${#RELEASES[@]}
+if (( rel_count == 0 )); then
+  echo "  none declared"
+else
+  for entry in "${RELEASES[@]}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r cmd version url sha_amd64 sha_arm64 needs <<< "$entry"
+    target="$RELEASE_DIR/$cmd"
+    want=$(release_sha "$sha_amd64" "$sha_arm64")
+    if [[ -z $want ]]; then
+      echo "  MISSING  $cmd   -> no $cmd is pinned for $(uname -m)"
+    elif [[ ! -f $target ]]; then
+      echo "  MISSING  $cmd   -> run setup/install.sh"
+      echo "           for $needs"
+    elif have=$(file_hash "$target") && [[ $have != "$want" ]]; then
+      if release_is_ours "$cmd" "$have"; then
+        echo "  STALE    $cmd   -> an older pin; setup/install.sh installs $version"
+      else
+        echo "  FOREIGN  $(tilde "$target")   -> not the pinned $version, and not one install.sh put there"
+      fi
+    else
+      echo "  ok       $cmd $version"
+      # Another of the same name earlier on PATH would be the one that runs.
+      if [[ $(command -v "$cmd" 2>/dev/null) != "$target" ]]; then
+        echo "           WARNING: $cmd on this shell's PATH is $(command -v "$cmd" 2>/dev/null || echo nothing)"
+      fi
+    fi
+  done
+fi
+
+echo
 echo "== Environment =="
 # env.yaml and what is generated from it (lib/env.sh, lib/cloud.sh).
 if [[ ! -f $ENV_FILE ]]; then

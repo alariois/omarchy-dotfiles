@@ -192,6 +192,42 @@ font_installed() {
     | grep -qxF "$1"
 }
 
+# ── RELEASES ──────────────────────────────────────────────────────────
+#
+# Shared so doctor.sh asks what install.sh asks: is the file in ~/.local/bin
+# the pinned one, byte for byte -- and if not, did install.sh put it there.
+
+RELEASE_DIR="$HOME/.local/bin"
+
+release_arch() {
+  case $(uname -m) in
+    x86_64)        echo amd64 ;;
+    aarch64|arm64) echo arm64 ;;
+    *)             return 1 ;;
+  esac
+}
+
+# The pinned hash for this machine, from an entry's two: nothing for an
+# architecture the entry has no file for.
+release_sha() {
+  case $(release_arch) in
+    amd64) echo "$1" ;;
+    arm64) echo "$2" ;;
+  esac
+}
+
+release_url() {
+  local url=$1 version=$2 arch
+  arch=$(release_arch) || return 1
+  url=${url//\{version\}/$version}
+  echo "${url//\{arch\}/$arch}"
+}
+
+# Every hash install.sh has installed for a command, one per line, so an
+# older pin is known as ours when the next one replaces it.
+release_stamp_file() { echo "$STATE_DIR/release-$1.sha256"; }
+release_is_ours() { grep -qxF "$2" "$(release_stamp_file "$1")" 2>/dev/null; }
+
 # ── WEBAPPS ───────────────────────────────────────────────────────────
 #
 # Shared so doctor.sh checks exactly what install.sh writes, and so both

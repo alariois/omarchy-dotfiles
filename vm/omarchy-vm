@@ -1357,7 +1357,7 @@ cmd_test() {
   else
     t_fail "install.sh on a fresh machine exited $status" "$(t_tail "$run_dir/install-1.log")"
   fi
-  local problems_re='^  (CONFLICT|FAILED|no pkg|no font|no icon|replace|old ver|no env|no sync|plain|example) |MISSING payload'
+  local problems_re='^  (CONFLICT|FAILED|no pkg|no file|no conf|no font|no icon|replace|old ver|no env|no sync|plain|example) |MISSING payload'
   if grep -qE "$problems_re" "$run_dir/install-1.log"; then
     t_fail "install.sh reported problems" "$(grep -E "$problems_re" -A1 "$run_dir/install-1.log")"
   else
@@ -1365,11 +1365,13 @@ cmd_test() {
   fi
 
   local missing
-  missing=$(guest_ssh "cd $repo && source setup/targets.sh && for e in \"\${PACKAGES[@]}\"; do c=\${e%%|*}; command -v \"\$c\" >/dev/null || echo \"\$c\"; done" 2>&1 || echo "(could not ask the guest)")
+  # ~/.local/bin, where RELEASES go, is on PATH in a login shell but not
+  # necessarily in a bare ssh command.
+  missing=$(guest_ssh "cd $repo && export PATH=\$HOME/.local/bin:\$PATH && source setup/targets.sh && for e in \"\${PACKAGES[@]}\" \"\${RELEASES[@]}\"; do c=\${e%%|*}; command -v \"\$c\" >/dev/null || echo \"\$c\"; done" 2>&1 || echo "(could not ask the guest)")
   if [[ -z $missing ]]; then
-    t_ok "every PACKAGES command resolves in the guest"
+    t_ok "every PACKAGES and RELEASES command resolves in the guest"
   else
-    t_fail "PACKAGES commands missing after install.sh" "$missing"
+    t_fail "PACKAGES or RELEASES commands missing after install.sh" "$missing"
   fi
 
   local aws_state
@@ -1383,7 +1385,7 @@ cmd_test() {
   # Safe to re-run is the whole contract: a second run must change nothing.
   guest_keyed "$age_key" "cd $repo && DOTFILES_ATTENDED=1 ./setup/install.sh" 2>&1 | tr -d '\r' >"$run_dir/install-2.log" || true
   local changes
-  changes=$(grep -E '^  (hooked|linked|seeded|built|added|removed|synced|font|icon|webapp|reloaded) |^Applied ' "$run_dir/install-2.log" || true)
+  changes=$(grep -E '^  (hooked|linked|seeded|built|added|removed|synced|set|release|font|icon|webapp|reloaded) |^Applied ' "$run_dir/install-2.log" || true)
   if [[ -z $changes ]]; then
     t_ok "a second install.sh changes nothing"
   else
