@@ -14,6 +14,9 @@
 #   ini  -> `#`  comments, `[main]` + `include=<path>` (foot)
 #   xcompose -> `#` comments, `include "<path>"` (X Compose)
 #   toml -> `#`  comments, the payload's text itself, at the top (herdr)
+#   claude -> JSON, no comments: the payload's hook entries, merged into the
+#            file's "hooks" key, each command marked `# omarchy-dotfiles`
+#            (Claude Code)
 #
 # The block is appended last, so an include that reassigns a setting the stock
 # file above it already set wins. That is how nvim/options.lua overrides
@@ -65,6 +68,21 @@ HOOKS=(
   # exits 0 with no warnings, and dumping the table shows <space> <n> resolving
   # to ours, not the value Omarchy wrote.
   "$HOME/.XCompose|xcompose|xcompose/XCompose"
+
+  # A ding from claude/ding when Claude Code finishes a turn or stops to ask
+  # something: a question, a plan to approve, a permission prompt. Not
+  # Omarchy's file but Claude Code's own, which it rewrites, and which holds
+  # this machine's settings besides -- the same reasons to hook rather than
+  # link. Omarchy installs Claude Code (through mise) but never writes here.
+  #
+  # Claude Code watches the file, so a running session picks the hooks up
+  # without a restart. A machine where it never ran gets a settings.json
+  # holding only these, which Claude Code then adds its own settings to.
+  #
+  # idle_prompt is left out of the Notification matcher on purpose: it fires
+  # a minute after a turn ends with nothing typed, which is a second ding for
+  # the Stop that already dinged.
+  "$HOME/.claude/settings.json|claude|claude/hooks.json"
 )
 
 LINKS=(

@@ -64,6 +64,27 @@ echo "== Managed include blocks =="
 foreign=0
 for entry in "${HOOKS[@]}"; do
   IFS='|' read -r target style payload <<< "$entry"
+  # JSON, so no block: the hook entries are marked instead. See the claude
+  # hooks section of lib.sh.
+  if [[ $style == claude ]]; then
+    ours=$(claude_hooks_ours "$target")
+    if [[ -f $target ]] && ! jq -e 'type == "object"' "$target" >/dev/null 2>&1; then
+      echo "  BROKEN   $(tilde "$target")   -> not a JSON object; Claude Code cannot"
+      echo "           read it either, and setup/install.sh will not touch it"
+    elif [[ -z $ours ]]; then
+      echo "  MISSING  $(tilde "$target")   -> run setup/install.sh"
+    elif ! grep -qF "\"$DOTFILES/" <<< "$ours"; then
+      echo "  FOREIGN  $(tilde "$target")   -> hooks point at another checkout:"
+      sed 's/^/             /' <<< "$ours"
+      foreign=$((foreign + 1))
+    elif ! claude_hooks_current "$target" "$DOTFILES/$payload"; then
+      echo "  STALE    $(tilde "$target")   -> hooks differ from $payload;"
+      echo "           run setup/install.sh"
+    else
+      echo "  present  $(tilde "$target")  ->  $payload"
+    fi
+    continue
+  fi
   if grep -qF ">>> $MARKER >>>" "$target" 2>/dev/null; then
     if ! grep -qF "$DOTFILES/$payload" "$target" 2>/dev/null; then
       echo "  FOREIGN  $(tilde "$target")   -> block points at another checkout:"

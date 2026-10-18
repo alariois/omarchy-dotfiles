@@ -6,6 +6,7 @@
 #   1. Is the installed binary the one this source builds?
 #   2. Is the Hyprland config the live session is running the one in this repo?
 #   3. Is a toml hook block a current copy of its payload?
+#   4. Are Claude Code's hooks the ones claude/hooks.json declares?
 #
 # The first two cannot be answered from mtimes, which is what both used to do.
 # See the sections below.
@@ -175,6 +176,75 @@ toml_block_body() {
   printf '# Copied from %s by setup/install.sh,\n' "$abs"
   printf '# since TOML has no include. Edit it there and re-run install.sh.\n'
   cat "$abs"
+}
+
+# ── claude hooks ──────────────────────────────────────────────────────
+#
+# Claude Code reads its hooks from ~/.claude/settings.json, which it rewrites
+# itself (/config, /model, "always allow") and which holds this machine's own
+# settings besides -- so it is a hook target, not a link. But it is JSON: no
+# include, and no comment to hang a block on.
+#
+# So the block is our hook entries themselves. Each command gets a trailing
+# `# omarchy-dotfiles`, a shell comment to the shell that runs it and a marker
+# to us. install.sh drops every marked entry and appends the payload's afresh,
+# as ensure_hook drops and re-appends a block, and doctor.sh compares the file
+# with what that would write. Entries nobody marked are never touched.
+#
+# The payload is the value of the "hooks" key, with {dotfiles} in a command
+# standing for this checkout's path.
+
+claude_mark() { printf '# %s' "$MARKER"; }
+
+# The settings file with our entries replaced by the payload's, on stdout. A
+# missing or empty file counts as {}. Fails, printing jq's complaint, when
+# the file is not a JSON object.
+claude_hooks_merged() {
+  local target=$1 abs=$2
+  { if [[ -s $target ]]; then cat "$target"; else echo '{}'; fi; } |
+  jq --arg dir "$DOTFILES" --arg mark "$(claude_mark)" \
+     --slurpfile payload "$abs" '
+    def ours: type == "object"
+      and (.command | type == "string" and endswith($mark));
+    def has_ours: type == "object"
+      and (.hooks | type == "array" and any(.[]; ours));
+
+    if type != "object" then error("not a JSON object") else . end
+    | if (.hooks // {} | type) != "object"
+      then error("its hooks key is not an object") else . end
+    | ($payload[0] | map_values(map(.hooks |= map(
+        .command = (.command | split("{dotfiles}") | join($dir)) + " " + $mark
+      )))) as $add
+    | .hooks = (
+        .hooks // {}
+        # Drop our entries, then any matcher group or event they leave empty
+        # -- but only one that held ours, never an empty one of somebody else.
+        | with_entries(
+            if (.value | type == "array" and any(.[]; has_ours)) then
+              .value |= map(
+                if has_ours then
+                  .hooks |= map(select(ours | not)) | select(.hooks != [])
+                else . end)
+              | select(.value != [])
+            else . end)
+        | reduce ($add | to_entries[]) as $e
+            (.; .[$e.key] = (.[$e.key] // []) + $e.value)
+      )'
+}
+
+# The commands of the marked entries already in the file, one per line.
+claude_hooks_ours() {
+  jq -r --arg mark "$(claude_mark)" '
+    [.hooks // {} | .[]?[]?.hooks[]?.command?
+     | select(type == "string" and endswith($mark))] | unique[]' "$1" 2>/dev/null
+}
+
+# True when the file already holds exactly what install.sh would write.
+claude_hooks_current() {
+  local target=$1 abs=$2 merged
+  [[ -f $target ]] || return 1
+  merged=$(claude_hooks_merged "$target" "$abs" 2>/dev/null) || return 1
+  [[ $(jq -S . "$target") == "$(jq -S . <<< "$merged")" ]]
 }
 
 # ── FONTS ─────────────────────────────────────────────────────────────

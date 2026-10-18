@@ -1,0 +1,25 @@
+{
+  "Stop": [
+    {
+      "hooks": [
+        { "type": "command", "command": "\"{dotfiles}/claude/ding\"" }
+      ]
+    }
+  ],
+  "PreToolUse": [
+    {
+      "matcher": "AskUserQuestion|ExitPlanMode",
+      "hooks": [
+        { "type": "command", "command": "\"{dotfiles}/claude/ding\"" }
+      ]
+    }
+  ],
+  "Notification": [
+    {
+      "matcher": "permission_prompt|elicitation_dialog|elicitation_url_dialog",
+      "hooks": [
+        { "type": "command", "command": "\"{dotfiles}/claude/ding\"" }
+      ]
+    }
+  ]
+}

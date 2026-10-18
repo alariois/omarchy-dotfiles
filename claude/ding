@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#
+# Claude Code's ding: played when it finishes a turn, and when it stops to ask
+# you something. claude/hooks.json says when; setup/install.sh merges that into
+# ~/.claude/settings.json.
+#
+# The sound is sound-theme-freedesktop's, which a stock Omarchy has by way of
+# gnome-disk-utility -> libcanberra. pw-play is PipeWire's own player, from
+# pipewire-audio, which the pipewire-pulse on Omarchy's list depends on.
+
+sound=/usr/share/sounds/freedesktop/stereo/complete.oga
+
+# Claude Code hands every hook its event as JSON on stdin. Nothing here needs
+# it, but read it anyway, so a long one never meets a closed pipe. Not when
+# run by hand from a terminal, where cat would sit waiting for input.
+[[ -t 0 ]] || cat > /dev/null
+
+# Detached, so the hook returns at once and Claude never waits on the sound.
+setsid -f pw-play "$sound" > /dev/null 2>&1 < /dev/null

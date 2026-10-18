@@ -46,6 +46,14 @@ TOML rejects a key set twice — so it may only add settings stock leaves unset.
 `install.sh` refuses to write a file that would not parse as exactly stock plus
 our settings, which is what a leftover hand-edited copy of one of them causes.
 
+**JSON is the other exception** (`claude` style, used for Claude Code's
+`~/.claude/settings.json`). JSON has neither an include nor a comment to hang a
+block on, so the block is our hook entries themselves: each command ends in a
+`# omarchy-dotfiles` shell comment, which the shell running it ignores and
+`install.sh` uses to find them again. A run drops every marked entry and merges
+`claude/hooks.json` in afresh; entries nobody marked are never touched, and nor
+is the rest of the file.
+
 ### `LINKS` — files Omarchy never writes
 
 The live path becomes a symlink into this repo, so no drift is possible: the
@@ -156,6 +164,8 @@ hypr/looknfeel.lua                        gaps and corner rounding (hooked)
 hypr/hyprland.lua                         window rules: Slack on workspace 5 (hooked)
 foot/foot.ini                             terminal font (hooked, `ini` style)
 herdr/config.toml                         herdr's notification setup (hooked, `toml` style)
+claude/hooks.json                         when Claude Code dings (hooked, `claude` style)
+claude/ding                               the ding itself
 xkb/                                      custom xkb options behind it (linked)
 nvim/plugins/*.lua                        added LazyVim plugin specs (linked)
 nvim-chad/                                standalone nvim config (linked wholesale)
@@ -1205,4 +1215,20 @@ It was only ever a snapshot of the default.
 The `hypr-nav` source moved from `~/.local/src/hypr-nav` (where `main` tracked
 it as a live path) into `hypr-nav/` in the repo. Nothing needs to live under
 `~/.local/src` — the repo *is* the source directory, and only the built binary
+**Claude Code.** A ding when Claude Code finishes a turn, and when it stops to
+ask you something: a question (`AskUserQuestion`), a plan to approve
+(`ExitPlanMode`), or a permission prompt. `claude/hooks.json` says when, as
+`Stop`, `PreToolUse` and `Notification` hooks; `claude/ding` plays
+sound-theme-freedesktop's `complete.oga` through `pw-play`, detached, so
+Claude never waits on it. Change the sound there.
+
+The permission-prompt ding comes about six seconds late: Claude Code only
+raises that notification once a prompt has sat unanswered that long, so one
+you answer at once stays quiet. `idle_prompt` is deliberately not matched -- it
+fires a minute after a turn ends, which would ding a second time for a turn
+that already dinged.
+
+Claude Code watches its settings file, so `install.sh` takes effect in running
+sessions too, without a restart. Check them with `/hooks`.
+
 is installed out of it.

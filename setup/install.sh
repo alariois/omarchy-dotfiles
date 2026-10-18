@@ -102,6 +102,12 @@ ensure_hook() {
     return 1
   fi
 
+  # JSON: no block to write -- see the claude hooks section of lib.sh.
+  if [[ $style == claude ]]; then
+    ensure_claude_hooks "$target" "$payload"
+    return 0
+  fi
+
   case $style in
     sh)   open="# >>> $MARKER >>>";  close="# <<< $MARKER <<<"
           include="source \"$abs\"" ;;
@@ -182,6 +188,45 @@ ensure_hook() {
   rm -f "$tmp"
   note_if_hypr "$target"
   changed "  hooked   ${target/#"$HOME"/\~}  ->  $payload"
+  repaired=$((repaired + 1))
+}
+
+# Claude Code's hooks, merged into its settings.json: our marked entries are
+# replaced by the payload's, and everything else is left as it was. See the
+# claude hooks section of lib.sh.
+ensure_claude_hooks() {
+  local target=$1 payload=$2
+  local shown=${target/#"$HOME"/\~} tmp err
+
+  # jq is on Omarchy's base list, so this is for a machine that lost it; the
+  # Packages pass puts it back, and the next run hooks.
+  if ! command -v jq >/dev/null 2>&1; then
+    changed "  no jq    $shown  ->  not hooked yet; re-run once jq is installed"
+    warnings=$((warnings + 1))
+    return 0
+  fi
+
+  if claude_hooks_current "$target" "$DOTFILES/$payload"; then
+    say "  ok       $shown"
+    return 0
+  fi
+
+  tmp=$(mktemp)
+  if ! err=$(claude_hooks_merged "$target" "$DOTFILES/$payload" 2>&1 > "$tmp"); then
+    changed "  CONFLICT $shown   -> cannot merge $payload into it:"
+    changed "             $err"
+    changed "           Claude Code cannot read it either; fix it, then re-run"
+    conflicts=$((conflicts + 1))
+    rm -f "$tmp"
+    return 0
+  fi
+
+  # cp, never mv, as in ensure_hook: a settings.json that is a symlink into
+  # somebody's other dotfiles stays one.
+  mkdir -p "$(dirname "$target")"
+  cp -f "$tmp" "$target"
+  rm -f "$tmp"
+  changed "  hooked   $shown  ->  $payload"
   repaired=$((repaired + 1))
 }
 
