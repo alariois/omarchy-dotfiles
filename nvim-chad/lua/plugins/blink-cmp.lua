@@ -1,3 +1,26 @@
+-- Whether accepting `item` starts placeholders of its own (a function's parameters)
+local function opens_placeholders(item)
+    local text = item.textEdit and item.textEdit.newText or item.insertText or ""
+    return item.insertTextFormat == vim.lsp.protocol.InsertTextFormat.Snippet and text:match("%${?[1-9]") ~= nil
+end
+
+-- <C-y>/<CR>: accept the selected (or first) item, then go on to the next
+-- parameter of the function being filled in. With no menu, just go on.
+local function accept_and_jump(cmp)
+    if cmp.is_visible() then
+        local item = cmp.get_selected_item() or cmp.get_items()[1]
+        return cmp.select_and_accept({
+            callback = function()
+                -- A function accepted into a parameter starts its own placeholders: stay on its first
+                if item ~= nil and not opens_placeholders(item) then
+                    cmp.snippet_forward()
+                end
+            end,
+        })
+    end
+    return cmp.snippet_forward()
+end
+
 return {
     {
         "saghen/blink.compat",
@@ -42,6 +65,20 @@ return {
             keymap = {
                 preset = "default",
                 ["<C-Z>"] = { "accept", "fallback" },
+                ["<C-y>"] = { accept_and_jump, "fallback" },
+                -- Enter acts like <C-y> in the <M-Space> list and while filling in
+                -- parameters; otherwise it stays a newline
+                ["<CR>"] = {
+                    function(cmp)
+                        local item = cmp.get_selected_item()
+                        if (cmp.is_visible() and item ~= nil and item.source_id == "clangd_fuzzy")
+                            or cmp.snippet_active({ direction = 1 })
+                        then
+                            return accept_and_jump(cmp)
+                        end
+                    end,
+                    "fallback",
+                },
                 -- C/C++: fetch everything clangd has for the word's first letter and
                 -- fuzzy-filter it locally, so `xkb_new` finds `xkb_context_new`
                 ["<M-Space>"] = {

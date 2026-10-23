@@ -201,6 +201,14 @@ local function open_picker(items, client, win, row, word_start, cursor, word)
         resume_insert(win, row, cursor)
     end
 
+    local function choose(selected)
+        local item = item_of(selected[1])
+        if item == nil then
+            return cancel()
+        end
+        accept(item, client, win, row, word_start, cursor)
+    end
+
     require("fzf-lua").fzf_exec(entries, {
         prompt = "clangd> ",
         query = word,
@@ -220,13 +228,8 @@ local function open_picker(items, client, win, row, word_start, cursor, word)
             return item ~= nil and preview_lines(item) or ""
         end,
         actions = {
-            enter = function(selected)
-                local item = item_of(selected[1])
-                if item == nil then
-                    return cancel()
-                end
-                accept(item, client, win, row, word_start, cursor)
-            end,
+            enter = choose,
+            ["ctrl-y"] = choose,
             esc = cancel,
             ["ctrl-c"] = cancel,
         },
