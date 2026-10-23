@@ -42,6 +42,23 @@ return {
             keymap = {
                 preset = "default",
                 ["<C-Z>"] = { "accept", "fallback" },
+                -- C/C++: fetch everything clangd has for the word's first letter and
+                -- fuzzy-filter it locally, so `xkb_new` finds `xkb_context_new`
+                ["<M-Space>"] = {
+                    function(cmp)
+                        if require("config.clangd_fuzzy").available() then
+                            return cmp.show({ providers = { "clangd_fuzzy" } })
+                        end
+                        return cmp.show()
+                    end,
+                },
+                -- Same list in an fzf-lua picker, seeded with the word typed so far
+                ["<M-f>"] = {
+                    function()
+                        require("config.clangd_fuzzy").pick()
+                        return true
+                    end,
+                },
             },
 
             appearance = {
@@ -59,6 +76,16 @@ return {
             sources = {
                 default = { "lsp", "path", "snippets", "buffer", "emoji", "sql" },
                 providers = {
+                    -- Only shown through <M-Space>, so it's not in `default`
+                    clangd_fuzzy = {
+                        name = "clangd",
+                        module = "blink.cmp.sources.lsp",
+                        override = {
+                            get_completions = function(...)
+                                return require("config.clangd_fuzzy").get_completions(...)
+                            end,
+                        },
+                    },
                     emoji = {
                         module = "blink-emoji",
                         name = "Emoji",
