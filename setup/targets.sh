@@ -430,4 +430,5 @@ FONTS=(
 WEBAPPS=(
   "Messenger|https://www.facebook.com/messages|https://www.google.com/s2/favicons?domain=messenger.com&sz=256"
   "Google Calendar|https://calendar.google.com/calendar|https://www.gstatic.com/images/branding/product/1x/calendar_512dp.png"
+  "Monkeytype|https://monkeytype.com/|https://monkeytype.com/images/icons/general_icon_x512.png"
 )

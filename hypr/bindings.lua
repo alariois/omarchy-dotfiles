@@ -219,6 +219,18 @@ hl.unbind("SUPER + SHIFT + C")
 o.bind("SUPER + SHIFT + C", "Google Calendar",
   "omarchy-launch-or-focus-webapp 'chrome-calendar\\.google\\.com__calendar' 'https://calendar.google.com/calendar'")
 
+-- SUPER + SHIFT + ALT + T: Monkeytype, T for type.
+--
+-- No unbind: the chord is free in stock Omarchy. T carries SUPER ("Toggle
+-- window floating/tiling"), SUPER + CTRL ("Activity") and SUPER + CTRL + ALT
+-- ("Show time"), but not these modifiers, and nothing reaches T (code 28)
+-- through a keycode-spelled bind.
+--
+-- Class-matched like Calendar above. A bare "Monkeytype" would also focus a
+-- browser tab with the site open, since its title says Monkeytype too.
+o.bind("SUPER + SHIFT + ALT + T", "Monkeytype",
+  "omarchy-launch-or-focus-webapp 'chrome-monkeytype\\.com__' 'https://monkeytype.com/'")
+
 -- YouTube (SUPER + SHIFT + Y, Omarchy's own binding) opens on workspace 6.
 --
 -- No bind or unbind here: Omarchy's default already launches and focuses the
