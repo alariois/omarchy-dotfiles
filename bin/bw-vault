@@ -236,47 +236,87 @@ secret=$(jq -r '(if .type == 1 then .login.password elif .type == 2 then .notes
                  elif .type == 3 then .card.number elif .type == 5 then .sshKey.privateKey
                  else null end) // ""' <<<"$item")
 
+site=$(jq -r 'if .type == 1 then (.login.uris // [])[0].uri // "" | sub("^[a-z]+://"; "") | sub("/.*$"; "") else "" end' <<<"$item")
+
 # Into the clipboard, out again after a while -- but only if it is still
 # there: anything copied since is left alone.
 copy_out() {
-  local what=$1 value=$2
+  local value=$1
   printf '%s' "$value" | wl-copy --sensitive
   ( sleep "$CLEAR_AFTER"
     [[ $(wl-paste --no-newline 2>/dev/null) == "$value" ]] && wl-copy --clear
   ) >/dev/null 2>&1 &
   disown
-  echo "$name: $what copied, cleared in ${CLEAR_AFTER}s" >&2
+}
+copied="copied, cleared in ${CLEAR_AFTER}s"
+
+# The summary: one labelled row each, the labels dimmed on a terminal.
+dim="" off=""
+[[ -t 1 ]] && dim=$'\e[2m' off=$'\e[0m'
+row() { printf '%s%-9s%s %s\n' "$dim" "$1" "$off" "$2"; }
+
+# With -u or -p, stdout is the value alone, for pipes and $(...); which item
+# it came from goes to the terminal, when there is one.
+about() {
+  [[ -t 2 ]] || return 0
+  echo "$name${site:+ · $site}${1:+: $1}" >&2
 }
 
 case $want in
   user)
     [[ -n $user ]] || die "$name has no username"
-    if $copy; then copy_out username "$user"; else printf '%s\n' "$user"; fi ;;
+    if $copy; then
+      copy_out "$user"
+      about "username $copied"
+    else
+      about
+      printf '%s\n' "$user"
+    fi ;;
   secret)
     [[ -n $secret ]] || die "$name has nothing to show for -p"
-    if $copy; then copy_out "$( [[ $type == 2 ]] && echo note || echo password )" "$secret"; else printf '%s\n' "$secret"; fi ;;
+    if $copy; then
+      copy_out "$secret"
+      about "$( [[ $type == 2 ]] && echo note || echo password ) $copied"
+    else
+      about
+      printf '%s\n' "$secret"
+    fi ;;
   both)
+    row item "$name"
+    [[ -z $site ]] || row site "$site"
     case $type in
       1)
-        [[ -z $user ]] || printf 'username  %s\n' "$user"
+        [[ -z $user ]] || row username "$user"
         if [[ -z $secret ]]; then
-          echo "$name has no password" >&2
+          row password "(none)"
         elif $copy; then
-          copy_out password "$secret"
+          copy_out "$secret"
+          row password "$copied"
         else
-          printf 'password  %s\n' "$secret"
+          row password "$secret"
         fi ;;
       3)
+        [[ -z $user ]] || row holder "$user"
         if $copy; then
-          [[ -z $user ]] || printf 'holder    %s\n' "$user"
-          copy_out "card number" "$secret"
+          copy_out "$secret"
+          row number "$copied"
         else
-          jq -r '.card | [["holder", .cardholderName], ["number", .number],
-                          ["expires", (if .expMonth then "\(.expMonth)/\(.expYear)" else null end)], ["code", .code]]
-                       | .[] | select(.[1] != null and .[1] != "") | "\(.[0] | . + " " * (10 - length))\(.[1])"' <<<"$item"
+          [[ -z $secret ]] || row number "$secret"
+          expires=$(jq -r '.card | if .expMonth then "\(.expMonth)/\(.expYear)" else "" end' <<<"$item")
+          code=$(jq -r '.card.code // ""' <<<"$item")
+          [[ -z $expires ]] || row expires "$expires"
+          [[ -z $code ]] || row code "$code"
         fi ;;
       *)
+        # A note's text, or a key, as it is -- below the summary, unlabelled,
+        # so that it copies out whole.
         [[ -n $secret ]] || die "$name has nothing to show"
-        if $copy; then copy_out "$( [[ $type == 2 ]] && echo note || echo key )" "$secret"; else printf '%s\n' "$secret"; fi ;;
+        if $copy; then
+          copy_out "$secret"
+          row "$( [[ $type == 2 ]] && echo note || echo key )" "$copied"
+        else
+          echo
+          printf '%s\n' "$secret"
+        fi ;;
     esac ;;
 esac
