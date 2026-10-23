@@ -231,6 +231,11 @@ o.bind("SUPER + SHIFT + C", "Google Calendar",
 o.bind("SUPER + SHIFT + ALT + T", "Monkeytype",
   "omarchy-launch-or-focus-webapp 'chrome-monkeytype\\.com__' 'https://monkeytype.com/'")
 
+-- It opens on workspace 6, beside YouTube: both are breaks, kept off the
+-- workspaces you work on. Not "6 silent", for the reason given in the WhatsApp
+-- block: pressing the key should take you there.
+o.window("^chrome-monkeytype\\.com__.*$", { workspace = "6" })
+
 -- YouTube (SUPER + SHIFT + Y, Omarchy's own binding) opens on workspace 6.
 --
 -- No bind or unbind here: Omarchy's default already launches and focuses the
