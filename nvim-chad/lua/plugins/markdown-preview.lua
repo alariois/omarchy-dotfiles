@@ -10,7 +10,12 @@ return {
     cmd = { "MarkdownPreview", "MarkdownPreviewStop", "MarkdownPreviewToggle" },
     build = function()
         local dir = require("lazy.core.config").plugins["markdown-preview.nvim"].dir
-        vim.fn.system({ "npm", "--prefix", dir .. "/app", "install", "--no-audit", "--no-fund" })
+        vim.fn.system({ "npm", "--prefix", dir .. "/app", "install", "--no-save", "--no-audit", "--no-fund" })
+        -- npm installs the versions upstream's yarn.lock pins, but rewrites the
+        -- file as it goes, even with --no-save -- and Lazy will not update a
+        -- plugin with local changes. Put it back. (--no-package-lock would
+        -- leave it alone, but by ignoring it, pins and all.)
+        vim.fn.system({ "git", "-C", dir, "checkout", "--", "app/yarn.lock" })
         -- Make sure a previously downloaded (crashing) binary can't win.
         for _, bin in ipairs(vim.fn.glob(dir .. "/app/bin/markdown-preview-*", false, true)) do
             if not bin:match("%.bak$") then
