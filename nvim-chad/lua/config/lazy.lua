@@ -25,6 +25,7 @@ vim.g.loaded_perl_provider = 0
 
     
 require("config.options")
+require("config.c_formatting")
 
 -- Setup lazy.nvim
 require("lazy").setup({
