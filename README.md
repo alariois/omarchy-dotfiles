@@ -1201,20 +1201,6 @@ IMAP cannot express). It needs a Google Cloud OAuth client, so it is not set up
 here; the config is structured so a `[accounts.gmail.gmail]` block can be added
 beside the IMAP one rather than replacing it.
 
-## History
-
-The `main` branch holds the previous Omarchy 3.x-era snapshot: whole-file
-copies of hypr `.conf` files, waybar, and mako, none of which 4.x uses.
-
-Everything worth carrying is now ported: the bash, tmux, nvim, and nvim-chad
-configs, hypr-nav, and XCompose. Nothing is left waiting on `main`.
-
-`starship.toml` needs no port: `main`'s copy is byte-identical to 4.x stock.
-It was only ever a snapshot of the default.
-
-The `hypr-nav` source moved from `~/.local/src/hypr-nav` (where `main` tracked
-it as a live path) into `hypr-nav/` in the repo. Nothing needs to live under
-`~/.local/src` — the repo *is* the source directory, and only the built binary
 **Claude Code.** A ding when Claude Code finishes a turn, and when it stops to
 ask you something: a question (`AskUserQuestion`), a plan to approve
 (`ExitPlanMode`), or a permission prompt. `claude/hooks.json` says when, as
@@ -1231,4 +1217,18 @@ that already dinged.
 Claude Code watches its settings file, so `install.sh` takes effect in running
 sessions too, without a restart. Check them with `/hooks`.
 
+## History
+
+The `main` branch holds the previous Omarchy 3.x-era snapshot: whole-file
+copies of hypr `.conf` files, waybar, and mako, none of which 4.x uses.
+
+Everything worth carrying is now ported: the bash, tmux, nvim, and nvim-chad
+configs, hypr-nav, and XCompose. Nothing is left waiting on `main`.
+
+`starship.toml` needs no port: `main`'s copy is byte-identical to 4.x stock.
+It was only ever a snapshot of the default.
+
+The `hypr-nav` source moved from `~/.local/src/hypr-nav` (where `main` tracked
+it as a live path) into `hypr-nav/` in the repo. Nothing needs to live under
+`~/.local/src` — the repo *is* the source directory, and only the built binary
 is installed out of it.
