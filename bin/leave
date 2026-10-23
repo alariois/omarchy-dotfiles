@@ -80,8 +80,10 @@ DEFAULT_INTERCHANGE = "Balti jaam"
 # the station resolves both; naming one stop silently loses half the trains.
 DEFAULT_TRAIN_FROM = "Tallinn"
 DEFAULT_TRAIN_TO = "Aegviidu"
-DEFAULT_WALK = 10
-DEFAULT_TRANSFER = 3
+# Padded past the bare walking time on purpose. Buses run early and late
+# off their predictions, and 10/3 missed real ones; these absorb that slack.
+DEFAULT_WALK = 15
+DEFAULT_TRANSFER = 7
 
 # stops.txt is 200 KB and changes a few times a year. A day is plenty, and it
 # keeps a tool that may be bound to a key from fetching it on every press.
