@@ -247,6 +247,8 @@ bwu get                 # pick with fzf; print the username and password
 bwu get github          # the same, the search started with "github"
 bwu get -u   / -p       # the username alone / the password alone
 bwu get -c              # copy the password instead (-c -u: the username)
+bwu get -f [name [new]] # an attached file, saved -- or - for stdout
+bwu get --force -f ...  # the same, replacing a file that is there
 bwu update              # sync with the server, and cache the vault anew
 bwu --update get        # the same, then pick
 bwu lock                # lock the vault everywhere, and delete the cache
@@ -267,6 +269,18 @@ is found by its title and its text is never searched. A note prints its text,
 a card its number, expiry and code. A copy is marked sensitive for clipboard
 managers, and cleared after 45 seconds unless something else has been copied
 since.
+
+`-f` fetches an attached file instead. Only items with files are listed, then
+the item's files if it has several; a name after `-f` narrows both to the
+files matching it, and one match is taken at once. The file is saved under its
+own name in the current directory -- or as the name given after it, into a
+directory given, or to stdout for `-` -- readable by you alone. Tab marks
+several files, ctrl-a all of them; they go here or into the directory given,
+and are saved all or none: if one fails to download, or one is there already,
+nothing is saved. `--force` lets them replace files that are there.
+Everything after `-f` belongs to it: options go before it, and `--` before a
+name that starts with `-`. The list comes from the cache; the file itself from
+the server, so this needs the network.
 
 Two things it deliberately does not do, because it cannot:
 

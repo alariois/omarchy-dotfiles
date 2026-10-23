@@ -220,7 +220,7 @@ __bwu_vault() {
   fi
   return "$rc"
 }
-complete -W 'get update lock --update --username --password --copy --help' bwu
+complete -W 'get update lock --update --username --password --copy --file --force --help' bwu
 bw() {
   local rc=0
   if [[ -n ${__bw_session-} ]]; then

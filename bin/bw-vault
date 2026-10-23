@@ -8,6 +8,7 @@
 #   bwu get -u | -p        # the username alone, or the password alone
 #   bwu get -c             # copy instead of print: the password, or with -u
 #                          # the username -- the username is printed alongside
+#   bwu get -f [name [new]]  # an item's attached file, saved -- see --help
 #   bwu update             # sync with the server, and cache the vault anew
 #   bwu --update get       # the same, then pick
 #
@@ -34,6 +35,12 @@
 # A copy goes to the clipboard marked sensitive, which clipboard managers
 # that honour the hint keep out of their history, and is cleared after 45
 # seconds unless something else has been copied over it.
+#
+# -f is for attached files. The cache knows which items have files and what
+# they are called, so the picking is as quick as ever; the file itself comes
+# from the server, decrypted by bw. It is written readable by you alone --
+# attachments tend to be keys -- and over a file that is there only with
+# --force. Several files can be picked at once; they are saved all, or none.
 
 set -euo pipefail
 
@@ -62,11 +69,30 @@ ${b}Options for get${r}
   text             start the search with it; one match is picked at once
   Short options combine: -cp, -cu.
 
+${b}Attached files${r}
+  -f, --file [name [new-name]]
+                   an attached file instead: only items with files are listed,
+                   then the item's files, if it has more than one. name narrows
+                   both to files matching it; one match is taken at once. The
+                   file is saved under its own name here, or as new-name -- a
+                   directory, or - for stdout. Tab marks several files, ctrl-a
+                   all; several go here, or into the directory given.
+                   Everything after -f is its own: options go before it, and
+                   -- before a name that starts with -.
+      --force      let a saved file replace one that is there; without it,
+                   nothing is saved when any of the files is there already
+
 ${b}Examples${r}
   bwu get github            username and password for GitHub
   bwu get -cp aws           copy the AWS password
   bwu get -u gitlab         just the GitLab username
   bwu get "home wifi"       a note's text
+  bwu get -f                pick an item, then one of its files
+  bwu get github -f key ~/.ssh/github
+                            GitHub's file matching "key", saved as ~/.ssh/github
+  bwu get -f cert - | openssl x509 -noout -dates
+  bwu get --force -f "" ~/.ssh/
+                            pick files with Tab, replace them in ~/.ssh
 
 ${b}How it works${r}
   The first bwu asks for your master password; each terminal after that
@@ -99,12 +125,35 @@ if [[ $sub == forget ]]; then
 fi
 
 want=both copy=false query="" update=false
+file_mode=false file_name="" file_out="" force=false
 while (( $# )); do
   case $1 in
+    -f|--file)
+      # Everything after -f is its own: [--] [name [new-name]].
+      file_mode=true
+      shift
+      ended=false
+      rest=()
+      while (( $# )); do
+        if ! $ended && [[ $1 == -- ]]; then
+          ended=true
+          shift
+          continue
+        fi
+        if ! $ended && [[ $1 == -?* ]]; then
+          die "after -f come only a file's name and a new name -- options go before -f, and -- before a name that starts with -"
+        fi
+        rest+=("$1")
+        shift
+      done
+      (( ${#rest[@]} <= 2 )) || die "-f takes a file's name and a new name, and nothing more"
+      file_name=${rest[0]-}
+      file_out=${rest[1]-} ;;
     -u|--username) want=user; shift ;;
     -p|--password) want=secret; shift ;;
     -c|--copy)     copy=true; shift ;;
     --update)      update=true; shift ;;
+    --force)       force=true; shift ;;
     -[upc][upc]*)
       # -cp and the like: short options together.
       for (( i = 1; i < ${#1}; i++ )); do
@@ -120,8 +169,11 @@ while (( $# )); do
     *)             query+="${query:+ }$1"; shift ;;
   esac
 done
-[[ $sub == get || ( $want == both && $copy == false && -z $query ) ]] ||
+[[ $sub == get || ( $want == both && $copy == false && -z $query && $file_mode == false && $force == false ) ]] ||
   die "bwu update takes no options"
+! $file_mode || [[ $want == both && $copy == false ]] ||
+  die "-f cannot go with -u, -p or -c: a file is saved, not printed or copied"
+! $force || $file_mode || die "--force goes with -f: it lets a saved file replace one that is there"
 
 for tool in bw jq age age-keygen; do
   command -v "$tool" >/dev/null || die "$tool is not installed"
@@ -189,25 +241,46 @@ ago() {
 }
 cached=$(ago "$(jq '.cached' <<<"$data")")
 
+# Files: every attachment the cache knows of, one line each -- the item's id,
+# the file's id, its name and size. With a name after -f, only the files that
+# match it, as fzf would match them, and so only the items that have one.
+only=null
+if $file_mode; then
+  # The file comes from the server, with the session key: a stale key is
+  # better found now, before the picking, than after it.
+  bw unlock --check >/dev/null 2>&1 || exit 3
+  atts=$(jq -r '.items[] | .id as $i | (.attachments // [])[]
+                | [$i, .id, (.fileName // "file"), (.sizeName // "")] | @tsv' <<<"$data")
+  [[ -n $atts ]] || die "no item has a file attached"
+  if [[ -n $file_name ]]; then
+    atts=$(fzf --filter="$file_name" --delimiter=$'\t' --nth=3 <<<"$atts") ||
+      die "no attached file matches '$file_name'"
+  fi
+  only=$(cut -f1 <<<"$atts" | jq -R . | jq -sc 'unique')
+fi
+
 # One line per item: its id, hidden, then the name, username and website,
 # padded into columns, and the kind and folder, dimmed and not searched.
 # fzf shows a tab as one space here (--tabstop=1), so the padding lines up.
-list=$(jq -r '
+list=$(jq -r --argjson only "$only" '
   (INDEX((.folders // [])[]; .id // "") | map_values(.name)) as $f
   | def kind: {"1": "login", "2": "note", "3": "card", "4": "identity", "5": "ssh key"}[.type | tostring] // "item";
     def site: (.login.uris // [])[0].uri // "" | sub("^[a-z]+://"; "") | sub("/.*$"; "");
     def cut($n): if length > $n then .[0:$n - 1] + "…" else . end;
     def pad($n): . + (" " * ([$n - length, 0] | max));
     .items
+  | map(select($only == null or (.id as $i | any($only[]; . == $i))))
   | map({id, name: (.name // "" | cut(40)),
          user: (if .type == 1 then .login.username // "" else "" end | cut(32)),
-         site: (if .type == 1 then site else "" end | cut(32)),
+         site: (if $only != null then (.attachments // []) | map(.fileName) | join(", ")
+                elif .type == 1 then site else "" end | cut(40)),
          tag: (kind + (($f[.folderId // ""] // "") | if . != "" then " · " + . else "" end))})
   | sort_by(.name | ascii_downcase)
   | (map(.name | length) + [4] | max) as $wn
   | (map(.user | length) + [8] | max) as $wu
   | (map(.site | length) + [4] | max) as $ws
-  | (["", ("NAME" | pad($wn)), ("USERNAME" | pad($wu)), ("SITE" | pad($ws)), "TYPE"] | join("\t")),
+  | (["", ("NAME" | pad($wn)), ("USERNAME" | pad($wu)),
+     ((if $only != null then "FILES" else "SITE" end) | pad($ws)), "TYPE"] | join("\t")),
     (.[] | [.id, (.name | pad($wn)), (.user | pad($wu)), (.site | pad($ws)), "\u001b[2m\(.tag)\u001b[0m"] | join("\t"))
 ' <<<"$data")
 (( $(wc -l <<<"$list") > 1 )) || die "the vault is empty"
@@ -230,6 +303,93 @@ unset data list
 [[ -n $item ]] || die "the item picked is no longer in the list"
 
 name=$(jq -r '.name' <<<"$item")
+
+if $file_mode; then
+  # This item's files -- those matching the name, when there is one -- to
+  # pick from, unless there is just the one. Tab marks several, ctrl-a all.
+  mine=$(awk -F'\t' -v id="$id" '$1 == id' <<<"$atts")
+  width=$(cut -f3 <<<"$mine" | awk '{ if (length > m) m = length } END { print (m > 4 ? m : 4) }')
+  rc=0
+  picked=$( { printf '\t%-*s\t%s\n' "$width" FILE SIZE
+              awk -F'\t' -v w="$width" '{ printf "%s\t%-" w "s\t%s\n", $2, $3, $4 }' <<<"$mine"; } |
+            fzf --multi --bind=ctrl-a:select-all,ctrl-d:deselect-all \
+                --delimiter=$'\t' --with-nth=2.. --nth=1 --tabstop=1 --header-lines=1 \
+                --header="files of $name -- Tab marks several, ctrl-a all" \
+                --layout=reverse --height=40% --prompt='file> ' \
+                --query="$file_name" --select-1 --exit-0 ) || rc=$?
+  case $rc in
+    0)   ;;
+    1)   die "no file of $name matches '$file_name'" ;;
+    130) exit 130 ;;
+    *)   die "fzf failed" ;;
+  esac
+  mapfile -t att_ids < <(cut -f1 <<<"$picked")
+  n=${#att_ids[@]}
+  field() { awk -F'\t' -v a="$1" -v f="$2" '$2 == a { print $f }' <<<"$mine"; }
+
+  if [[ $file_out == - ]]; then
+    (( n == 1 )) || die "$n files cannot all go to stdout -- pick one, or give a directory"
+    bw get attachment "${att_ids[0]}" --itemid "$id" --raw || die "could not download $(field "${att_ids[0]}" 3)"
+    exit 0
+  fi
+  if (( n > 1 )) && [[ -n $file_out && ! -d $file_out ]]; then
+    die "$n files go into a directory -- give one, or no name for this one"
+  fi
+
+  # Where each goes: under its own name -- without any directory a name could
+  # smuggle in -- here or in the directory given, or as the one name given.
+  files=() sizes=() targets=()
+  for att in "${att_ids[@]}"; do
+    file=$(field "$att" 3)
+    own=${file##*/}
+    [[ -n $own && $own != . && $own != .. ]] || own=attachment
+    if [[ -z $file_out ]]; then
+      target=$own
+    elif [[ -d $file_out ]]; then
+      target=${file_out%/}/$own
+    else
+      target=$file_out
+    fi
+    files+=("$file")
+    sizes+=("$(field "$att" 4)")
+    targets+=("$target")
+  done
+
+  # Every target checked before anything is fetched: the set is saved whole,
+  # or not at all.
+  dup=$(printf '%s\n' "${targets[@]}" | sort | uniq -d | head -n 1)
+  [[ -z $dup ]] || die "two of the files would both be saved as $dup -- fetch them one at a time, with a name each"
+  for target in "${targets[@]}"; do
+    dir=$(dirname -- "$target")
+    [[ -d $dir ]] || die "there is no directory $dir"
+    [[ ! -d $target ]] || die "$target is a directory"
+    if ! $force && [[ -e $target || -L $target ]]; then
+      die "$target is there already -- --force replaces it, or give another name"
+    fi
+  done
+
+  # Each fetched beside its target, readable by you alone, and all of them
+  # before any is moved into place: a download that fails leaves nothing.
+  tmps=()
+  trap '(( ${#tmps[@]} == 0 )) || rm -f -- "${tmps[@]}"' EXIT
+  for i in "${!att_ids[@]}"; do
+    dir=$(dirname -- "${targets[i]}")
+    tmp=$(umask 077 && mktemp "$dir/.bwu-get.XXXXXX") || die "cannot write in $dir"
+    tmps+=("$tmp")
+    bw get attachment "${att_ids[i]}" --itemid "$id" --raw > "$tmp" 2>/dev/null ||
+      die "could not download ${files[i]} -- is the server reachable? Nothing was saved"
+  done
+  for i in "${!att_ids[@]}"; do
+    if $force; then
+      mv -f -- "${tmps[i]}" "${targets[i]}" || die "could not replace ${targets[i]}"
+    elif ! mv -n -- "${tmps[i]}" "${targets[i]}" || [[ -e ${tmps[i]} ]]; then
+      die "${targets[i]} appeared meanwhile -- left as it was"
+    fi
+    echo "$name: ${files[i]} saved as ${targets[i]}${sizes[i]:+ (${sizes[i]})}" >&2
+  done
+  tmps=()
+  exit 0
+fi
 type=$(jq -r '.type' <<<"$item")
 user=$(jq -r '(if .type == 1 then .login.username elif .type == 3 then .card.cardholderName else null end) // ""' <<<"$item")
 secret=$(jq -r '(if .type == 1 then .login.password elif .type == 2 then .notes
