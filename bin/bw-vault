@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# bw-vault -- the Bitwarden vault behind `bwu get` and `bwu update`: an
-# encrypted cache of it, and an fzf picker over that cache.
+# bw-vault -- the Bitwarden vault behind `bwu get`, `put`, `add` and `update`:
+# an encrypted cache of it, and an fzf picker over that cache.
 #
 #   bwu get                # pick; print the username and password
 #   bwu get github         # the same, the search started with "github"
@@ -9,6 +9,8 @@
 #   bwu get -c             # copy instead of print: the password, or with -u
 #                          # the username -- the username is printed alongside
 #   bwu get -f [name [new]]  # an item's attached file, saved -- see --help
+#   bwu put -f file [name] # an item's attached file, replaced by this one
+#   bwu add -f file...     # files attached to an item
 #   bwu update             # sync with the server, and cache the vault anew
 #   bwu --update get       # the same, then pick
 #
@@ -41,6 +43,16 @@
 # from the server, decrypted by bw. It is written readable by you alone --
 # attachments tend to be keys -- and over a file that is there only with
 # --force. Several files can be picked at once; they are saved all, or none.
+#
+# put and add write files the other way. Bitwarden cannot change a file in
+# place, only add one and delete one, so a file is replaced by uploading the
+# new one first and deleting the old one after: a failure in between leaves
+# both, never neither. put replaces one file, which keeps its name in the
+# vault -- the one of the same name is taken at once, any other is picked,
+# never guessed, since it is the one deleted. add attaches files, and asks
+# before it overwrites one the item has by that name already. Both write
+# against the item as the server has it, after a sync, not as the cache
+# remembers it, and cache the vault anew after.
 
 set -euo pipefail
 
@@ -50,11 +62,14 @@ usage() {
   local b="" r=""
   [[ -t 1 ]] && b=$'\e[1m' r=$'\e[0m'
   cat <<EOF
-${b}bwu${r} -- Bitwarden in the terminal: unlock once, then find and copy secrets.
+${b}bwu${r} -- Bitwarden in the terminal: unlock once, then find, copy and store secrets.
 
 ${b}Usage${r}
   bwu                       unlock the vault in this terminal
   bwu get [options] [text]  pick an item with fzf, print its secret
+  bwu put [text] -f file [name]
+                            replace one of an item's files with file
+  bwu add [text] -f file... attach files to an item
   bwu update                sync with the server, cache the vault anew
   bwu --update get ...      the same, then pick
   bwu lock                  lock the vault everywhere, delete the cache
@@ -82,6 +97,20 @@ ${b}Attached files${r}
       --force      let a saved file replace one that is there; without it,
                    nothing is saved when any of the files is there already
 
+${b}Putting files in the vault${r}
+  put [text] -f file [name]
+                   only items with files are listed; file replaces the item's
+                   file of its own name, or of name, at once -- any other is
+                   picked. It keeps the old file's name in the vault, and the
+                   old one is deleted only once the new one is up.
+  add [text] -f file...
+                   any item is listed, and the files are attached to it. A
+                   file the item has by that name already: asked whether to
+                   overwrite it, and left out if not.
+      --force      with add: overwrite without asking
+      --update     sync and cache the vault anew before the list
+  Everything after -f is its own, as for get.
+
 ${b}Examples${r}
   bwu get github            username and password for GitHub
   bwu get -cp aws           copy the AWS password
@@ -93,6 +122,12 @@ ${b}Examples${r}
   bwu get -f cert - | openssl x509 -noout -dates
   bwu get --force -f "" ~/.ssh/
                             pick files with Tab, replace them in ~/.ssh
+  bwu put superspot -f envs/prod/env.yaml
+                            Superspot's env.yaml, replaced by this one
+  bwu put superspot -f prod.yaml env.yaml
+                            the same, from a file of another name
+  bwu add github -f ~/.ssh/github ~/.ssh/github.pub
+                            both attached to GitHub
 
 ${b}How it works${r}
   The first bwu asks for your master password; each terminal after that
@@ -114,9 +149,9 @@ CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-dotfiles/bw-vault.age
 sub=${1-}
 (( $# )) && shift
 case $sub in
-  get|update|forget) ;;
-  -h|--help|"")      usage 0 ;;
-  *)                 die "unknown command: $sub  (try --help)" ;;
+  get|put|add|update|forget) ;;
+  -h|--help|"")              usage 0 ;;
+  *)                         die "unknown command: $sub  (try --help)" ;;
 esac
 
 if [[ $sub == forget ]]; then
@@ -125,11 +160,12 @@ if [[ $sub == forget ]]; then
 fi
 
 want=both copy=false query="" update=false
-file_mode=false file_name="" file_out="" force=false
+file_mode=false file_name="" file_out="" force=false paths=()
 while (( $# )); do
   case $1 in
     -f|--file)
-      # Everything after -f is its own: [--] [name [new-name]].
+      # Everything after -f is its own: [--] and then, for get, [name
+      # [new-name]]; for put, file [name]; for add, file...
       file_mode=true
       shift
       ended=false
@@ -141,14 +177,29 @@ while (( $# )); do
           continue
         fi
         if ! $ended && [[ $1 == -?* ]]; then
-          die "after -f come only a file's name and a new name -- options go before -f, and -- before a name that starts with -"
+          [[ $sub != get ]] ||
+            die "after -f come only a file's name and a new name -- options go before -f, and -- before a name that starts with -"
+          die "after -f come only files -- options go before -f, and -- before a file whose name starts with -"
         fi
         rest+=("$1")
         shift
       done
-      (( ${#rest[@]} <= 2 )) || die "-f takes a file's name and a new name, and nothing more"
-      file_name=${rest[0]-}
-      file_out=${rest[1]-} ;;
+      case $sub in
+        get)
+          (( ${#rest[@]} <= 2 )) || die "-f takes a file's name and a new name, and nothing more"
+          file_name=${rest[0]-}
+          file_out=${rest[1]-} ;;
+        put)
+          (( ${#rest[@]} >= 1 )) || die "-f takes the file to put in the vault"
+          (( ${#rest[@]} <= 2 )) || die "-f takes a file and the name of the one it replaces, and nothing more -- bwu add takes several"
+          paths=("${rest[0]}")
+          file_name=${rest[1]-} ;;
+        add)
+          (( ${#rest[@]} >= 1 )) || die "-f takes the files to attach"
+          paths=("${rest[@]}") ;;
+        *)
+          die "bwu $sub takes no options" ;;
+      esac ;;
     -u|--username) want=user; shift ;;
     -p|--password) want=secret; shift ;;
     -c|--copy)     copy=true; shift ;;
@@ -169,8 +220,22 @@ while (( $# )); do
     *)             query+="${query:+ }$1"; shift ;;
   esac
 done
-[[ $sub == get || ( $want == both && $copy == false && -z $query && $file_mode == false && $force == false ) ]] ||
+[[ $sub != update || ( $want == both && $copy == false && -z $query && $file_mode == false && $force == false ) ]] ||
   die "bwu update takes no options"
+if [[ $sub == put || $sub == add ]]; then
+  $file_mode || die "bwu $sub takes files: bwu $sub [text] -f file  (try --help)"
+  [[ $want == both && $copy == false ]] || die "-u, -p and -c are for get -- bwu $sub puts files in the vault"
+  [[ $sub == add ]] || ! $force ||
+    die "--force is for add and for get -f -- bwu put replaces the file without it"
+
+  # The files, checked before anything is picked.
+  for path in "${paths[@]}"; do
+    [[ -f $path ]] || die "$path is not a file"
+    [[ -r $path ]] || die "$path cannot be read"
+  done
+  dup=$(for path in "${paths[@]}"; do printf '%s\n' "${path##*/}"; done | sort | uniq -d | head -n 1)
+  [[ -z $dup ]] || die "two of the files are called $dup -- the item would hold two files of one name"
+fi
 ! $file_mode || [[ $want == both && $copy == false ]] ||
   die "-f cannot go with -u, -p or -c: a file is saved, not printed or copied"
 ! $force || $file_mode || die "--force goes with -f: it lets a saved file replace one that is there"
@@ -243,15 +308,18 @@ cached=$(ago "$(jq '.cached' <<<"$data")")
 
 # Files: every attachment the cache knows of, one line each -- the item's id,
 # the file's id, its name and size. With a name after -f, only the files that
-# match it, as fzf would match them, and so only the items that have one.
+# match it, as fzf would match them, and so only the items that have one. add
+# lists every item: any of them can have a file attached.
 only=null
 if $file_mode; then
-  # The file comes from the server, with the session key: a stale key is
-  # better found now, before the picking, than after it.
+  # Files come from the server and go to it, with the session key: a stale
+  # key is better found now, before the picking, than after it.
   bw unlock --check >/dev/null 2>&1 || exit 3
+fi
+if $file_mode && [[ $sub != add ]]; then
   atts=$(jq -r '.items[] | .id as $i | (.attachments // [])[]
                 | [$i, .id, (.fileName // "file"), (.sizeName // "")] | @tsv' <<<"$data")
-  [[ -n $atts ]] || die "no item has a file attached"
+  [[ -n $atts ]] || die "no item has a file attached$([[ $sub == put ]] && echo " -- bwu add attaches one")"
   if [[ -n $file_name ]]; then
     atts=$(fzf --filter="$file_name" --delimiter=$'\t' --nth=3 <<<"$atts") ||
       die "no attached file matches '$file_name'"
@@ -303,6 +371,139 @@ unset data list
 [[ -n $item ]] || die "the item picked is no longer in the list"
 
 name=$(jq -r '.name' <<<"$item")
+
+if [[ $sub == put || $sub == add ]]; then
+  # The item as the server has it now, not as the cache remembers it: a file
+  # added or deleted elsewhere since counts, and bw writes against its own
+  # copy, which only a sync brings up to date.
+  if ! bw sync >/dev/null 2>&1; then
+    bw unlock --check >/dev/null 2>&1 || exit 3
+    die "could not reach the server -- nothing was changed"
+  fi
+  current=$(bw get item "$id" 2>/dev/null) || die "$name is no longer in the vault -- nothing was changed"
+  # Its files, one line each: the file's id, its name and size.
+  have=$(jq -r '(.attachments // [])[] | [.id, (.fileName // "file"), (.sizeName // "")] | @tsv' <<<"$current")
+  known=$(jq -c '[(.attachments // [])[].id]' <<<"$current")
+  unset current
+  named() { [[ -z $have ]] || awk -F'\t' -v n="$1" '$2 == n' <<<"$have"; }
+
+  # What goes up: each file, the name it is to have in the vault, and the
+  # files of the item it replaces -- their ids, and their size.
+  srcs=() as=() olds=() was=()
+  if [[ $sub == put ]]; then
+    [[ -n $have ]] || die "$name has no file attached any more -- bwu add attaches one"
+    pick=$(named "${file_name:-${paths[0]##*/}}")
+    if [[ -z $pick || $(wc -l <<<"$pick") -gt 1 ]]; then
+      # No file of that very name, or several: picked, never guessed, since
+      # the one picked is deleted -- so not even a lone file is taken at once.
+      width=$(cut -f2 <<<"$have" | awk '{ if (length > m) m = length } END { print (m > 4 ? m : 4) }')
+      rc=0
+      pick=$( { printf '\t%-*s\t%s\n' "$width" FILE SIZE
+                awk -F'\t' -v w="$width" '{ printf "%s\t%-" w "s\t%s\n", $1, $2, $3 }' <<<"$have"; } |
+              fzf --delimiter=$'\t' --with-nth=2.. --nth=1 --tabstop=1 --header-lines=1 \
+                  --header="files of $name -- the one ${paths[0]} replaces" \
+                  --layout=reverse --height=40% --prompt='replace> ' \
+                  --query="$file_name" ) || rc=$?
+      case $rc in
+        0)   ;;
+        1)   die "no file of $name picked -- nothing was changed" ;;
+        130) exit 130 ;;
+        *)   die "fzf failed" ;;
+      esac
+      pick=$(awk -F'\t' -v a="${pick%%$'\t'*}" '$1 == a' <<<"$have")
+    fi
+    srcs=("${paths[0]}")
+    as=("$(cut -f2 <<<"$pick")")
+    olds=("$(cut -f1 <<<"$pick")")
+    was=("$(cut -f3 <<<"$pick")")
+  else
+    # Every question before the first upload, so that no answer comes too
+    # late to change anything.
+    for path in "${paths[@]}"; do
+      file=${path##*/}
+      clash=$(named "$file")
+      if [[ -n $clash ]] && ! $force; then
+        [[ -t 0 ]] || die "$name has $file already -- --force overwrites it; nothing was changed"
+        n=$(wc -l <<<"$clash")
+        if (( n == 1 )); then
+          size=$(cut -f3 <<<"$clash")
+          read -r -p "$name has $file already${size:+ ($size)} -- overwrite it? [y/N] " reply || reply=""
+        else
+          read -r -p "$name has $n files called $file already -- overwrite them? [y/N] " reply || reply=""
+        fi
+        if [[ ${reply,,} != y && ${reply,,} != yes ]]; then
+          echo "$file left out" >&2
+          continue
+        fi
+      fi
+      srcs+=("$path")
+      as+=("$file")
+      olds+=("$(cut -f1 <<<"$clash" | paste -sd' ')")
+      was+=("$(cut -f3 <<<"$clash" | paste -sd'+')")
+    done
+    (( ${#srcs[@]} )) || { echo "$name: nothing added" >&2; exit 0; }
+  fi
+
+  # bw names a file in the vault after the file it is given, so one that is
+  # to have another name goes up as a copy by that name, made in a directory
+  # only you can read: attachments tend to be keys.
+  tmp=$(umask 077 && mktemp -d "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/bwu-put.XXXXXX") ||
+    die "cannot make a private directory to upload from -- nothing was changed"
+  trap 'rm -rf -- "$tmp"' EXIT
+  rc=0 wrote=false
+  for i in "${!srcs[@]}"; do
+    src=${srcs[i]}
+    if [[ ${src##*/} != "${as[i]}" ]]; then
+      if ! { mkdir -- "$tmp/$i" && cp -- "$src" "$tmp/$i/${as[i]}"; }; then
+        echo "bwu: could not copy $src to upload it as ${as[i]} -- nothing was changed" >&2
+        rc=1
+        break
+      fi
+      src=$tmp/$i/${as[i]}
+    fi
+
+    # The new file up first, the old one deleted after: a failure in between
+    # leaves both, never neither. bw answers with the whole item, secrets
+    # included -- kept here for the new file's size, and never shown.
+    if ! out=$(bw create attachment --file "$src" --itemid "$id" --nointeraction 2>"$tmp/err"); then
+      err=$(<"$tmp/err")
+      echo "bwu: could not upload ${srcs[i]}: ${err:-bw gave no reason}" >&2
+      (( i + 1 == ${#srcs[@]} )) || echo "bwu: not uploaded either: ${srcs[*]:i+1}" >&2
+      rc=1
+      break
+    fi
+    wrote=true
+    size=$(jq -r --argjson known "$known" --arg n "${as[i]}" '
+      [(.attachments // [])[] | select(.fileName == $n and (.id as $i | any($known[]; . == $i) | not))]
+      | last | .sizeName // ""' <<<"$out")
+    known=$(jq -c '[(.attachments // [])[].id]' <<<"$out")
+    unset out
+
+    err=""
+    for old in ${olds[i]}; do
+      bw delete attachment "$old" --itemid "$id" --nointeraction >/dev/null 2>"$tmp/err" ||
+        err=$(<"$tmp/err")
+    done
+    if [[ -n $err ]]; then
+      echo "bwu: ${as[i]} is up, but the old one could not be deleted: $err -- $name has both now" >&2
+      rc=1
+    elif [[ -n ${olds[i]} ]]; then
+      by=""
+      [[ ${srcs[i]##*/} == "${as[i]}" ]] || by=" by ${srcs[i]}"
+      echo "$name: ${as[i]} replaced$by${was[i]:+ (${was[i]} -> ${size:-?})}" >&2
+    else
+      echo "$name: ${as[i]} added${size:+ ($size)}" >&2
+    fi
+  done
+
+  # The cache anew, so that the next get shows the change. Its failure is
+  # not passed on as one: a 3 would have bwu unlock and run all of this
+  # again, and upload the files twice.
+  if $wrote; then
+    ( refresh >/dev/null ) || echo "bwu: the cache is behind the vault -- bwu update brings it up to date" >&2
+  fi
+  exit "$rc"
+fi
 
 if $file_mode; then
   # This item's files -- those matching the name, when there is one -- to

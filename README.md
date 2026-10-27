@@ -250,6 +250,8 @@ bwu get -u   / -p       # the username alone / the password alone
 bwu get -c              # copy the password instead (-c -u: the username)
 bwu get -f [name [new]] # an attached file, saved -- or - for stdout
 bwu get --force -f ...  # the same, replacing a file that is there
+bwu put -f file [name]  # replace an item's attached file with this one
+bwu add -f file...      # attach files to an item; asks before overwriting
 bwu update              # sync with the server, and cache the vault anew
 bwu --update get        # the same, then pick
 bwu lock                # lock the vault everywhere, and delete the cache
@@ -282,6 +284,19 @@ nothing is saved. `--force` lets them replace files that are there.
 Everything after `-f` belongs to it: options go before it, and `--` before a
 name that starts with `-`. The list comes from the cache; the file itself from
 the server, so this needs the network.
+
+`bwu put` and `bwu add` go the other way. `put` replaces one of an item's
+files: only items with files are listed, the item's file of the same name --
+or of the name given after the file -- is taken at once, and any other is
+picked, never guessed, since it is the one deleted. The file keeps its name in
+the vault, so `bwu put superspot -f prod.yaml env.yaml` still leaves an
+`env.yaml` there. `add` attaches files to any item, and asks before it
+overwrites one the item has by that name already; `--force` overwrites
+without asking, and with no terminal to ask in, `add` changes nothing.
+Bitwarden cannot change a file in place, so a replaced file is uploaded new
+first and the old one deleted after: a failure in between leaves both, never
+neither. Both sync first and write against the item as the server has it,
+then cache the vault anew.
 
 Two things it deliberately does not do, because it cannot:
 

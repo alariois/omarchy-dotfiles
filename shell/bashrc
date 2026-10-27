@@ -157,12 +157,13 @@ complete -F __cloud_complete_az az-select
 # Bitwarden: bwu unlocks the vault in this terminal -- the master password the
 # first time, and after that a fingerprint, through sudo, for each terminal
 # (bin/bw-session). `bwu get` picks an item with fzf from an encrypted cache of
-# the vault and prints or copies its secret; `bwu update` syncs and caches the
-# vault anew (bin/bw-vault; bwu get --help). The session key and the cache's key
-# are plain shell variables, never exported: these functions hand them to bw
-# and bw-vault for their run alone, so no other program run here inherits
-# them. `bw lock`, or `bwu lock`, locks the vault for every terminal and
-# deletes the cache.
+# the vault and prints or copies its secret; `bwu put -f` replaces an item's
+# attached file and `bwu add -f` attaches new ones; `bwu update` syncs and
+# caches the vault anew (bin/bw-vault; bwu --help). The session key and the
+# cache's key are plain shell variables, never exported: these functions hand
+# them to bw and bw-vault for their run alone, so no other program run here
+# inherits them. `bw lock`, or `bwu lock`, locks the vault for every terminal
+# and deletes the cache.
 bwu() {
   local update=false sub
   if [[ ${1-} == --update ]]; then
@@ -173,14 +174,14 @@ bwu() {
   case $sub in
     "")
       if $update; then __bwu_vault update; else __bwu_unlock; fi ;;
-    get|update)
+    get|put|add|update)
       shift
       # Help needs no vault.
       if [[ " $* " == *" -h "* || " $* " == *" --help "* ]]; then
         command bw-vault "$sub" --help
         return
       fi
-      if $update && [[ $sub == get ]]; then
+      if $update && [[ $sub != update ]]; then
         set -- --update "$@"
       fi
       __bwu_vault "$sub" "$@" ;;
@@ -189,7 +190,7 @@ bwu() {
     -h|--help)
       command bw-vault --help ;;
     *)
-      echo "bwu: unknown command '$sub' -- bwu, bwu get, bwu update or bwu lock (bwu --help)" >&2
+      echo "bwu: unknown command '$sub' -- bwu, bwu get, put, add, update or lock (bwu --help)" >&2
       return 2 ;;
   esac
 }
@@ -220,7 +221,7 @@ __bwu_vault() {
   fi
   return "$rc"
 }
-complete -W 'get update lock --update --username --password --copy --file --force --help' bwu
+complete -W 'get put add update lock --update --username --password --copy --file --force --help' bwu
 bw() {
   local rc=0
   if [[ -n ${__bw_session-} ]]; then
