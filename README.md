@@ -298,6 +298,11 @@ first and the old one deleted after: a failure in between leaves both, never
 neither. Both sync first and write against the item as the server has it,
 then cache the vault anew.
 
+Tab completes the commands and their options, and after `-f` what goes there:
+the names of the vault's files -- for `get -f` and the name after `put -f`'s
+file -- from the cache, once `bwu` has unlocked the terminal, and files here
+for what `put` and `add` upload and where `get` saves.
+
 Two things it deliberately does not do, because it cannot:
 
 1. **The two mail passwords**, which belong in the keyring and nowhere else:

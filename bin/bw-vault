@@ -149,13 +149,23 @@ CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-dotfiles/bw-vault.age
 sub=${1-}
 (( $# )) && shift
 case $sub in
-  get|put|add|update|forget) ;;
-  -h|--help|"")              usage 0 ;;
-  *)                         die "unknown command: $sub  (try --help)" ;;
+  get|put|add|update|forget|files) ;;
+  -h|--help|"")                    usage 0 ;;
+  *)                               die "unknown command: $sub  (try --help)" ;;
 esac
 
 if [[ $sub == forget ]]; then
   rm -f -- "$CACHE"
+  exit 0
+fi
+
+# For bwu's tab completion: the names of the files attached anywhere in the
+# vault, one per line, from the cache alone -- nothing when there is none this
+# terminal's key can read. It never runs bw, so Tab never asks or waits.
+if [[ $sub == files ]]; then
+  [[ -n ${BW_CACHE_KEY-} && -f $CACHE ]] || exit 0
+  age --decrypt -i <(printf '%s\n' "$BW_CACHE_KEY") "$CACHE" 2>/dev/null |
+    jq -r '[.items[] | (.attachments // [])[] | .fileName // empty] | unique[]' 2>/dev/null || true
   exit 0
 fi
 

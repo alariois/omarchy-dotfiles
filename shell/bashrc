@@ -221,7 +221,51 @@ __bwu_vault() {
   fi
   return "$rc"
 }
-complete -W 'get put add update lock --update --username --password --copy --file --force --help' bwu
+# Tab for bwu: the commands, then each one's options, and after -f what goes
+# there -- the vault's file names for get -f's first name and put -f's second,
+# from the cache (bw-vault files; nothing until bwu has unlocked this
+# terminal), and files here for the rest: what put and add upload, and where
+# get saves.
+__bwu_complete() {
+  local cur=${COMP_WORDS[COMP_CWORD]} sub="" word name i after=-1 ended=false
+  COMPREPLY=()
+  # The command, and how many names already follow -f: that count says which
+  # of -f's names the word under the cursor is.
+  for (( i = 1; i < COMP_CWORD; i++ )); do
+    word=${COMP_WORDS[i]}
+    if [[ -z $sub ]]; then
+      [[ $word == --update ]] || sub=$word
+    elif (( after >= 0 )); then
+      if ! $ended && [[ $word == -- ]]; then ended=true; else (( after++ )); fi
+    elif [[ $word == -f || $word == --file ]]; then
+      after=0
+    fi
+  done
+  if [[ -z $sub ]]; then
+    mapfile -t COMPREPLY < <(compgen -W 'get put add update lock --update --help' -- "$cur")
+    return
+  fi
+  if (( after < 0 )); then
+    case $sub in
+      get) word='-f --file -u --username -p --password -c --copy --force --update --help' ;;
+      put) word='-f --file --update --help' ;;
+      add) word='-f --file --force --update --help' ;;
+      *)   return ;;
+    esac
+    mapfile -t COMPREPLY < <(compgen -W "$word" -- "$cur")
+    return
+  fi
+  case $sub:$after in
+    get:0|put:1)
+      while IFS= read -r name; do
+        [[ $name == "$cur"* ]] && COMPREPLY+=("$(printf '%q' "$name")")
+      done < <(BW_CACHE_KEY=${__bw_cache_key-} command bw-vault files 2>/dev/null) ;;
+    get:1|put:0|add:*)
+      # Nothing in COMPREPLY, and readline completes the file names itself.
+      compopt -o default ;;
+  esac
+}
+complete -F __bwu_complete bwu
 bw() {
   local rc=0
   if [[ -n ${__bw_session-} ]]; then
