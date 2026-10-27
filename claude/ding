@@ -15,5 +15,10 @@ sound=/usr/share/sounds/freedesktop/stereo/complete.oga
 # run by hand from a terminal, where cat would sit waiting for input.
 [[ -t 0 ]] || cat > /dev/null
 
+# Silent while SooperLooper's engine runs: it records whatever reaches its
+# inputs, and computer audio can get there (here via the Quad Cortex into the
+# Scarlett), so a ding would end up in a loop.
+pgrep -x sooperlooper > /dev/null && exit 0
+
 # Detached, so the hook returns at once and Claude never waits on the sound.
 setsid -f pw-play "$sound" > /dev/null 2>&1 < /dev/null
