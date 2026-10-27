@@ -365,3 +365,14 @@ o.bind("SUPER + BACKSLASH", "Former workspace", hl.dsp.focus({ workspace = "prev
 -- info" carries no ambiguity. SUPER + U is the only wholly unbound letter left
 -- if this key is ever wanted for something else.
 o.bind("SUPER + I", "Peek at target directory", "peek-here")
+
+-- SUPER + SHIFT + I: save the clipboard's image where SUPER + I points.
+--
+-- bin/paste-here reads the directory through the same term-here --print the
+-- peek does, then asks for a name in Omarchy's own input popup with a
+-- timestamped one showing: type to replace it, Enter to keep it, Escape to
+-- save nothing. Once saved, the file's full path replaces the image on the
+-- clipboard. Shift on the peek's key because it acts on the peek's answer.
+--
+-- No unbind: SUPER + SHIFT + I is free in stock Omarchy, as plain SUPER + I is.
+o.bind("SUPER + SHIFT + I", "Save clipboard image to target directory", "paste-here")

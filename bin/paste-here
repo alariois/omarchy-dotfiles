@@ -1,0 +1,159 @@
+#!/bin/bash
+#
+# SUPER+SHIFT+I: save the image on the clipboard into the directory SUPER+I
+# names, and put the saved file's full path on the clipboard in its place.
+#
+# A popup asks for the name with a timestamped one already showing. Typing
+# replaces it, Enter on its own keeps it, Escape saves nothing. The directory
+# is peek-here's headline -- term-here's answer, files-here's when that has
+# none -- read through the same --print, so the image lands exactly where
+# SUPER+I says and SUPER+RETURN would open.
+#
+# The name may carry a path: relative to that directory, absolute, or from ~.
+# A name that is an existing directory gets the timestamped name inside it.
+# With no extension the clipboard's own is added; a different image extension
+# (logo.jpg, with a PNG on the clipboard) is converted with ImageMagick, which
+# is on Omarchy's base list, rather than writing PNG bytes under a .jpg name.
+# A file that already exists is replaced only after asking.
+
+set -uo pipefail
+
+# U+F03E, a picture.
+GLYPH=""
+
+tilde() { printf '%s' "${1/#"$HOME"/\~}"; }
+
+# The toast renders as Pango markup, as in peek-here: a < in a file name would
+# otherwise open a tag and swallow the rest of the line. Each & in the
+# replacements is escaped: since bash 5.2 a bare & there stands for the text
+# matched, so &lt; would come out as <lt;.
+escape() {
+  local text=${1//&/\&amp;}
+  text=${text//</\&lt;}
+  printf '%s' "${text//>/\&gt;}"
+}
+
+fail() { # <headline> <body>
+  omarchy-notification-send -g "$GLYPH" -u critical "$1" "$2"
+  exit 1
+}
+
+# jpeg and jpg are one format, as are tif and tiff; compared in one spelling.
+norm() {
+  local ext=${1,,}
+  case $ext in
+    jpeg) ext=jpg ;;
+    tif) ext=tiff ;;
+  esac
+  printf '%s' "$ext"
+}
+
+# Before anything is shown, so the answer is about the window the key was
+# pressed over.
+printed=$(term-here --print 2>/dev/null) || printed=""
+dir=${printed%%$'\t'*}
+[[ -n $dir ]] || dir=$(files-here --print 2>/dev/null) || dir=""
+[[ -d $dir ]] || fail "Nowhere" "Neither key could read the focused window"
+
+# PNG when it is offered, which is the usual case, and otherwise the first
+# image type there is.
+types=$(wl-paste --list-types 2>/dev/null) || types=""
+if grep -qx image/png <<<"$types"; then
+  mime=image/png
+else
+  mime=$(grep -m1 '^image/' <<<"$types") || mime=""
+fi
+[[ -n $mime ]] || fail "No image" "The clipboard holds no image to save"
+
+case $mime in
+  image/svg+xml) ext=svg ;;
+  *) ext=$(norm "${mime#image/}") ;;
+esac
+
+# Taken now rather than once the name is typed: what gets saved is what was on
+# the clipboard when the key was pressed, and an empty clipboard is reported
+# before anything is asked.
+tmp=$(mktemp -p "${XDG_RUNTIME_DIR:-/tmp}" paste-here.XXXXXX) || exit 1
+conv=$tmp.conv
+trap 'rm -f -- "$tmp" "$conv"' EXIT
+wl-paste --type "$mime" >"$tmp" 2>/dev/null && [[ -s $tmp ]] ||
+  fail "No image" "The clipboard's $mime came back empty"
+
+# Omarchy's screenshot naming, with image- for screenshot-.
+default="image-$(date +'%Y-%m-%d_%H-%M-%S').$ext"
+
+# omarchy-menu-input, Omarchy's own text popup, takes no initial text. But
+# with nothing typed it shows its prompt in the field, dimmed, and the first
+# key typed replaces it -- so the default name is the prompt. Enter on the
+# empty field answers an empty line; Escape exits 1. That difference is what
+# tells "keep the name shown" from "never mind".
+name=$(omarchy-menu-input "$default" --width 440) || exit 0
+
+# A space at either end is never part of a name on purpose.
+name=${name#"${name%%[![:space:]]*}"}
+name=${name%"${name##*[![:space:]]}"}
+[[ -n $name ]] || name=$default
+
+case $name in
+  /*) target=$name ;;
+  "~") target=$HOME ;;
+  "~/"*) target=$HOME/${name#"~/"} ;;
+  *) target=$dir/$name ;;
+esac
+[[ -d $target ]] && target=${target%/}/$default
+
+# The extension picks the format. None, or one that is not an image's
+# (notes.v2), gets the clipboard's own added; another image's is converted.
+file=${target##*/}
+want=""
+[[ $file == ?*.?* ]] && want=$(norm "${file##*.}")
+if [[ $want != "$ext" ]]; then
+  case $want in
+    png | jpg | webp | gif | bmp | avif | tiff) ;;
+    *)
+      target+=.$ext
+      want=$ext
+      ;;
+  esac
+fi
+
+parent=${target%/*}
+parent=${parent:-/}
+[[ -d $parent ]] || fail "No such folder" "$(escape "$(tilde "$parent")")"
+
+if [[ -e $target ]]; then
+  choice=$(omarchy-menu-select "Replace ${target##*/}?" Replace Cancel -- --width 440) || exit 0
+  [[ $choice == Replace ]] || exit 0
+fi
+
+src=$tmp
+if [[ $want != "$ext" ]]; then
+  # JPEG has no transparency, and ImageMagick drops it to black: a logo copied
+  # out of a web page would come out on a black square.
+  flatten=()
+  [[ $want == jpg ]] && flatten=(-background white -alpha remove)
+  magick "$tmp" ${flatten[@]+"${flatten[@]}"} "$want:$conv" 2>/dev/null ||
+    fail "Not converted" "ImageMagick could not make a ${want^^} of the clipboard's $mime"
+  src=$conv
+fi
+
+# --no-preserve=mode: the snapshot is mktemp's 0600, and a new image should
+# get the umask's mode like any other new file. A replaced file keeps its own.
+# -T so a directory where the file belongs is an error, not a place to copy
+# into.
+cp --no-preserve=mode -T -- "$src" "$target" 2>/dev/null ||
+  fail "Not saved" "Could not write $(escape "$(tilde "$target")")"
+
+# The full path takes the image's place on the clipboard: an image saved into
+# a project is usually saved there to be pointed at. The image itself is still
+# in Omarchy's clipboard history, SUPER+CTRL+V.
+if wl-copy "$target" 2>/dev/null; then
+  body="Path copied to the clipboard"
+else
+  body="Saved, but the path could not be copied"
+fi
+[[ $src == "$conv" ]] && body+=$'\n'"Converted from ${ext^^}"
+
+# The image in the toast, as Omarchy's screenshot toast has it.
+omarchy-notification-send -g "$GLYPH" "$(escape "$(tilde "$target")")" "$body" \
+  --image "$target"

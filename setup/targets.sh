@@ -181,6 +181,13 @@ LINKS=(
   # drift from the two that matter.
   "$HOME/.local/bin/peek-here|bin/peek-here"
 
+  # SUPER+SHIFT+I: the clipboard's image saved where SUPER+I points, under a
+  # name asked for in Omarchy's input popup, and its path left on the clipboard.
+  # The directory comes from the same --print. imagemagick, for a name with
+  # another image's extension, needs no PACKAGES entry: it is on Omarchy's own
+  # base list.
+  "$HOME/.local/bin/paste-here|bin/paste-here"
+
   # When to walk out the door: the 85 out of Löwenruh, the Aegviidu train out
   # of Balti jaam, or the two chained into the one time that matters.
   #

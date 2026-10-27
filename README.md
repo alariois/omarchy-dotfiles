@@ -181,6 +181,7 @@ bin/term-here                             SUPER+RETURN, file-manager aware (link
 bin/files-here                            SUPER+SHIFT+F, the mirror of it (linked)
 bin/tmux-cwd                              the pane on screen, for both (linked)
 bin/peek-here                             toast where those two keys would open (linked)
+bin/paste-here                            clipboard image saved there, its path copied (linked)
 nautilus/term-here.py                     the Nautilus half of it (linked)
 omarchy-shell/workspaces/                 monitor-aware bar workspace markers (linked)
 setup/targets.sh                          the delta table -- single source of truth
