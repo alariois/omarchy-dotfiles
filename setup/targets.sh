@@ -121,6 +121,10 @@ LINKS=(
   "$HOME/.local/bin/slack-launch|bin/slack-launch"
   "$HOME/.local/share/applications/slack.desktop|slack/slack.desktop"
 
+  # SUPER+SHIFT+Y: back to the YouTube on workspace 6, or a new one when there
+  # is none there or you are already on 6.
+  "$HOME/.local/bin/youtube-launch|bin/youtube-launch"
+
   # The Copilot key as an Alt -- the one remapping that could not be done in
   # the xkb block below. That key sends no keycode of its own: its firmware
   # holds down LEFTMETA+LEFTSHIFT+F23 for as long as the key is, which is why

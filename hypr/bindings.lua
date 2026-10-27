@@ -236,14 +236,19 @@ o.bind("SUPER + SHIFT + ALT + T", "Monkeytype",
 -- block: pressing the key should take you there.
 o.window("^chrome-monkeytype\\.com__.*$", { workspace = "6" })
 
--- YouTube (SUPER + SHIFT + Y, Omarchy's own binding) opens on workspace 6.
+-- SUPER + SHIFT + Y: YouTube, which opens on workspace 6.
 --
--- No bind or unbind here: Omarchy's default already launches and focuses the
--- web app, and this repo wants only the workspace. Video is the one thing that
--- should never share a workspace with what you are working on -- it is either
--- what you are watching or it is in the way -- so it gets a workspace of its
--- own, one past the chat corner on 5.
+-- Video is the one thing that should never share a workspace with what you
+-- are working on -- it is either what you are watching or it is in the way --
+-- so it gets a workspace of its own, one past the chat corner on 5.
 --
+-- Omarchy's binding opens a new window on every press. bin/youtube-launch
+-- keeps that on workspace 6 only; from anywhere else it takes you back to the
+-- YouTube already open on 6, and opens a new one only when there is none. The
+-- unbind is required for the usual reason -- see the Gmail block above.
+hl.unbind("SUPER + SHIFT + Y")
+o.bind("SUPER + SHIFT + Y", "YouTube", "youtube-launch")
+
 -- Matched with Omarchy's own pattern for this window rather than the
 -- `^chrome-...` shape used above, since default/hypr/apps/browser.lua already
 -- catches it as `^.+-youtube\.com__.*$` -- browser-agnostic, so it still holds

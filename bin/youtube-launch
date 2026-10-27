@@ -1,0 +1,39 @@
+#!/bin/bash
+#
+# SUPER+SHIFT+Y: back to YouTube from elsewhere, another video from beside it.
+#
+# Omarchy's own binding opens a new YouTube web app on every press, and the
+# window rule in hypr/bindings.lua sends each one to workspace 6. From any
+# other workspace that is rarely what is wanted: the video you were watching is
+# already parked there, and pressing the key should take you back to it rather
+# than stack another window on top. On workspace 6 itself, where you are
+# already looking at it, a press still means "one more", as it always did.
+#
+# Neither of Omarchy's two shapes covers that. `{ webapp = ... }` always
+# launches, and omarchy-launch-or-focus-webapp always focuses -- so on 6 the
+# key would do nothing at all.
+#
+# Only a window on workspace 6 counts. One dragged elsewhere has been put to
+# some other use, and focusing it would pull you somewhere you did not mean to
+# go.
+
+set -euo pipefail
+
+if [[ $(hyprctl activeworkspace -j | jq -r .id) != 6 ]]; then
+  # Omarchy's own pattern for the window, from default/hypr/apps/browser.lua --
+  # the same one the workspace rule uses -- so it holds for any Chromium-based
+  # browser. Lowest focusHistoryID is the one used last, so with two videos
+  # open you land on the one you were watching.
+  address=$(hyprctl clients -j | jq -r '
+    [.[] | select(.workspace.id == 6 and (.class | test("^.+-youtube\\.com__")))]
+    | sort_by(.focusHistoryID) | first | .address // empty')
+
+  if [[ -n $address ]]; then
+    hyprctl dispatch "hl.dsp.focus({ window = \"address:$address\" })" >/dev/null 2>&1 ||
+      hyprctl dispatch focuswindow "address:$address"
+    exit 0
+  fi
+fi
+
+# The exact command Omarchy's binding runs.
+exec omarchy-launch-webapp https://youtube.com/
