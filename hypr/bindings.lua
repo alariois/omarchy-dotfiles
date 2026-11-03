@@ -219,6 +219,25 @@ hl.unbind("SUPER + SHIFT + C")
 o.bind("SUPER + SHIFT + C", "Google Calendar",
   "omarchy-launch-or-focus-webapp 'chrome-calendar\\.google\\.com__calendar' 'https://calendar.google.com/calendar'")
 
+-- SUPER + SHIFT + T: the Superhands Team timesheet, T for timesheet.
+--
+-- No unbind: the chord is free in stock Omarchy. T carries SUPER, SUPER + CTRL
+-- and SUPER + CTRL + ALT upstream, and SUPER + SHIFT + ALT is Monkeytype below,
+-- but nothing sits on SUPER + SHIFT, and nothing reaches T (code 28) through a
+-- keycode-spelled bind.
+--
+-- Class-matched like Calendar above. The site titles its window "Superhands
+-- team", so a description match would also focus a browser tab left open on it.
+--
+-- The pattern has to name the path, not stop at the host. The helper wraps it
+-- in `\b`, and `ee__` runs straight into `timesheet` with no boundary between
+-- them, so a host-only pattern never matches and every press opens a new window.
+--
+-- No workspace rule, for Calendar's reason: it is work, so it should open on
+-- whichever workspace you are working on.
+o.bind("SUPER + SHIFT + T", "Superhands Team",
+  "omarchy-launch-or-focus-webapp 'chrome-team\\.superhands\\.ee__timesheet' 'https://team.superhands.ee/timesheet'")
+
 -- SUPER + SHIFT + ALT + T: Monkeytype, T for type.
 --
 -- No unbind: the chord is free in stock Omarchy. T carries SUPER ("Toggle
