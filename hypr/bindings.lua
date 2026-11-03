@@ -31,6 +31,22 @@ o.bind("ALT + J", "Navigate down", "hypr-nav d")
 o.bind("ALT + K", "Navigate up", "hypr-nav u")
 o.bind("ALT + L", "Navigate right", "hypr-nav r")
 
+-- Alt+Shift+hjkl: move the focused window, as SUPER + SHIFT + arrows do.
+--
+-- The same dispatchers as Omarchy's own "Swap window ..." row in
+-- default/hypr/bindings/tiling.lua, put on the motions above so moving a
+-- window is the navigation chord plus Shift. Unlike navigation these go
+-- straight to Hyprland, not through hypr-nav: they move Hyprland windows only,
+-- never vim splits or tmux panes.
+--
+-- No unbind needed: ALT + SHIFT + hjkl is free in stock Omarchy, and nothing in
+-- tmux, nvim or herdr here listens for it. Descriptions kept identical to the
+-- stock bindings', as with SUPER + \ below.
+o.bind("ALT + SHIFT + H", "Swap window to the left", hl.dsp.window.swap({ direction = "l" }))
+o.bind("ALT + SHIFT + J", "Swap window down", hl.dsp.window.swap({ direction = "d" }))
+o.bind("ALT + SHIFT + K", "Swap window up", hl.dsp.window.swap({ direction = "u" }))
+o.bind("ALT + SHIFT + L", "Swap window to the right", hl.dsp.window.swap({ direction = "r" }))
+
 -- SUPER + SHIFT + G: Gmail, in place of Omarchy's Signal.
 --
 -- The unbind is required, not tidiness. Omarchy binds this key in
