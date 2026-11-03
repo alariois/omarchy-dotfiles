@@ -28,7 +28,9 @@
 #
 # The list shows every item: a login with its username and website, anything
 # else by its name. The search covers the name, username and website, so a
-# note is found by its title, and its text is never searched.
+# note is found by its title, and its text is never searched. Beside each, the
+# vault it is in -- personal, or an organisation's, by name -- and its folder,
+# or for an organisation's item its collections.
 #
 # What an item yields: a login its username and password; a note its text; a
 # card its number, expiry and code (-p: the number); an SSH key its private
@@ -269,7 +271,7 @@ read_cache() {
 # when the session key no longer works -- locked, or unlocked elsewhere since
 # -- which tells bwu to unlock and run this again.
 refresh() {
-  local items folders recipient tmp now
+  local items folders collections organizations recipient tmp now
   if ! bw sync >/dev/null 2>&1; then
     bw unlock --check >/dev/null 2>&1 || exit 3
     echo "bwu: could not reach the server -- caching what bw already has" >&2
@@ -279,6 +281,8 @@ refresh() {
     die "bw could not list the vault"
   fi
   folders=$(bw list folders 2>/dev/null) || folders='[]'
+  collections=$(bw list collections 2>/dev/null) || collections='[]'
+  organizations=$(bw list organizations 2>/dev/null) || organizations='[]'
   now=$(date +%s)
   recipient=$(printf '%s\n' "$BW_CACHE_KEY" | age-keygen -y) || die "the cache key is not an age key"
   mkdir -p "$(dirname "$CACHE")"
@@ -286,7 +290,8 @@ refresh() {
   tmp=$(mktemp "$CACHE.XXXXXX") || die "cannot write the cache in $(dirname "$CACHE")"
   # printf is a builtin, so the vault goes to age through a pipe and never
   # onto a command line, where ps would show it.
-  if printf '{"cached":%s,"items":%s,"folders":%s}\n' "$now" "$items" "$folders" |
+  if printf '{"cached":%s,"items":%s,"folders":%s,"collections":%s,"organizations":%s}\n' \
+       "$now" "$items" "$folders" "$collections" "$organizations" |
        age --encrypt -r "$recipient" > "$tmp"; then
     chmod 600 "$tmp"
     mv -f -- "$tmp" "$CACHE"
@@ -294,7 +299,8 @@ refresh() {
     rm -f -- "$tmp"
     die "could not write the cache"
   fi
-  printf '{"cached":%s,"items":%s,"folders":%s}\n' "$now" "$items" "$folders"
+  printf '{"cached":%s,"items":%s,"folders":%s,"collections":%s,"organizations":%s}\n' \
+    "$now" "$items" "$folders" "$collections" "$organizations"
 }
 
 if [[ $sub == update ]]; then
@@ -303,7 +309,9 @@ if [[ $sub == update ]]; then
   exit 0
 fi
 
-if $update || ! data=$(read_cache); then
+# A cache written before the list showed each item's vault has no
+# organisations in it, and is made anew.
+if $update || ! data=$(read_cache) || ! jq -e 'has("organizations")' >/dev/null <<<"$data"; then
   data=$(refresh) || exit $?
 fi
 
@@ -338,12 +346,17 @@ if $file_mode && [[ $sub != add ]]; then
 fi
 
 # One line per item: its id, hidden, then the name, username and website,
-# padded into columns, and the kind and folder, dimmed and not searched.
+# padded into columns, the vault it is in, and the kind and folder -- an
+# organisation's collections -- dimmed. Only the first three are searched.
 # fzf shows a tab as one space here (--tabstop=1), so the padding lines up.
 list=$(jq -r --argjson only "$only" '
   (INDEX((.folders // [])[]; .id // "") | map_values(.name)) as $f
+  | (INDEX((.collections // [])[]; .id) | map_values(.name)) as $c
+  | (INDEX((.organizations // [])[]; .id) | map_values(.name)) as $o
   | def kind: {"1": "login", "2": "note", "3": "card", "4": "identity", "5": "ssh key"}[.type | tostring] // "item";
     def site: (.login.uris // [])[0].uri // "" | sub("^[a-z]+://"; "") | sub("/.*$"; "");
+    def place: if .organizationId then [(.collectionIds // [])[] | $c[.] // empty] | join(", ")
+               else $f[.folderId // ""] // "" end;
     def cut($n): if length > $n then .[0:$n - 1] + "…" else . end;
     def pad($n): . + (" " * ([$n - length, 0] | max));
     .items
@@ -352,14 +365,17 @@ list=$(jq -r --argjson only "$only" '
          user: (if .type == 1 then .login.username // "" else "" end | cut(32)),
          site: (if $only != null then (.attachments // []) | map(.fileName) | join(", ")
                 elif .type == 1 then site else "" end | cut(40)),
-         tag: (kind + (($f[.folderId // ""] // "") | if . != "" then " · " + . else "" end))})
+         vault: (if .organizationId then $o[.organizationId] // "organisation" else "personal" end | cut(24)),
+         tag: (kind + (place | if . != "" then " · " + . else "" end))})
   | sort_by(.name | ascii_downcase)
   | (map(.name | length) + [4] | max) as $wn
   | (map(.user | length) + [8] | max) as $wu
   | (map(.site | length) + [4] | max) as $ws
+  | (map(.vault | length) + [5] | max) as $wv
   | (["", ("NAME" | pad($wn)), ("USERNAME" | pad($wu)),
-     ((if $only != null then "FILES" else "SITE" end) | pad($ws)), "TYPE"] | join("\t")),
-    (.[] | [.id, (.name | pad($wn)), (.user | pad($wu)), (.site | pad($ws)), "\u001b[2m\(.tag)\u001b[0m"] | join("\t"))
+     ((if $only != null then "FILES" else "SITE" end) | pad($ws)), ("VAULT" | pad($wv)), "TYPE"] | join("\t")),
+    (.[] | [.id, (.name | pad($wn)), (.user | pad($wu)), (.site | pad($ws)), (.vault | pad($wv)),
+            "\u001b[2m\(.tag)\u001b[0m"] | join("\t"))
 ' <<<"$data")
 (( $(wc -l <<<"$list") > 1 )) || die "the vault is empty"
 
@@ -377,6 +393,15 @@ case $rc in
 esac
 id=${line%%$'\t'*}
 item=$(jq -c --arg id "$id" '.items[] | select(.id == $id)' <<<"$data")
+# For the summary: an organisation's name, and the item's collections in it.
+vault=$(jq -r --arg id "$id" '
+  (INDEX((.collections // [])[]; .id) | map_values(.name)) as $c
+  | (INDEX((.organizations // [])[]; .id) | map_values(.name)) as $o
+  | .items[] | select(.id == $id)
+  | if .organizationId
+    then "\($o[.organizationId] // "an organisation"), an organisation"
+         + ([(.collectionIds // [])[] | $c[.] // empty] | if length > 0 then " · " + join(", ") else "" end)
+    else "personal" end' <<<"$data")
 unset data list
 [[ -n $item ]] || die "the item picked is no longer in the list"
 
@@ -655,6 +680,7 @@ case $want in
   both)
     row item "$name"
     [[ -z $site ]] || row site "$site"
+    row vault "$vault"
     case $type in
       1)
         [[ -z $user ]] || row username "$user"

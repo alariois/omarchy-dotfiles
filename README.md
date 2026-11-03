@@ -267,11 +267,12 @@ with the server and write one; changes made elsewhere, in the browser or on
 the phone, show up after `bwu update`.
 
 The list shows every item: a login with its username and website, anything
-else by its name. The search covers the name, username and website, so a note
-is found by its title and its text is never searched. A note prints its text,
-a card its number, expiry and code. A copy is marked sensitive for clipboard
-managers, and cleared after 45 seconds unless something else has been copied
-since.
+else by its name, and beside it the vault it is in -- `personal`, or the
+organisation's name -- with its folder, or an organisation item's collections.
+The search covers the name, username and website, so a note is found by its
+title and its text is never searched. A note prints its text, a card its
+number, expiry and code. A copy is marked sensitive for clipboard managers,
+and cleared after 45 seconds unless something else has been copied since.
 
 `-f` fetches an attached file instead. Only items with files are listed, then
 the item's files if it has several; a name after `-f` narrows both to the
