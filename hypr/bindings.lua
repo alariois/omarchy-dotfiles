@@ -414,3 +414,26 @@ o.bind("SUPER + I", "Peek at target directory", "peek-here")
 --
 -- No unbind: SUPER + SHIFT + I is free in stock Omarchy, as plain SUPER + I is.
 o.bind("SUPER + SHIFT + I", "Save clipboard image to target directory", "paste-here")
+
+-- SUPER + J: Omarchy's "Toggle window split", but only where there is a split.
+--
+-- Stock Omarchy binds this to hl.dsp.layout("togglesplit") in
+-- default/hypr/bindings/tiling.lua. togglesplit is a dwindle layout message,
+-- and SUPER+L ("Toggle workspace layout") can put any one workspace on
+-- scrolling -- workspace 1 lives there. Hyprland then refuses the message and
+-- puts "Runtime error in lua: ?:?: no such layoutmsg for scrolling" on screen
+-- on every press. Scrolling has no split to toggle, so there the key does
+-- nothing.
+--
+-- The layout is read off the focused window's workspace, since that window is
+-- the one togglesplit acts on. No window, no split to toggle either.
+--
+-- The unbind is required for the usual reason -- see the Gmail block above.
+-- Description kept identical to the stock binding's, as with SUPER + \ above.
+hl.unbind("SUPER + J")
+o.bind("SUPER + J", "Toggle window split", function()
+  local window = hl.get_active_window()
+  if window and window.workspace and window.workspace.tiled_layout == "dwindle" then
+    hl.dispatch(hl.dsp.layout("togglesplit"))
+  end
+end)
