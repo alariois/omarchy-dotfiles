@@ -1,0 +1,199 @@
+#!/bin/bash
+#
+# SUPER+ALT+P: play or pause YouTube, from wherever you are.
+#
+# A press pauses the YouTube video that is playing. The next press plays that
+# same video again, even with other YouTube windows open. If its window has
+# been closed since, the press plays whatever YouTube is open in any browser,
+# and if there is none a toast says so. Focus never moves: the point is to
+# stop the video without leaving what you are doing.
+#
+# Two ways in, because neither covers everything.
+#
+#   * MPRIS, the D-Bus media interface every browser exposes. It is exact --
+#     Play and Pause, not a toggle, so a doubled press cannot undo itself --
+#     but a browser has one player per process, not one per tab, and it
+#     reports only its active media session: the video played most recently.
+#     Its xesam:title is the video's title, which is how a session is tied
+#     back to a window: YouTube puts the same title in the page's.
+#
+#   * YouTube's own `k`, delivered with Hyprland's send_shortcut. That works on
+#     a window you are not looking at, on a workspace you are not on, and
+#     leaves focus where it was -- verified with a probe page that logs its
+#     keys. It is the only way to start a video the browser has no session for
+#     yet: one restored with the browser, or one that is not the active session.
+#     But it is a toggle, and it types a k if the page's search box has focus,
+#     so it is never used to pause.
+#
+# What MPRIS cannot see stays unseen. With two videos playing at once only the
+# browser's active one shows up, so a press pauses that one and the other plays
+# on. A background tab is invisible to Hyprland, so "any YouTube open" means a
+# YouTube web app or a browser window with YouTube as its current tab.
+#
+# --print says what a press would do -- pause, play, key or none, then the
+# window and the video -- and does nothing.
+
+set -uo pipefail
+
+# U+F16A, nf-fa-youtube_play.
+GLYPH=""
+
+# The video this key last paused or played: its window's address, then its
+# title. Under $XDG_RUNTIME_DIR because neither outlives the session.
+STATE=${XDG_RUNTIME_DIR:-/tmp}/youtube-toggle
+
+print=0
+[[ ${1-} == --print ]] && print=1
+
+# Shaped like peek-here's: the toast's body is Pango markup, and a video title
+# is free text that may well have a < or & in it.
+escape() {
+  local text=${1//&/&amp;}
+  text=${text//</&lt;}
+  printf '%s' "${text//>/&gt;}"
+}
+
+toast() { # <headline> <body>
+  omarchy-notification-send -g "$GLYPH" "$1" "$2"
+}
+
+# The players and their state, as one JSON array. Only a name with a live
+# connection has a pid; one that is merely D-Bus-activatable plays nothing.
+players() {
+  busctl --user --json=short list 2>/dev/null |
+    jq -r '.[] | select(.pid != null and (.name | startswith("org.mpris.MediaPlayer2."))) | "\(.name)\t\(.pid)"' |
+    while IFS=$'\t' read -r name pid; do
+      busctl --user --json=short get-property "$name" /org/mpris/MediaPlayer2 \
+        org.mpris.MediaPlayer2.Player PlaybackStatus Metadata 2>/dev/null |
+        jq -cs --arg name "$name" --argjson pid "$pid" \
+          '{name: $name, pid: $pid, status: .[0].data, title: (.[1].data["xesam:title"].data // "")}'
+    done | jq -s .
+}
+
+mpris() { # <player> <Play|Pause>
+  busctl --user call "$1" /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player "$2"
+}
+
+# The second form for a Hyprland whose config is not Lua, as in youtube-launch.
+press_k() { # <address>
+  hyprctl dispatch "hl.dsp.send_shortcut({ mods = \"\", key = \"k\", window = \"address:$1\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch sendshortcut ", k, address:$1" >/dev/null
+}
+
+# Decides, without acting: four lines, the action and then the player, window
+# address and title it applies to. Acting is left to the shell, so that
+# --print can stop between the two.
+read -r -d '' DECIDE <<'JQ'
+def tagged($tag): (.tags // []) | map(sub("\\*$"; "")) | index($tag) != null;
+
+# The YouTube web app, by Omarchy's own pattern for it -- the one youtube-launch
+# and the workspace rule use -- or a browser window whose current tab is
+# YouTube, by the title every browser builds: "<video> - YouTube - Chromium",
+# "YouTube — Mozilla Firefox". The tags are Omarchy's, from
+# default/hypr/apps/browser.lua, and keep out a terminal that happens to have
+# " - YouTube - " in its title: a k sent there would be typed.
+def youtube_window:
+  (.class | test("^.+-youtube\\.com__"))
+  or ((tagged("chromium-based-browser") or tagged("firefox-based-browser"))
+      and (.title | test("(^| - )YouTube [-—] ")));
+
+# The video a window names, or "" for a YouTube page that is not one. The
+# "(3) " in front is YouTube's unread-notification count.
+def video: .title | sub("^\\(\\d+\\) "; "") | sub("(^| - )YouTube( [-—] .*)?$"; "");
+
+[$clients[] | select(youtube_window)] as $youtube
+
+# A player counts only if its process has a window. That leaves out KDE
+# Connect, whose player is the phone.
+| [$players[] | . as $p | select(.title != "" and any($clients[]; .pid == $p.pid))] as $players
+
+# The windows of a session's own browser with its title in theirs.
+| def windows: . as $p | [$clients[] | select(.pid == $p.pid and (.title | contains($p.title)))];
+
+  # YouTube's if a YouTube window shows it. Also if no window shows it at all:
+  # the video then plays where Hyprland cannot see -- a background tab, or
+  # YouTube's miniplayer over a page that is not the video's -- and pausing
+  # what can be heard playing is what the key is pressed for.
+  def youtube_session: windows as $w | ($w | length) == 0 or any($w[]; youtube_window);
+
+  def address: first(windows | .[] | select(youtube_window) | .address) // "";
+
+  # The browser's paused session, if this window is showing it.
+  def paused_in: . as $w
+    | first($players[] | . as $p | select(.status == "Paused" and .pid == $w.pid and ($w.title | contains($p.title)))) // null;
+
+  # Through MPRIS when the window shows the paused session; any other gets the k.
+  def start: . as $w | paused_in as $p
+    | if $p then {action: "play", player: $p.name, address: $w.address, title: $p.title}
+      else {action: "key", player: "", address: $w.address, title: ($w | video)} end;
+
+  (first($players[] | select(.status == "Playing" and youtube_session)) // null) as $playing
+| (first($players[] | select(.status == "Paused" and .title == $last_title and youtube_session)) // null) as $again
+| (first($youtube[] | select(.address == $last_address)) // null) as $window
+
+| if $playing then {action: "pause", player: $playing.name, address: ($playing | address), title: $playing.title}
+  elif $again then {action: "play", player: $again.name, address: ($again | address), title: $again.title}
+  elif $window then $window | start
+  # Any YouTube at all. The browser's own paused video first, since MPRIS starts
+  # it exactly; then a window on a video over one on a page, where a k does
+  # nothing; then the window used last.
+  elif ($youtube | length) > 0 then
+    $youtube | sort_by([(paused_in == null), (video == ""), .focusHistoryID]) | first | start
+  else {action: "none", player: "", address: "", title: ""} end
+| .action, .player, .address, .title
+JQ
+
+# A press while the last one is still waiting on its k to take would see
+# nothing playing yet and press it again, toggling the video straight back.
+exec 9>"$STATE.lock"
+flock -w 3 9
+
+clients=$(hyprctl clients -j) || exit 1
+last=()
+[[ -r $STATE ]] && mapfile -t last <"$STATE"
+
+mapfile -t decision < <(
+  jq -nr --argjson clients "$clients" --argjson players "$(players)" \
+    --arg last_address "${last[0]-}" --arg last_title "${last[1]-}" "$DECIDE"
+)
+action=${decision[0]-none} player=${decision[1]-} address=${decision[2]-} title=${decision[3]-}
+
+if ((print)); then
+  printf '%s\t%s\t%s\n' "$action" "${address:--}" "$title"
+  exit 0
+fi
+
+remember() { # <address> <title>
+  printf '%s\n%s\n' "$1" "$2" >"$STATE"
+}
+
+case $action in
+  pause | play)
+    mpris "$player" "${action^}" >/dev/null || exit 1
+    remember "$address" "$title"
+    ;;
+  key)
+    pid=$(jq -r --arg a "$address" '.[] | select(.address == $a) | .pid' <<<"$clients")
+    press_k "$address"
+
+    # A k is a guess the page may ignore -- YouTube's home page has nothing to
+    # play -- so wait for the browser to say a video started, and remember
+    # that one. Two seconds also covers a browser that registers its MPRIS
+    # player only once it first plays something, as Chromium does.
+    for _ in {1..10}; do
+      sleep 0.2
+      started=$(players | jq -r --argjson pid "$pid" \
+        'first(.[] | select(.pid == $pid and .status == "Playing") | .title) // empty')
+      if [[ -n $started ]]; then
+        remember "$address" "$started"
+        exit 0
+      fi
+    done
+    toast "YouTube did not start" "Nothing played after a k in $(escape "${title:-YouTube}")"
+    exit 1
+    ;;
+  *)
+    toast "No YouTube" "YouTube is not open in any browser window"
+    exit 1
+    ;;
+esac

@@ -125,6 +125,10 @@ LINKS=(
   # is none there or you are already on 6.
   "$HOME/.local/bin/youtube-launch|bin/youtube-launch"
 
+  # SUPER+ALT+P: play or pause YouTube from any workspace, resuming the video
+  # it paused even with others open.
+  "$HOME/.local/bin/youtube-toggle|bin/youtube-toggle"
+
   # The Copilot key as an Alt -- the one remapping that could not be done in
   # the xkb block below. That key sends no keycode of its own: its firmware
   # holds down LEFTMETA+LEFTSHIFT+F23 for as long as the key is, which is why

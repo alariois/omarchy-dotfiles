@@ -275,6 +275,20 @@ o.bind("SUPER + SHIFT + Y", "YouTube", "youtube-launch")
 -- given in the WhatsApp block: pressing the key should take you to the video.
 o.window("^.+-youtube\\.com__.*$", { workspace = "6" })
 
+-- SUPER + ALT + P: play or pause YouTube, from any workspace.
+--
+-- bin/youtube-toggle pauses whichever YouTube video is playing -- the web app
+-- above or a browser tab -- and the next press plays that same one again, even
+-- with several open. With its window closed it plays whatever YouTube is open
+-- in any browser, and with none it says so in a toast. Focus stays where it
+-- is: the point is to stop the video without going to it.
+--
+-- P for play. No unbind: the chord is free in stock Omarchy. P carries SUPER
+-- ("Pseudo window"), SUPER + CTRL ("Power") and SUPER + SHIFT ("Google
+-- Photos"), but not these modifiers, and nothing reaches P (code 33) through
+-- a keycode-spelled bind.
+o.bind("SUPER + ALT + P", "YouTube play/pause", "youtube-toggle")
+
 -- SUPER + RETURN: a terminal in the directory you are looking at.
 --
 -- Stock Omarchy already opens the new terminal in the focused *terminal's*
