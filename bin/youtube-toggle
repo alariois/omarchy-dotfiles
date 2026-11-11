@@ -6,7 +6,9 @@
 # same video again, even with other YouTube windows open. If its window has
 # been closed since, the press plays whatever YouTube is open in any browser,
 # and if there is none a toast says so. Focus never moves: the point is to
-# stop the video without leaving what you are doing.
+# stop the video without leaving what you are doing. Each press says what it
+# did in a toast -- "YouTube video paused", or "resumed", and the video -- one
+# toast, which the next press updates rather than stacks another on.
 #
 # Two ways in, because neither covers everything.
 #
@@ -41,6 +43,8 @@ GLYPH=""
 # The video this key last paused or played: its window's address, then its
 # title. Under $XDG_RUNTIME_DIR because neither outlives the session.
 STATE=${XDG_RUNTIME_DIR:-/tmp}/youtube-toggle
+# The id of the toast the last press showed, for the next to replace.
+TOAST=$STATE.toast
 
 print=0
 [[ ${1-} == --print ]] && print=1
@@ -54,8 +58,15 @@ escape() {
   printf '%s' "${text//>/"&gt;"}"
 }
 
+# One toast for every press: each replaces the one before -- a toast long
+# gone is simply shown anew -- so pause, play, pause in quick succession
+# leaves one on screen, saying the last.
 toast() { # <headline> <body>
-  omarchy-notification-send -g "$GLYPH" "$1" "$2"
+  local id=0
+  [[ -r $TOAST ]] && read -r id <"$TOAST"
+  [[ $id =~ ^[0-9]+$ ]] || id=0
+  omarchy-notification-send -g "$GLYPH" -r "$id" -p "$1" "$2" >"$TOAST" 2>/dev/null ||
+    omarchy-notification-send -g "$GLYPH" "$1" "$2"
 }
 
 # The players and their state, as one JSON array. Only a name with a live
@@ -172,6 +183,11 @@ case $action in
   pause | play)
     mpris "$player" "${action^}" >/dev/null || exit 1
     remember "$address" "$title"
+    if [[ $action == pause ]]; then
+      toast "YouTube video paused" "$(escape "$title")"
+    else
+      toast "YouTube video resumed" "$(escape "$title")"
+    fi
     ;;
   key)
     pid=$(jq -r --arg a "$address" '.[] | select(.address == $a) | .pid' <<<"$clients")
@@ -187,6 +203,7 @@ case $action in
         'first(.[] | select(.pid == $pid and .status == "Playing") | .title) // empty')
       if [[ -n $started ]]; then
         remember "$address" "$started"
+        toast "YouTube video resumed" "$(escape "$started")"
         exit 0
       fi
     done
