@@ -1,0 +1,698 @@
+#!/usr/bin/env bash
+#
+# bw-move -- `bwu move`: an item, or a whole folder or collection, moved from
+# one Bitwarden account to another, attached files and all.
+#
+#   bwu move --to alari            # pick an item, as bwu get does; move it
+#   bwu move --to alari github     # the same, the search started with "github"
+#   bwu move --from superhands --to alari --collection
+#                                  # pick a folder or collection; move it whole
+#
+# Run through bwu, the shell function in shell/bashrc, which unlocks the
+# accounts first and hands this their keys, in BW_KEYS, for its run alone; not
+# by hand. The item is picked by bw-vault, from its cache.
+#
+# Bitwarden cannot move an item from one account to another, so this copies it
+# and deletes the original -- and only once the copy is checked:
+#
+#   1. Copy. Each item is made anew in the other account, from the original as
+#      the server has it now: every field, the password history, passkeys. Its
+#      files are downloaded from the one account and uploaded to the other,
+#      the SHA-256 of each noted.
+#   2. Check. The other account is synced, and every copy read back from the
+#      server: its fields compared with the original's, all of them, its place
+#      with the one it was meant to have, and its files downloaded once more
+#      and compared with the original's by name, size and SHA-256.
+#   3. Delete. Only an original whose copy is the same is deleted -- into the
+#      account's trash, where Bitwarden keeps it 30 days, not for good.
+#
+# A copy that fails, or turns out not the same, is deleted, for good -- it was
+# only ever a copy -- and its original stays as it was; the others go on.
+# Ctrl-C before the originals go removes every copy made so far.
+#
+# Where things go: an item in a folder goes to the folder of that name in the
+# other account's personal vault; an organisation's item to the collections of
+# those names in the other account's organisation -- picked, when it has
+# several -- or, when it has none, to a folder of that name. A folder or
+# collection not there yet is made, its parents with it. Without --collection
+# the item picked moves alone, and its folder or collections stay. With it,
+# the folder or collection picked moves whole: those nested in it, and every
+# item in any of them -- for a folder, the personal ones; an organisation's
+# item in it stays, and keeps the folder. The folders left empty are deleted
+# after, deepest first; the collections stay, empty, since an item in the
+# trash can be restored into its collections only while they are there.
+#
+# Files are downloaded, decrypted, into a directory only you can read, under
+# XDG_RUNTIME_DIR -- memory, not disk -- each deleted once uploaded or
+# checked, and the directory when this ends.
+
+set -euo pipefail
+
+usage() {
+  local b="" r=""
+  [[ -t 1 ]] && b=$'\e[1m' r=$'\e[0m'
+  cat <<EOF
+${b}bwu move${r} -- move an item, or a whole folder or collection, to another account.
+
+${b}Usage${r}
+  bwu move --to NAME [--from NAME] [options] [text]
+
+${b}Options${r}
+      --to NAME      the account to move to
+      --from NAME    the account to move from; any other but --to without it
+      --collection   pick a folder or collection, and move it whole: the ones
+                     nested in it, and every item in them. Folders left empty
+                     are deleted after; collections stay, for the trash's
+                     sake -- delete them in the web vault when it is done with.
+  -y, --yes          move without asking first
+      --update       sync and cache the vaults anew before the list
+  text               start the search with it; one match is picked at once
+
+${b}How it moves${r}
+  Bitwarden cannot move an item between accounts, so it is copied: every
+  field, the password history, passkeys and files. Each copy is read back
+  from the server and compared with the original -- every field, and each
+  file by name, size and SHA-256 -- and only an original whose copy is the
+  same is deleted, into its account's trash, for 30 days. A copy that is not
+  the same is removed again, and its original stays.
+
+  An item keeps its folder, or its collections, by name: in the other
+  account's organisation -- picked, if it has several -- or as a folder when
+  it has none. A folder or collection not there yet is made.
+
+${b}Examples${r}
+  bwu move --to alari github
+  bwu move --from superhands --to alari --collection "to move out"
+EOF
+  exit "${1:-0}"
+}
+
+DOTFILES=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)
+# shellcheck source=../lib/bw.sh
+source "$DOTFILES/lib/bw.sh"
+
+die() { echo "bwu move: $*" >&2; exit 1; }
+say() { echo "$*" >&2; }
+# stderr as it is now: Ctrl-C's handler runs inside whatever command it cut
+# short, with that command's stderr -- often a file about to be deleted.
+exec {stderr}>&2
+
+from="" to="" whole=false yes=false update=false query=""
+while (( $# )); do
+  case $1 in
+    --to|--from)
+      (( $# >= 2 )) || die "$1 takes an account's name"
+      if [[ $1 == --to ]]; then to=$2; else from=$2; fi
+      shift 2 ;;
+    --to=*)        to=${1#*=}; shift ;;
+    --from=*)      from=${1#*=}; shift ;;
+    --collection)  whole=true; shift ;;
+    -y|--yes)      yes=true; shift ;;
+    --update)      update=true; shift ;;
+    -h|--help)     usage 0 ;;
+    -*)            die "unknown option: $1  (try --help)" ;;
+    *)             query+="${query:+ }$1"; shift ;;
+  esac
+done
+
+for tool in bw jq fzf sha256sum base64; do
+  command -v "$tool" >/dev/null || die "$tool is not installed"
+done
+
+bw_read_keys
+(( ${#BW_KEY[@]} )) || die "no account is unlocked -- run this as 'bwu move', which unlocks them first"
+mapfile -t accounts < <(bw_accounts)
+known() { printf '%s\n' "${accounts[@]}" | grep -qxF -- "$1"; }
+[[ -n $to ]] || die "--to names the account to move to: ${accounts[*]}"
+known "$to" || die "there is no account $to -- ${accounts[*]}"
+[[ -z $from ]] || known "$from" || die "there is no account $from -- ${accounts[*]}"
+[[ $from != "$to" ]] || die "--from and --to are both $to"
+[[ -n ${BW_KEY[$to]-} ]] || die "$to is locked -- bwu unlocks it"
+[[ -z $from || -n ${BW_KEY[$from]-} ]] || die "$from is locked -- bwu unlocks it"
+if [[ -n $from ]]; then
+  sources=("$from")
+else
+  mapfile -t sources < <(bw_unlocked | grep -vxF -- "$to" || true)
+fi
+(( ${#sources[@]} )) || die "no account but $to is unlocked -- there is nothing to move from"
+if ! $yes && [[ ! -t 0 ]]; then
+  die "there is no terminal to ask in -- -y moves without asking"
+fi
+
+# An account's vault as the server has it now: synced, then read whole. Only
+# ever before anything is changed, so a key gone stale exits 3, which has bwu
+# unlock and run this again -- harmless, with nothing done yet.
+declare -A ITEMS=() FOLDERS=() COLS=() ORGS=()
+load() {
+  local a=$1
+  bw_unlocks "$a" || exit 3
+  bw_as "$a" sync >/dev/null 2>&1 || die "could not reach the server for $a -- nothing was changed"
+  ITEMS[$a]=$(bw_as "$a" list items 2>/dev/null) || die "bw could not list $a's items -- nothing was changed"
+  FOLDERS[$a]=$(bw_as "$a" list folders 2>/dev/null) || die "bw could not list $a's folders -- nothing was changed"
+  COLS[$a]=$(bw_as "$a" list collections 2>/dev/null) || die "bw could not list $a's collections -- nothing was changed"
+  ORGS[$a]=$(bw_as "$a" list organizations 2>/dev/null) || die "bw could not list $a's organisations -- nothing was changed"
+}
+
+# What is moved: the account it comes from, its items, and for each the names
+# of the places it is in -- its folder, or its collections. For --collection,
+# the place picked and the ones nested in it.
+moved=""       # the items, a JSON array
+src_org=""     # their organisation, or "" for the personal vault
+subtree=""     # --collection: the places, a JSON array, deepest first
+kind=""        # --collection: folder or collection
+if ! $whole; then
+  pick=("$DOTFILES/bin/bw-vault" pick --except "$to" --header "the item to move to $to")
+  [[ -z $from ]] || pick+=(-a "$from")
+  ! $update || pick+=(--update)
+  [[ -z $query ]] || pick+=("$query")
+  rc=0
+  picked=$("${pick[@]}") || rc=$?
+  (( rc == 0 )) || exit "$rc"
+  IFS=$'\t' read -r from id <<<"$picked"
+  [[ -n $from && $from != "$to" && -n $id ]] || die "bw-vault picked nothing"
+  load "$from"
+  moved=$(jq -c --arg id "$id" '[.[] | select(.id == $id)]' <<<"${ITEMS[$from]}")
+  [[ $moved != "[]" ]] || die "the item picked is no longer in $from -- bwu update brings the list up to date"
+  src_org=$(jq -r '.[0].organizationId // empty' <<<"$moved")
+  # Its folder, or its collections, by name.
+  moved=$(printf '%s\n%s\n%s\n' "$moved" "${FOLDERS[$from]}" "${COLS[$from]}" | jq -c -s '
+    (INDEX(.[1][]; .id // "") | map_values(.name)) as $f
+    | (INDEX(.[2][]; .id) | map_values(.name)) as $c
+    | .[0] | map(. + {places: (if .organizationId then [(.collectionIds // [])[] | $c[.] // empty] | sort
+                               elif .folderId then [$f[.folderId] // empty] else [] end)})')
+else
+  for a in "${sources[@]}"; do
+    load "$a"
+  done
+  # Every folder and collection of the accounts moved from, one line each:
+  # its account, kind and id, hidden, then its name, how many items it holds
+  # with the ones nested in it, and its vault.
+  places=""
+  for a in "${sources[@]}"; do
+    places+=$(printf '%s\n%s\n%s\n%s\n' "${ITEMS[$a]}" "${FOLDERS[$a]}" "${COLS[$a]}" "${ORGS[$a]}" |
+              jq -c -s --arg a "$a" '
+      .[0] as $items
+      | (INDEX(.[3][]; .id) | map_values(.name)) as $o
+      | ([.[1][] | select(.id != null) | {account: $a, kind: "folder", id, org: null, vault: "personal", name}]
+         + [.[2][] | {account: $a, kind: "collection", id, org: .organizationId,
+                      vault: ($o[.organizationId] // "organisation"), name}]) as $places
+      | $places[] as $p
+      | [$places[] | select(.kind == $p.kind and .org == $p.org
+                            and (.name == $p.name or (.name | startswith($p.name + "/"))))] as $sub
+      | ($sub | map(.id)) as $ids
+      | $p + {subtree: $sub,
+              items: [$items[] | select(
+                        if $p.kind == "folder"
+                        then .organizationId == null and (.folderId as $f | any($ids[]; . == $f))
+                        else .organizationId == $p.org and any((.collectionIds // [])[]; . as $c | any($ids[]; . == $c))
+                        end) | .id]}')$'\n'
+  done
+  [[ -n ${places//$'\n'/} ]] || die "${from:-no account but $to} has no folder or collection"
+  list=$(printf '%s' "$places" | jq -r -s --argjson many "$( (( ${#sources[@]} > 1 )) && echo true || echo false)" '
+    def pad($n): . + (" " * ([$n - length, 0] | max));
+    sort_by(.account, .vault, (.name | ascii_downcase))
+    | (map(.name | length) + [4] | max) as $wn
+    | (map(.vault | length + (if $many then (.account | length) + 3 else 0 end)) + [5] | max) as $wv
+    | (["", "", "", ("NAME" | pad($wn)), ("ITEMS" | pad(5)), ("VAULT" | pad($wv)), "KIND"] | join("\t")),
+      (.[] | [.account, .kind, .id, (.name | pad($wn)), ("\(.items | length)" | pad(5)),
+              ((if $many then .account + " · " else "" end) + .vault | pad($wv)),
+              "\u001b[2m\(.kind)\u001b[0m"] | join("\t"))')
+  rc=0
+  line=$(fzf --ansi --delimiter=$'\t' --with-nth=4.. --nth=1 --tabstop=1 \
+           --header-lines=1 --header="the folder or collection to move to $to, whole" \
+           --layout=reverse --height=60% --prompt='move> ' \
+           --query="$query" --select-1 --exit-0 <<<"$list") || rc=$?
+  case $rc in
+    0)   ;;
+    1)   die "no folder or collection matches '$query'" ;;
+    130) exit 130 ;;
+    *)   die "fzf failed" ;;
+  esac
+  IFS=$'\t' read -r from kind pid _ <<<"$line"
+  place=$(printf '%s' "$places" | jq -c -s --arg a "$from" --arg id "$pid" 'map(select(.account == $a and .id == $id)) | first')
+  src_org=$(jq -r '.org // empty' <<<"$place")
+  subtree=$(jq -c '.subtree | sort_by(.name | split("/") | length) | reverse' <<<"$place")
+  # Its items, and for each the names of its places in the subtree alone:
+  # an item in a collection outside it leaves that one too.
+  moved=$(printf '%s\n%s\n' "$place" "${ITEMS[$from]}" | jq -c -s '
+    .[0] as $p
+    | (INDEX($p.subtree[]; .id) | map_values(.name)) as $names
+    | [.[1][] | select(.id as $i | any($p.items[]; . == $i))
+       | . + {places: (if $p.kind == "folder" then [$names[.folderId // ""] // empty]
+                       else [(.collectionIds // [])[] | $names[.] // empty] | sort end),
+              elsewhere: (if $p.kind == "folder" then 0
+                          else [(.collectionIds // [])[] | select($names[.] == null)] | length end)}]')
+fi
+load "$to"
+
+# Where in the other account: its personal vault for a personal item. For an
+# organisation's, its organisation -- unless it is in this very one, where the
+# items are already -- the one picked, when it has several, or with none its
+# personal vault, the collections becoming folders.
+dst_org="" dst_vault=personal
+if [[ -n $src_org ]]; then
+  src_org_name=$(jq -r --arg o "$src_org" 'map(select(.id == $o)) | first | .name // "the organisation"' <<<"${ORGS[$from]}")
+  if jq -e --arg o "$src_org" 'any(.[]; .id == $o)' >/dev/null <<<"${ORGS[$to]}"; then
+    die "$to is in $src_org_name too, so its items are there for both already -- give $to access to the collection instead"
+  fi
+  orgs=$(jq -r '.[] | select(.enabled != false and (.status == null or .status == 2)) | [.id, .name] | @tsv' <<<"${ORGS[$to]}")
+  if [[ -n $orgs && $(wc -l <<<"$orgs") -gt 1 ]]; then
+    rc=0
+    orgs=$( { printf '\tORGANISATION\n'; printf '%s\n' "$orgs"; } |
+            fzf --delimiter=$'\t' --with-nth=2.. --header-lines=1 \
+                --header="the organisation in $to for $src_org_name's items" \
+                --layout=reverse --height=40% --prompt='into> ' ) || rc=$?
+    case $rc in
+      0)   ;;
+      130) exit 130 ;;
+      *)   die "no organisation picked -- nothing was changed" ;;
+    esac
+  fi
+  if [[ -n $orgs ]]; then
+    dst_org=$(cut -f1 <<<"$orgs")
+    dst_vault=$(cut -f2 <<<"$orgs")
+  fi
+fi
+dst_kind=folder
+[[ -z $dst_org ]] || dst_kind=collection
+
+# Each item's places in the other account, by name. A folder holds one item
+# once: an organisation's item in several collections, going to folders, goes
+# to the first. An organisation's item must be in a collection.
+moved=$(jq -c --arg kind "$dst_kind" 'map(. + {want: (if $kind == "folder" then .places[:1] else .places end)})' <<<"$moved")
+if [[ $dst_kind == collection ]]; then
+  homeless=$(jq -r '[.[] | select(.want == []) | .name] | join(", ")' <<<"$moved")
+  [[ -z $homeless ]] || die "in no collection you can see, so with none to go into in $dst_vault: $homeless"
+fi
+
+# The places there are already, by name, and the ones to make: every name
+# wanted, and the names above it, so that the new ones nest -- and with
+# --collection every place moved, the empty ones too.
+declare -A PLACE=()
+if [[ $dst_kind == folder ]]; then
+  existing=$(jq -r '.[] | select(.id != null) | [.name, .id] | @tsv' <<<"${FOLDERS[$to]}")
+else
+  existing=$(jq -r --arg o "$dst_org" '.[] | select(.organizationId == $o) | [.name, .id] | @tsv' <<<"${COLS[$to]}")
+fi
+while IFS=$'\t' read -r pname pid; do
+  [[ -z $pname || -n ${PLACE[$pname]-} ]] || PLACE[$pname]=$pid
+done <<<"$existing"
+make=()
+while IFS= read -r pname; do
+  [[ -z $pname || -n ${PLACE[$pname]-} ]] || make+=("$pname")
+done < <(jq -r --argjson sub "${subtree:-[]}" '
+           [(.[].want[], $sub[].name) | split("/") as $p | range(1; $p | length + 1) | $p[:.] | join("/")]
+           | unique | sort_by(split("/") | length)[]' <<<"$moved")
+
+# An item bw could not decrypt whole holds "[error: cannot decrypt]" where a
+# field was. Copied, the copy would hold those very words, compare the same,
+# and the original -- which another app may still read -- would go.
+undecrypted=$(jq -r '[.[] | select(tostring | contains("[error: cannot decrypt]")) | .name] | join(", ")' <<<"$moved")
+[[ -z $undecrypted ]] || die "bw could not decrypt all of $undecrypted -- nothing was changed"
+
+# What is about to happen, and the go-ahead for it.
+count=$(jq length <<<"$moved")
+files=$(jq '[.[].attachments // [] | length] | add // 0' <<<"$moved")
+from_where=$(jq -r 'map(.places | join(", ")) | unique | map(select(. != "")) | join("; ")' <<<"$moved")
+src_vault=personal
+[[ -z $src_org ]] || src_vault=$src_org_name
+say "Moving to $to:"
+jq -r '.[] | "  \(.name)" + ((.attachments // []) | length | if . > 0 then " -- \(.) file\(if . > 1 then "s" else "" end)" else "" end)
+             + (if (.elsewhere // 0) > 0 then " -- leaves its other collections too" else "" end)' <<<"$moved" >&2
+say "  from  $from · $src_vault${from_where:+ · $from_where}"
+to_where=$(jq -r '[.[].want[]] | unique | join(", ")' <<<"$moved")
+say "  to    $to · $dst_vault${to_where:+ · $to_where}"
+(( ${#make[@]} == 0 )) || say "        made there: $(printf '%s, ' "${make[@]}" | sed 's/, $//')"
+if [[ $kind == folder ]]; then
+  say "  then  $(jq -r 'map(.name) | reverse | join(", ")' <<<"$subtree") deleted from $from, once empty"
+elif [[ $kind == collection ]]; then
+  say "  then  $(jq -r 'map(.name) | reverse | join(", ")' <<<"$subtree") left in $src_org_name, empty -- the"
+  say "        originals in its trash are still in them, and can be restored only so"
+fi
+say "Each copy is read back and compared with its original -- every field, and each"
+say "file by SHA-256 -- and only then does the original go to $from's trash."
+if ! $yes; then
+  read -r -p "Move $count item$( (( count == 1 )) || echo s)$( (( files == 0 )) || echo ", $files file$( (( files == 1 )) || echo s)")? [y/N] " reply || reply=""
+  [[ ${reply,,} == y || ${reply,,} == yes ]] || { say "nothing was moved"; exit 1; }
+fi
+
+# From here on, things change. The keys were checked a moment ago; one that
+# fails now is a failure like any other, never a 3 -- bwu would run all this
+# again.
+tmp=$(umask 077 && mktemp -d "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/bwu-move.XXXXXX") ||
+  die "cannot make a private directory for the files -- nothing was changed"
+cleanup() {
+  # Only the directory made above: by its own name, and never through a link.
+  [[ -n ${tmp-} && ${tmp##*/} == bwu-move.?????? && -d $tmp && ! -L $tmp ]] || return 0
+  rm -rf -- "${tmp:?}"
+}
+trap cleanup EXIT
+
+# The JSON bw takes, base64, on stdin -- never on a command line, where ps
+# would show it.
+encode() { base64 -w0; }
+
+# Fields that make an item what it is, for comparing a copy with its original:
+# everything bw gives but ids, dates, places and files.
+CONTENT='def content:
+  {type, name, notes, favorite: (.favorite // false), reprompt: (.reprompt // 0),
+   fields: [(.fields // [])[] | {name, value, type, linkedId}],
+   login: (.login | if . == null then null else
+             {username, password, totp, uris: [(.uris // [])[] | {uri, match}],
+              fido2Credentials: (.fido2Credentials // [])} end),
+   secureNote, card, identity, sshKey,
+   passwordHistory: [(.passwordHistory // [])[] | {password, lastUsedDate}]};'
+
+# A place made here, deleted again -- when no copy is left in it.
+unmake() {
+  if [[ $dst_kind == folder ]]; then
+    bw_as "$to" delete folder "$1" >/dev/null 2>&1
+  else
+    bw_as "$to" delete org-collection "$1" --organizationid "$dst_org" >/dev/null 2>&1
+  fi
+}
+
+# The items, one by one: each one's JSON, and what becomes of it. NEW holds
+# the id of each copy there is in the other account -- set once it is made,
+# cleared once it is deleted again.
+mapfile -t SRC < <(jq -c '.[]' <<<"$moved")
+NEW=() STATE=() WHY=() SUMS=()
+name_of() { jq -r '.name' <<<"${SRC[$1]}"; }
+
+# A copy deleted for good, and why its original stays.
+reject() {
+  local i=$1
+  WHY[i]=$2
+  STATE[i]=failed
+  if [[ -n ${NEW[i]-} ]]; then
+    if bw_as "$to" delete item "${NEW[i]}" --permanent >/dev/null 2>&1; then
+      NEW[i]=""
+    else
+      WHY[i]+=" -- and its copy could not be removed: delete it in $to by hand"
+    fi
+  fi
+  say "  not moved  $(name_of "$i"): ${WHY[i]}"
+}
+
+# The places made here, deleted again, last first -- only ever when no copy
+# is left in them.
+unmake_all() {
+  local k
+  for (( k = ${#made[@]} - 1; k >= 0; k-- )); do
+    unmake "${made[k]}" || true
+  done
+}
+
+# Ctrl-C: before the originals go, every copy is removed again, and the places
+# made for them, unless a copy is left; after, the ones in both accounts are
+# named. A second Ctrl-C does not cut that short, nor does a stderr no one
+# reads any more: the clean-up comes first, what it says after.
+phase=copy current="" made=()
+on_interrupt() {
+  trap '' INT TERM HUP PIPE
+  set +e
+  exec 2>&"$stderr"
+  local i notes=() left=() kept=false
+  if [[ $phase == trash ]]; then
+    for i in "${!SRC[@]}"; do
+      [[ ${STATE[i]-} != checked || $i == "$current" ]] || left+=("$(name_of "$i")")
+    done
+    notes+=("stopped -- in both accounts now, the copy checked: $(printf '%s, ' "${left[@]}" | sed 's/, $//')")
+    [[ -z $current ]] || notes+=("$(name_of "$current") was going to $from's trash just then -- it may be there")
+  else
+    notes+=("stopped -- the copies made so far are removed; the originals are as they were")
+    for i in "${!SRC[@]}"; do
+      [[ -n ${NEW[i]-} ]] || continue
+      if ! bw_as "$to" delete item "${NEW[i]}" --permanent >/dev/null 2>&1; then
+        kept=true
+        notes+=("the copy of $(name_of "$i") could not be removed: delete it in $to by hand")
+      fi
+    done
+    if [[ -n $current ]]; then
+      kept=true
+      notes+=("$(name_of "$current") was being copied -- if $to has it all the same, delete it there")
+    fi
+    $kept || unmake_all
+  fi
+  echo >&2
+  for i in "${notes[@]}"; do
+    say "bwu move: $i"
+  done
+  exit 130
+}
+trap on_interrupt INT TERM HUP
+
+# The places to make, made: parents first, each one's id kept.
+for pname in "${make[@]}"; do
+  if [[ $dst_kind == folder ]]; then
+    out=$(jq -nc --arg n "$pname" '{name: $n}' | encode | bw_as "$to" create folder 2>"$tmp/err") || out=""
+  else
+    out=$(jq -nc --arg o "$dst_org" --arg n "$pname" '{organizationId: $o, name: $n}' | encode |
+          bw_as "$to" create org-collection --organizationid "$dst_org" 2>"$tmp/err") || out=""
+  fi
+  pid=$(jq -r '.id // empty' <<<"$out" 2>/dev/null || true)
+  if [[ -z $pid ]]; then
+    err=$(<"$tmp/err")
+    say "bwu move: could not make the $dst_kind $pname in $to: ${err:-bw gave no reason}"
+    unmake_all
+    die "nothing was moved"
+  fi
+  PLACE[$pname]=$pid
+  made+=("$pid")
+done
+
+# Each item's folder, or its collections, in the other account: their ids.
+# Collections sorted, as the check compares them.
+where() {
+  if [[ $dst_kind == folder ]]; then
+    want=$(jq -r '.want[0] // empty' <<<"$1")
+    folder=""
+    [[ -z $want ]] || folder=${PLACE[$want]}
+    cols="[]"
+  else
+    folder=""
+    cols=$(jq -r '.want[]' <<<"$1" | while IFS= read -r w; do printf '%s\n' "${PLACE[$w]}"; done |
+           jq -R . | jq -sc 'sort')
+  fi
+}
+
+# 1. Copy.
+say "Copying to $to..."
+for i in "${!SRC[@]}"; do
+  src=${SRC[i]}
+  name=$(name_of "$i")
+  NEW[i]="" STATE[i]=copying WHY[i]="" SUMS[i]=""
+  where "$src"
+  copy=$(jq -c --arg org "$dst_org" --arg folder "$folder" --argjson cols "$cols" '
+    del(.id, .key, .object, .attachments, .places, .want, .elsewhere, .revisionDate, .creationDate,
+        .deletedDate, .archivedDate, .edit, .viewPassword, .permissions, .organizationUseTotp)
+    | .organizationId = (if $org == "" then null else $org end)
+    | .collectionIds = (if $org == "" then null else $cols end)
+    | .folderId = (if $folder == "" then null else $folder end)
+    | if .login != null then .login |= del(.passwordRevisionDate) else . end' <<<"$src")
+  current=$i
+  if ! out=$(printf '%s' "$copy" | encode | bw_as "$to" create item 2>"$tmp/err"); then
+    current=""
+    reject "$i" "could not be made in $to: $(<"$tmp/err")"
+    continue
+  fi
+  NEW[i]=$(jq -r '.id // empty' <<<"$out" 2>/dev/null || true)
+  current=""
+  unset out copy
+  [[ -n ${NEW[i]} ]] || { reject "$i" "bw made it in $to, but did not say as what"; continue; }
+
+  # Its files: each down from the one account, its size and SHA-256 noted,
+  # then up to the other. The size the vault gives is not the file's -- it is
+  # the encrypted one's -- and bw checks each file's MAC as it decrypts it.
+  sid=$(jq -r '.id' <<<"$src")
+  ok=true
+  k=0
+  while IFS=$'\t' read -r aid fname; do
+    [[ -n $aid ]] || continue
+    k=$(( k + 1 ))
+    if [[ -z $fname || $fname == . || $fname == .. || $fname == */* ]]; then
+      reject "$i" "it has a file named '$fname', which cannot be copied by that name"
+      ok=false
+      break
+    fi
+    mkdir -p -- "$tmp/$i/$k"
+    file=$tmp/$i/$k/$fname
+    if ! bw_as "$from" get attachment "$aid" --itemid "$sid" --raw > "$file" 2>"$tmp/err"; then
+      reject "$i" "its file $fname could not be downloaded: $(<"$tmp/err")"
+      ok=false
+      break
+    fi
+    SUMS[i]+="$fname"$'\t'"$(stat -c %s -- "$file")"$'\t'"$(sha256sum -- "$file" | cut -d' ' -f1)"$'\n'
+    if ! bw_as "$to" create attachment --file "$file" --itemid "${NEW[i]}" --nointeraction >/dev/null 2>"$tmp/err"; then
+      reject "$i" "its file $fname could not be uploaded to $to: $(<"$tmp/err")"
+      ok=false
+      break
+    fi
+    rm -f -- "$file"
+  done < <(jq -r '(.attachments // [])[] | [.id, (.fileName // "")] | @tsv' <<<"$src")
+  $ok || continue
+  STATE[i]=copied
+  say "  copied     $name$( (( k == 0 )) || echo ", $k file$( (( k == 1 )) || echo s)")"
+done
+
+# 2. Check: every copy as the server has it now, against its original.
+phase=check
+copied=0
+for i in "${!SRC[@]}"; do
+  [[ ${STATE[i]} != copied ]] || copied=$(( copied + 1 ))
+done
+if (( copied )); then
+  say "Checking..."
+  bw_as "$to" sync >/dev/null 2>&1 || say "bwu move: could not sync $to -- checking what bw has"
+  after=$(bw_as "$to" list items 2>/dev/null) || after="[]"
+  for i in "${!SRC[@]}"; do
+    [[ ${STATE[i]} == copied ]] || continue
+    src=${SRC[i]}
+    name=$(name_of "$i")
+    copy=$(jq -c --arg id "${NEW[i]}" '.[] | select(.id == $id)' <<<"$after")
+    if [[ -z $copy ]]; then
+      reject "$i" "its copy is not in $to after all"
+      continue
+    fi
+    # Field by field -- by name only, never a value.
+    differs=$(printf '%s\n%s\n' "$src" "$copy" | jq -r -s "$CONTENT"'
+      (.[0] | content) as $a | (.[1] | content) as $b
+      | [$a | keys_unsorted[] | select($a[.] != $b[.])] | join(", ")')
+    if [[ -n $differs ]]; then
+      reject "$i" "its copy differs in $differs"
+      continue
+    fi
+    # Its place: the organisation, and the folder or collections meant.
+    where "$src"
+    if ! jq -e --arg org "$dst_org" --arg folder "$folder" --argjson cols "$cols" '
+         (.organizationId // "") == $org
+         and (if $org == "" then (.folderId // "") == $folder else ((.collectionIds // []) | sort) == $cols end)' \
+         >/dev/null <<<"$copy"; then
+      reject "$i" "its copy is not where it was meant to go"
+      continue
+    fi
+    # Its files: downloaded once more, and compared by name, size and SHA-256.
+    sums=""
+    ok=true
+    k=0
+    while IFS=$'\t' read -r aid fname; do
+      [[ -n $aid ]] || continue
+      k=$(( k + 1 ))
+      mkdir -p -- "$tmp/check/$i"
+      file=$tmp/check/$i/$k
+      if ! bw_as "$to" get attachment "$aid" --itemid "${NEW[i]}" --raw > "$file" 2>"$tmp/err"; then
+        reject "$i" "its copy's file $fname could not be downloaded: $(<"$tmp/err")"
+        ok=false
+        break
+      fi
+      sums+="$fname"$'\t'"$(stat -c %s -- "$file")"$'\t'"$(sha256sum -- "$file" | cut -d' ' -f1)"$'\n'
+      rm -f -- "$file"
+    done < <(jq -r '(.attachments // [])[] | [.id, (.fileName // "")] | @tsv' <<<"$copy")
+    $ok || continue
+    if [[ $(sort <<<"$sums") != "$(sort <<<"${SUMS[i]}")" ]]; then
+      reject "$i" "its copy's files are not the same as the original's"
+      continue
+    fi
+    STATE[i]=checked
+    say "  the same   $name$( (( k == 0 )) || echo ", $k file$( (( k == 1 )) || echo s) by SHA-256")"
+  done
+  unset after copy
+fi
+
+# 3. The originals of the copies found the same, into the trash -- each as
+# the server has it now: one changed elsewhere since it was copied stays, and
+# its copy, of what it was, goes.
+phase=trash
+bw_as "$from" sync >/dev/null 2>&1 || say "bwu move: could not sync $from -- going by what bw has"
+now=$(bw_as "$from" list items 2>/dev/null) || now=""
+moved_n=0 failed=()
+for i in "${!SRC[@]}"; do
+  name=$(name_of "$i")
+  sid=$(jq -r '.id' <<<"${SRC[i]}")
+  if [[ ${STATE[i]} == checked && -n $now ]]; then
+    was=$(jq -r '.revisionDate // ""' <<<"${SRC[i]}")
+    is=$(jq -r --arg id "$sid" '.[] | select(.id == $id) | .revisionDate // ""' <<<"$now")
+    if [[ -z $is ]]; then
+      STATE[i]=moved
+      moved_n=$(( moved_n + 1 ))
+      say "  moved      $name -- its original was gone from $from already"
+      continue
+    elif [[ $is != "$was" ]]; then
+      reject "$i" "it was changed in $from while it was being moved -- move it again"
+    fi
+  fi
+  if [[ ${STATE[i]} != checked ]]; then
+    failed+=("$name")
+    continue
+  fi
+  current=$i
+  if bw_as "$from" delete item "$sid" >/dev/null 2>"$tmp/err"; then
+    STATE[i]=moved
+    current=""
+    moved_n=$(( moved_n + 1 ))
+  else
+    current=""
+    STATE[i]=both
+    failed+=("$name")
+    say "bwu move: $name is copied and checked, but the original could not go to $from's trash: $(<"$tmp/err") -- it is in both accounts now"
+  fi
+done
+trap - INT TERM HUP
+unset now
+
+# Nothing moved, something meant to, and no copy left: the places made for it
+# go again.
+copies=false
+for i in "${!SRC[@]}"; do
+  [[ -z ${NEW[i]-} ]] || copies=true
+done
+if ! $copies && (( ${#failed[@]} > 0 )); then
+  unmake_all
+fi
+
+# --collection of a folder, and everything in it moved: the folders it leaves
+# empty, deleted, deepest first. One something still is in -- an item that
+# could not go, or an organisation's in a folder -- stays, and so do the ones
+# above it. An original restored from the trash comes back with no folder.
+#
+# Collections are not deleted: an item in the trash keeps its collections,
+# and an organisation's item in none can be seen, and restored, by its admins
+# alone. The ones emptied stay, to be deleted by hand once the trash no longer
+# matters.
+if [[ $kind == collection ]] && (( moved_n > 0 )); then
+  say "  left       $(jq -r 'map(.name) | reverse | join(", ")' <<<"$subtree") in $src_org_name -- the originals in its trash"
+  say "             are still in them; delete them in the web vault once that no longer matters"
+fi
+if [[ $kind == folder ]] && (( ${#failed[@]} == 0 )); then
+  bw_as "$from" sync >/dev/null 2>&1 || true
+  kept=()
+  while IFS=$'\t' read -r pid pname; do
+    above=false
+    for k in "${kept[@]}"; do
+      [[ $k != "$pname/"* ]] || above=true
+    done
+    if $above; then
+      say "  kept       the $kind $pname in $from -- one in it is kept"
+      kept+=("$pname")
+      continue
+    fi
+    left=$(bw_as "$from" list items --folderid "$pid" 2>/dev/null | jq length 2>/dev/null || echo "?")
+    if [[ $left == 0 ]] && bw_as "$from" delete folder "$pid" >/dev/null 2>&1; then
+      say "  deleted    the folder $pname, from $from"
+      continue
+    fi
+    say "  kept       the $kind $pname in $from$([[ $left == 0 ]] || echo " -- it holds $left item(s) still")"
+    kept+=("$pname")
+  done < <(jq -r '.[] | [.id, .name] | @tsv' <<<"$subtree")
+fi
+
+# The cache anew, so that bwu get shows both accounts as they are now.
+"$DOTFILES/bin/bw-vault" update >/dev/null 2>&1 ||
+  say "bwu move: the cache is behind the vaults -- bwu update brings it up to date"
+
+if (( ${#failed[@]} == 0 )); then
+  say "Moved $moved_n item$( (( moved_n == 1 )) || echo s) to $to; the originals are in $from's trash for 30 days."
+  exit 0
+fi
+say "Moved $moved_n of $count to $to. Not moved: $(printf '%s, ' "${failed[@]}" | sed 's/, $//')."
+exit 1

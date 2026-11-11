@@ -1,36 +1,47 @@
 #!/usr/bin/env bash
 #
-# bw-vault -- the Bitwarden vault behind `bwu get`, `put`, `add` and `update`:
-# an encrypted cache of it, and an fzf picker over that cache.
+# bw-vault -- the Bitwarden vaults behind `bwu get`, `put`, `add` and
+# `update`: an encrypted cache of every account's vault, and an fzf picker
+# over that cache.
 #
 #   bwu get                # pick; print the username and password
 #   bwu get github         # the same, the search started with "github"
+#   bwu get -a alari       # pick from one account's items alone
 #   bwu get -u | -p        # the username alone, or the password alone
 #   bwu get -c             # copy instead of print: the password, or with -u
 #                          # the username -- the username is printed alongside
 #   bwu get -f [name [new]]  # an item's attached file, saved -- see --help
 #   bwu put -f file [name] # an item's attached file, replaced by this one
 #   bwu add -f file...     # files attached to an item
-#   bwu update             # sync with the server, and cache the vault anew
+#   bwu update             # sync with the server, and cache the vaults anew
 #   bwu --update get       # the same, then pick
+#   bwu login NAME EMAIL   # add an account, and log in to it
+#   bwu lock               # lock every account, and delete the cache
 #
-# Run through bwu, the shell function in shell/bashrc, which unlocks the vault
-# first and hands this the session key and the cache key for its run alone;
-# not by hand.
+# Run through bwu, the shell function in shell/bashrc, which unlocks the
+# accounts first and hands this their session keys and the cache key, in
+# BW_KEYS, for its run alone; not by hand.
+#
+# The accounts are lib/bw.sh's: each its own bw data directory, so bw is run
+# as one account at a time, with that account's key. Every account unlocked
+# is in the cache and the list, and what is done to an item -- a file
+# fetched, put or added -- is done as the account the item is in.
 #
 # The cache holds every item, secrets included, encrypted with age to a key
 # made new with every unlock (bin/bw-session). The key is kept as the session
-# key is: in root's store, and unexported in the terminals unlocked with it.
+# keys are: in root's store, and unexported in the terminals unlocked with it.
 # So a cache from an earlier unlock cannot be read, and `bw lock` deletes it.
 # `bwu get` reads the cache and never runs bw; only when there is none it can
-# read does it sync with the server and write one. Changes made elsewhere --
-# the browser, the phone -- show up after `bwu update`.
+# read, or it lacks an account unlocked since, does it sync with the server
+# and write one. Changes made elsewhere -- the browser, the phone -- show up
+# after `bwu update`.
 #
 # The list shows every item: a login with its username and website, anything
 # else by its name. The search covers the name, username and website, so a
 # note is found by its title, and its text is never searched. Beside each, the
-# vault it is in -- personal, or an organisation's, by name -- and its folder,
-# or for an organisation's item its collections.
+# account it is in, when there is more than one, the vault -- personal, or an
+# organisation's, by name -- and its folder, or for an organisation's item its
+# collections.
 #
 # What an item yields: a login its username and password; a note its text; a
 # card its number, expiry and code (-p: the number); an SSH key its private
@@ -67,22 +78,28 @@ usage() {
 ${b}bwu${r} -- Bitwarden in the terminal: unlock once, then find, copy and store secrets.
 
 ${b}Usage${r}
-  bwu                       unlock the vault in this terminal
+  bwu                       unlock every account in this terminal
   bwu get [options] [text]  pick an item with fzf, print its secret
   bwu put [text] -f file [name]
                             replace one of an item's files with file
   bwu add [text] -f file... attach files to an item
-  bwu update                sync with the server, cache the vault anew
+  bwu move --to NAME [options] [text]
+                            move an item, or a whole collection, to another
+                            account -- bwu move --help
+  bwu update                sync with the server, cache the vaults anew
   bwu --update get ...      the same, then pick
-  bwu lock                  lock the vault everywhere, delete the cache
+  bwu login NAME EMAIL      add an account by that name, and log in to it
+  bwu lock                  lock every account everywhere, delete the cache
   bwu --help                this
 
 ${b}Options for get${r}
+  -a, --account NAME
+                   only that account's items; also for put and add
   -u, --username   the username alone
   -p, --password   the password alone (a note's text, a card's number)
   -c, --copy       copy instead of print, cleared after ${CLEAR_AFTER} s; with
                    neither -u nor -p, prints the username, copies the password
-      --update     sync and cache the vault anew first
+      --update     sync and cache the vaults anew first
   text             start the search with it; one match is picked at once
   Short options combine: -cp, -cu.
 
@@ -131,18 +148,28 @@ ${b}Examples${r}
   bwu add github -f ~/.ssh/github ~/.ssh/github.pub
                             both attached to GitHub
 
+${b}Accounts${r}
+  bwu login superhands alari@superhands.ee
+                   adds an account, named superhands, and logs in to it, on the
+                   server bw itself uses. bw's own login, when it is that one,
+                   is taken as it is, with no logging in.
+
 ${b}How it works${r}
-  The first bwu asks for your master password; each terminal after that
-  needs only your fingerprint, or your password, for sudo. bwu get picks
-  from an encrypted cache of the vault, so the list opens at once -- changes
-  made elsewhere, in the browser or on the phone, arrive with bwu update.
-  The search covers names, usernames and websites; a note is found by its
-  title alone. bw lock, or bwu lock, locks the vault for every terminal.
-  First time on a machine: bw login.
+  The first bwu asks for each account's master password; each terminal after
+  that needs only your fingerprint, or your password, for sudo. bwu get picks
+  from an encrypted cache of every account, so the list opens at once --
+  changes made elsewhere, in the browser or on the phone, arrive with bwu
+  update. The search covers names, usernames and websites; a note is found by
+  its title alone. bwu lock locks every account for every terminal; bw lock
+  the one in bw's own directory.
 EOF
   exit "${1:-0}"
 }
 die() { echo "bwu: $*" >&2; exit 1; }
+
+DOTFILES=$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)
+# shellcheck source=../lib/bw.sh
+source "$DOTFILES/lib/bw.sh"
 
 # BW_CLEAR_AFTER is for tests.
 CLEAR_AFTER=${BW_CLEAR_AFTER:-45}
@@ -151,9 +178,9 @@ CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-dotfiles/bw-vault.age
 sub=${1-}
 (( $# )) && shift
 case $sub in
-  get|put|add|update|forget|files) ;;
-  -h|--help|"")                    usage 0 ;;
-  *)                               die "unknown command: $sub  (try --help)" ;;
+  get|put|add|update|pick|forget|files|accounts|check|login|lock) ;;
+  -h|--help|"") usage 0 ;;
+  *)            die "unknown command: $sub  (try --help)" ;;
 esac
 
 if [[ $sub == forget ]]; then
@@ -161,17 +188,112 @@ if [[ $sub == forget ]]; then
   exit 0
 fi
 
+# For bwu's tab completion: the accounts' names.
+if [[ $sub == accounts ]]; then
+  bw_accounts
+  exit 0
+fi
+
+bw_read_keys
+
 # For bwu's tab completion: the names of the files attached anywhere in the
-# vault, one per line, from the cache alone -- nothing when there is none this
-# terminal's key can read. It never runs bw, so Tab never asks or waits.
+# vaults, one per line, from the cache alone -- nothing when there is none
+# this terminal's key can read. It never runs bw, so Tab never asks or waits.
 if [[ $sub == files ]]; then
-  [[ -n ${BW_CACHE_KEY-} && -f $CACHE ]] || exit 0
+  [[ -n $BW_CACHE_KEY && -f $CACHE ]] || exit 0
   age --decrypt -i <(printf '%s\n' "$BW_CACHE_KEY") "$CACHE" 2>/dev/null |
     jq -r '[.items[] | (.attachments // [])[] | .fileName // empty] | unique[]' 2>/dev/null || true
   exit 0
 fi
 
-want=both copy=false query="" update=false
+# For bwu: is every account unlocked in this terminal? 3 when one is not --
+# locked since, never unlocked, or added since -- which tells bwu to unlock.
+# One logged out does not count: unlocking cannot help it.
+if [[ $sub == check ]]; then
+  while IFS= read -r name; do
+    bw_unlocks "$name" && continue
+    [[ $(BITWARDENCLI_APPDATA_DIR=$BW_ACCOUNTS/$name bw status 2>/dev/null | jq -r '.status // empty' 2>/dev/null) == unauthenticated ]] ||
+      exit 3
+  done < <(bw_accounts)
+  exit 0
+fi
+
+if [[ $sub == lock ]]; then
+  locked=()
+  while IFS= read -r name; do
+    BITWARDENCLI_APPDATA_DIR=$BW_ACCOUNTS/$name bw lock >/dev/null 2>&1 &&
+      locked+=("$name")
+  done < <(bw_accounts)
+  rm -f -- "$CACHE"
+  if (( ${#locked[@]} )); then
+    echo "Bitwarden: ${locked[*]} locked"
+  else
+    echo "Bitwarden: no account to lock"
+  fi
+  exit 0
+fi
+
+# An account added: a bw data directory of its own, logged in. The server is
+# bw's own one -- the one setup/install.sh sets -- so every account is on it.
+# bw's own login, when it is this very account, is taken as it is: linked,
+# not logged in to again. An account there already, logged out since, is
+# logged in to again where it is.
+if [[ $sub == login ]]; then
+  (( $# == 2 )) || die "bwu login takes a name and an email: bwu login superhands alari@superhands.ee"
+  name=$1 email=${2,,}
+  bw_valid_name "$name" || die "'$name' cannot be an account's name -- lowercase letters, digits, - and _"
+  [[ $email == ?*@?* ]] || die "'$email' is not an email address"
+  command -v bw >/dev/null || die "bw is not installed"
+  dir=$BW_ACCOUNTS/$name
+  # An email, as bw status of a data directory gives it: logged in, or not.
+  logged_in_as() {
+    BITWARDENCLI_APPDATA_DIR=$1 bw status 2>/dev/null |
+      jq -r 'select(.status != "unauthenticated") | .userEmail // empty | ascii_downcase' 2>/dev/null || true
+  }
+  if [[ -e $dir || -L $dir ]]; then
+    was=$(logged_in_as "$dir")
+    [[ $was != "$email" ]] || { echo "Bitwarden: $name is $email already"; exit 0; }
+    [[ -z $was ]] || die "there is an account $name already, logged in as $was"
+    BITWARDENCLI_APPDATA_DIR=$dir bw login "$email" --raw >/dev/null || die "not logged in to $email"
+    echo "Bitwarden: $name logged in again as $email -- bwu unlocks it"
+    exit 0
+  fi
+  while IFS= read -r other; do
+    [[ $(logged_in_as "$BW_ACCOUNTS/$other") != "$email" ]] || die "$other is $email already"
+  done < <(bw_accounts)
+
+  mkdir -p -- "$BW_ACCOUNTS"
+  chmod 700 -- "$BW_ACCOUNTS"
+  if [[ -d $BW_OWN_DIR ]] && [[ $(logged_in_as "$BW_OWN_DIR") == "$email" ]]; then
+    ln -s -- "$BW_OWN_DIR" "$dir" || die "could not link $dir"
+    echo "Bitwarden: $name is bw's own login, $email -- bwu unlocks it"
+    exit 0
+  fi
+
+  server=$(BITWARDENCLI_APPDATA_DIR=$BW_OWN_DIR bw status 2>/dev/null | jq -r '.serverUrl // empty' 2>/dev/null || true)
+  [[ $server == https://* ]] || die "bw has no server set -- setup/install.sh sets it"
+  mkdir -m 700 -- "$dir" || die "could not make $dir"
+  # Gone again, should the login fail: a directory with no login in it would
+  # be an account bwu cannot unlock. Only this one, made just now.
+  forget_dir() {
+    [[ -n $name && $dir == "$BW_ACCOUNTS/$name" && -d $dir && ! -L $dir ]] || return 0
+    rm -rf -- "${dir:?}"
+  }
+  if ! BITWARDENCLI_APPDATA_DIR=$dir bw config server "$server" >/dev/null 2>&1; then
+    forget_dir
+    die "bw could not be pointed at $server"
+  fi
+  # bw prompts on stderr -- the password, and a second step -- and prints the
+  # session key, which is not kept: bwu unlocks the account the usual way.
+  if ! BITWARDENCLI_APPDATA_DIR=$dir bw login "$email" --raw >/dev/null; then
+    forget_dir
+    die "not logged in to $email"
+  fi
+  echo "Bitwarden: $name logged in as $email on $server -- bwu unlocks it"
+  exit 0
+fi
+
+want=both copy=false query="" update=false account="" except="" header=""
 file_mode=false file_name="" file_out="" force=false paths=()
 while (( $# )); do
   case $1 in
@@ -212,6 +334,18 @@ while (( $# )); do
         *)
           die "bwu $sub takes no options" ;;
       esac ;;
+    -a|--account)
+      (( $# >= 2 )) || die "$1 takes an account's name"
+      account=$2; shift 2 ;;
+    --account=*)   account=${1#*=}; shift ;;
+    # For bw-move: an account whose items are not listed, and the list's
+    # heading.
+    --except)
+      [[ $sub == pick && $# -ge 2 ]] || die "unknown option: $1  (try --help)"
+      except=$2; shift 2 ;;
+    --header)
+      [[ $sub == pick && $# -ge 2 ]] || die "unknown option: $1  (try --help)"
+      header=$2; shift 2 ;;
     -u|--username) want=user; shift ;;
     -p|--password) want=secret; shift ;;
     -c|--copy)     copy=true; shift ;;
@@ -232,8 +366,10 @@ while (( $# )); do
     *)             query+="${query:+ }$1"; shift ;;
   esac
 done
-[[ $sub != update || ( $want == both && $copy == false && -z $query && $file_mode == false && $force == false ) ]] ||
+[[ $sub != update || ( $want == both && $copy == false && -z $query && $file_mode == false && $force == false && -z $account ) ]] ||
   die "bwu update takes no options"
+[[ $sub != pick || ( $want == both && $copy == false && $file_mode == false && $force == false ) ]] ||
+  die "bw-vault pick takes no options but -a, --except, --header and --update"
 if [[ $sub == put || $sub == add ]]; then
   $file_mode || die "bwu $sub takes files: bwu $sub [text] -f file  (try --help)"
   [[ $want == both && $copy == false ]] || die "-u, -p and -c are for get -- bwu $sub puts files in the vault"
@@ -257,8 +393,17 @@ for tool in bw jq age age-keygen; do
 done
 [[ $sub == update ]] || command -v fzf >/dev/null || die "fzf is not installed"
 ! $copy || command -v wl-copy >/dev/null || die "wl-copy is not installed, so -c cannot copy"
-[[ -n ${BW_SESSION-} && -n ${BW_CACHE_KEY-} ]] ||
-  die "the vault is not unlocked -- run this as 'bwu get' or 'bwu update', which unlock it first"
+[[ -n $BW_CACHE_KEY ]] && (( ${#BW_KEY[@]} )) ||
+  die "no account is unlocked -- run this as 'bwu get' or 'bwu update', which unlock them first"
+
+# The accounts unlocked, as JSON, and those that are not -- locked, or not
+# logged in -- whose items are missing from the list.
+unlocked=$(bw_unlocked | jq -R . | jq -sc .)
+mapfile -t missing < <(bw_accounts | grep -vxF -f <(bw_unlocked) || true)
+if [[ -n $account ]]; then
+  bw_accounts | grep -qxF -- "$account" || die "there is no account $account -- $(bw_accounts | paste -sd' ')"
+  [[ -n ${BW_KEY[$account]-} ]] || die "$account is locked -- bwu unlocks it"
+fi
 
 # The cache, decrypted -- or nothing, when there is none, or it was written
 # under another unlock.
@@ -267,51 +412,63 @@ read_cache() {
   age --decrypt -i <(printf '%s\n' "$BW_CACHE_KEY") "$CACHE" 2>/dev/null
 }
 
-# Sync with the server, cache everything bw then holds, and print it. Exits 3
-# when the session key no longer works -- locked, or unlocked elsewhere since
-# -- which tells bwu to unlock and run this again.
+# Sync every account unlocked with the server, cache everything bw then holds
+# -- each item, folder, collection and organisation marked with the account
+# it came from -- and print it. Exits 3 when an account's key no longer works
+# -- locked, or unlocked elsewhere since -- which tells bwu to unlock and run
+# this again.
 refresh() {
-  local items folders collections organizations recipient tmp now
-  if ! bw sync >/dev/null 2>&1; then
-    bw unlock --check >/dev/null 2>&1 || exit 3
-    echo "bwu: could not reach the server -- caching what bw already has" >&2
-  fi
-  if ! items=$(bw list items 2>/dev/null); then
-    bw unlock --check >/dev/null 2>&1 || exit 3
-    die "bw could not list the vault"
-  fi
-  folders=$(bw list folders 2>/dev/null) || folders='[]'
-  collections=$(bw list collections 2>/dev/null) || collections='[]'
-  organizations=$(bw list organizations 2>/dev/null) || organizations='[]'
+  local name items folders collections organizations all="" recipient tmp now
+  while IFS= read -r name; do
+    if ! bw_as "$name" sync >/dev/null 2>&1; then
+      bw_unlocks "$name" || exit 3
+      echo "bwu: could not reach the server -- caching what bw already has of $name" >&2
+    fi
+    if ! items=$(bw_as "$name" list items 2>/dev/null); then
+      bw_unlocks "$name" || exit 3
+      die "bw could not list $name's vault"
+    fi
+    folders=$(bw_as "$name" list folders 2>/dev/null) || folders='[]'
+    collections=$(bw_as "$name" list collections 2>/dev/null) || collections='[]'
+    organizations=$(bw_as "$name" list organizations 2>/dev/null) || organizations='[]'
+    # printf is a builtin, so the vault goes to jq, and on to age, through a
+    # pipe and never onto a command line, where ps would show it.
+    all+=$(printf '{"items":%s,"folders":%s,"collections":%s,"organizations":%s}\n' \
+             "$items" "$folders" "$collections" "$organizations" |
+           jq -c --arg a "$name" 'map_values(map(. + {account: $a}))')$'\n' ||
+      die "bw gave $name's vault in a form bwu does not know"
+  done < <(bw_unlocked)
+  unset items
   now=$(date +%s)
+  all=$(printf '%s' "$all" | jq -c -s --argjson now "$now" --argjson accounts "$unlocked" '
+    {cached: $now, accounts: $accounts,
+     items: (map(.items) | add // []), folders: (map(.folders) | add // []),
+     collections: (map(.collections) | add // []), organizations: (map(.organizations) | add // [])}')
   recipient=$(printf '%s\n' "$BW_CACHE_KEY" | age-keygen -y) || die "the cache key is not an age key"
   mkdir -p "$(dirname "$CACHE")"
   chmod 700 "$(dirname "$CACHE")"
   tmp=$(mktemp "$CACHE.XXXXXX") || die "cannot write the cache in $(dirname "$CACHE")"
-  # printf is a builtin, so the vault goes to age through a pipe and never
-  # onto a command line, where ps would show it.
-  if printf '{"cached":%s,"items":%s,"folders":%s,"collections":%s,"organizations":%s}\n' \
-       "$now" "$items" "$folders" "$collections" "$organizations" |
-       age --encrypt -r "$recipient" > "$tmp"; then
+  if printf '%s\n' "$all" | age --encrypt -r "$recipient" > "$tmp"; then
     chmod 600 "$tmp"
     mv -f -- "$tmp" "$CACHE"
   else
     rm -f -- "$tmp"
     die "could not write the cache"
   fi
-  printf '{"cached":%s,"items":%s,"folders":%s,"collections":%s,"organizations":%s}\n' \
-    "$now" "$items" "$folders" "$collections" "$organizations"
+  printf '%s\n' "$all"
 }
 
 if [[ $sub == update ]]; then
   data=$(refresh) || exit $?
-  echo "Bitwarden: synced; $(jq '.items | length' <<<"$data") items cached" >&2
+  echo "Bitwarden: synced $(bw_unlocked | paste -sd' '); $(jq '.items | length' <<<"$data") items cached" >&2
+  (( ${#missing[@]} == 0 )) || echo "Bitwarden: ${missing[*]} locked, and not in the cache" >&2
   exit 0
 fi
 
-# A cache written before the list showed each item's vault has no
-# organisations in it, and is made anew.
-if $update || ! data=$(read_cache) || ! jq -e 'has("organizations")' >/dev/null <<<"$data"; then
+# A cache from another set of accounts -- one unlocked since, or locked -- is
+# made anew, as is one from before there were accounts.
+if $update || ! data=$(read_cache) ||
+   ! jq -e --argjson want "$unlocked" '.accounts == $want' >/dev/null <<<"$data"; then
   data=$(refresh) || exit $?
 fi
 
@@ -324,35 +481,40 @@ ago() {
 }
 cached=$(ago "$(jq '.cached' <<<"$data")")
 
-# Files: every attachment the cache knows of, one line each -- the item's id,
-# the file's id, its name and size. With a name after -f, only the files that
-# match it, as fzf would match them, and so only the items that have one. add
-# lists every item: any of them can have a file attached.
+# Files: every attachment the cache knows of, one line each -- the item's
+# account and id, the file's id, its name and size. With a name after -f, only
+# the files that match it, as fzf would match them, and so only the items that
+# have one. add lists every item: any of them can have a file attached.
 only=null
 if $file_mode; then
-  # Files come from the server and go to it, with the session key: a stale
+  # Files come from the server and go to it, with the session keys: a stale
   # key is better found now, before the picking, than after it.
-  bw unlock --check >/dev/null 2>&1 || exit 3
+  while IFS= read -r name; do
+    [[ -n $account && $name != "$account" ]] || bw_unlocks "$name" || exit 3
+  done < <(bw_unlocked)
 fi
 if $file_mode && [[ $sub != add ]]; then
-  atts=$(jq -r '.items[] | .id as $i | (.attachments // [])[]
-                | [$i, .id, (.fileName // "file"), (.sizeName // "")] | @tsv' <<<"$data")
-  [[ -n $atts ]] || die "no item has a file attached$([[ $sub == put ]] && echo " -- bwu add attaches one")"
+  atts=$(jq -r --arg acct "$account" '.items[] | select($acct == "" or .account == $acct)
+                | .account as $a | .id as $i | (.attachments // [])[]
+                | [$a, $i, .id, (.fileName // "file"), (.sizeName // "")] | @tsv' <<<"$data")
+  [[ -n $atts ]] || die "no item${account:+ of $account} has a file attached$([[ $sub == put ]] && echo " -- bwu add attaches one")"
   if [[ -n $file_name ]]; then
-    atts=$(fzf --filter="$file_name" --delimiter=$'\t' --nth=3 <<<"$atts") ||
+    atts=$(fzf --filter="$file_name" --delimiter=$'\t' --nth=4 <<<"$atts") ||
       die "no attached file matches '$file_name'"
   fi
-  only=$(cut -f1 <<<"$atts" | jq -R . | jq -sc 'unique')
+  only=$(cut -f1,2 <<<"$atts" | jq -R 'sub("\t"; " ")' | jq -sc 'unique')
 fi
 
-# One line per item: its id, hidden, then the name, username and website,
-# padded into columns, the vault it is in, and the kind and folder -- an
-# organisation's collections -- dimmed. Only the first three are searched.
-# fzf shows a tab as one space here (--tabstop=1), so the padding lines up.
-list=$(jq -r --argjson only "$only" '
+# One line per item: its account and id, hidden, then the name, username and
+# website, padded into columns, the account it is in -- when there is more
+# than one -- and the vault, and the kind and folder -- an organisation's
+# collections -- dimmed. Only the first three are searched. fzf shows a tab as
+# one space here (--tabstop=1), so the padding lines up.
+list=$(jq -r --argjson only "$only" --arg acct "$account" --arg except "$except" '
   (INDEX((.folders // [])[]; .id // "") | map_values(.name)) as $f
   | (INDEX((.collections // [])[]; .id) | map_values(.name)) as $c
   | (INDEX((.organizations // [])[]; .id) | map_values(.name)) as $o
+  | ((.accounts // []) | length > 1) as $many
   | def kind: {"1": "login", "2": "note", "3": "card", "4": "identity", "5": "ssh key"}[.type | tostring] // "item";
     def site: (.login.uris // [])[0].uri // "" | sub("^[a-z]+://"; "") | sub("/.*$"; "");
     def place: if .organizationId then [(.collectionIds // [])[] | $c[.] // empty] | join(", ")
@@ -360,29 +522,37 @@ list=$(jq -r --argjson only "$only" '
     def cut($n): if length > $n then .[0:$n - 1] + "…" else . end;
     def pad($n): . + (" " * ([$n - length, 0] | max));
     .items
-  | map(select($only == null or (.id as $i | any($only[]; . == $i))))
-  | map({id, name: (.name // "" | cut(40)),
+  | map(select(($acct == "" or .account == $acct) and .account != $except))
+  | map(select($only == null or ("\(.account) \(.id)" as $k | any($only[]; . == $k))))
+  | map({account, id, name: (.name // "" | cut(40)),
          user: (if .type == 1 then .login.username // "" else "" end | cut(32)),
          site: (if $only != null then (.attachments // []) | map(.fileName) | join(", ")
                 elif .type == 1 then site else "" end | cut(40)),
-         vault: (if .organizationId then $o[.organizationId] // "organisation" else "personal" end | cut(24)),
+         vault: ((if $many then .account + " · " else "" end)
+                 + (if .organizationId then $o[.organizationId] // "organisation" else "personal" end) | cut(36)),
          tag: (kind + (place | if . != "" then " · " + . else "" end))})
   | sort_by(.name | ascii_downcase)
   | (map(.name | length) + [4] | max) as $wn
   | (map(.user | length) + [8] | max) as $wu
   | (map(.site | length) + [4] | max) as $ws
   | (map(.vault | length) + [5] | max) as $wv
-  | (["", ("NAME" | pad($wn)), ("USERNAME" | pad($wu)),
+  | (["", "", ("NAME" | pad($wn)), ("USERNAME" | pad($wu)),
      ((if $only != null then "FILES" else "SITE" end) | pad($ws)), ("VAULT" | pad($wv)), "TYPE"] | join("\t")),
-    (.[] | [.id, (.name | pad($wn)), (.user | pad($wu)), (.site | pad($ws)), (.vault | pad($wv)),
+    (.[] | [.account, .id, (.name | pad($wn)), (.user | pad($wu)), (.site | pad($ws)), (.vault | pad($wv)),
             "\u001b[2m\(.tag)\u001b[0m"] | join("\t"))
 ' <<<"$data")
-(( $(wc -l <<<"$list") > 1 )) || die "the vault is empty"
+(( $(wc -l <<<"$list") > 1 )) || die "${account:-the vault} has no items${except:+ but in $except}"
+
+# The heading: how old the cache is, and which accounts are not in it.
+note="cached $cached"
+(( ${#missing[@]} == 0 )) || note+=" -- ${missing[*]} locked, bwu unlocks"
+note+=" -- bwu update for changes made elsewhere"
+[[ -z $header ]] || note="$header -- $note"
 
 # --select-1: a search that already names one item needs no picking.
 rc=0
-line=$(fzf --ansi --delimiter=$'\t' --with-nth=2.. --nth=1,2,3 --tabstop=1 \
-         --header-lines=1 --header="cached $cached -- bwu update for changes made elsewhere" \
+line=$(fzf --ansi --delimiter=$'\t' --with-nth=3.. --nth=1,2,3 --tabstop=1 \
+         --header-lines=1 --header="$note" \
          --layout=reverse --height=60% --prompt='bw> ' \
          --query="$query" --select-1 --exit-0 <<<"$list") || rc=$?
 case $rc in
@@ -391,14 +561,23 @@ case $rc in
   130) exit 130 ;;
   *)   die "fzf failed" ;;
 esac
-id=${line%%$'\t'*}
-item=$(jq -c --arg id "$id" '.items[] | select(.id == $id)' <<<"$data")
-# For the summary: an organisation's name, and the item's collections in it.
-vault=$(jq -r --arg id "$id" '
+IFS=$'\t' read -r account id _ <<<"$line"
+
+# bw-move takes it from here: the item, as its account and id.
+if [[ $sub == pick ]]; then
+  printf '%s\t%s\n' "$account" "$id"
+  exit 0
+fi
+
+item=$(jq -c --arg a "$account" --arg id "$id" '.items[] | select(.account == $a and .id == $id)' <<<"$data")
+# For the summary: the account, when there are several; an organisation's
+# name, and the item's collections in it.
+vault=$(jq -r --arg a "$account" --arg id "$id" '
   (INDEX((.collections // [])[]; .id) | map_values(.name)) as $c
   | (INDEX((.organizations // [])[]; .id) | map_values(.name)) as $o
-  | .items[] | select(.id == $id)
-  | if .organizationId
+  | (if (.accounts // []) | length > 1 then $a + " · " else "" end) as $prefix
+  | .items[] | select(.account == $a and .id == $id)
+  | $prefix + if .organizationId
     then "\($o[.organizationId] // "an organisation"), an organisation"
          + ([(.collectionIds // [])[] | $c[.] // empty] | if length > 0 then " · " + join(", ") else "" end)
     else "personal" end' <<<"$data")
@@ -411,11 +590,11 @@ if [[ $sub == put || $sub == add ]]; then
   # The item as the server has it now, not as the cache remembers it: a file
   # added or deleted elsewhere since counts, and bw writes against its own
   # copy, which only a sync brings up to date.
-  if ! bw sync >/dev/null 2>&1; then
-    bw unlock --check >/dev/null 2>&1 || exit 3
+  if ! bw_as "$account" sync >/dev/null 2>&1; then
+    bw_unlocks "$account" || exit 3
     die "could not reach the server -- nothing was changed"
   fi
-  current=$(bw get item "$id" 2>/dev/null) || die "$name is no longer in the vault -- nothing was changed"
+  current=$(bw_as "$account" get item "$id" 2>/dev/null) || die "$name is no longer in the vault -- nothing was changed"
   # Its files, one line each: the file's id, its name and size.
   have=$(jq -r '(.attachments // [])[] | [.id, (.fileName // "file"), (.sizeName // "")] | @tsv' <<<"$current")
   known=$(jq -c '[(.attachments // [])[].id]' <<<"$current")
@@ -484,7 +663,12 @@ if [[ $sub == put || $sub == add ]]; then
   # only you can read: attachments tend to be keys.
   tmp=$(umask 077 && mktemp -d "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/bwu-put.XXXXXX") ||
     die "cannot make a private directory to upload from -- nothing was changed"
-  trap 'rm -rf -- "$tmp"' EXIT
+  # Only the directory made above: by its own name, and never through a link.
+  cleanup() {
+    [[ -n ${tmp-} && ${tmp##*/} == bwu-put.?????? && -d $tmp && ! -L $tmp ]] || return 0
+    rm -rf -- "${tmp:?}"
+  }
+  trap cleanup EXIT
   rc=0 wrote=false
   for i in "${!srcs[@]}"; do
     src=${srcs[i]}
@@ -500,7 +684,7 @@ if [[ $sub == put || $sub == add ]]; then
     # The new file up first, the old one deleted after: a failure in between
     # leaves both, never neither. bw answers with the whole item, secrets
     # included -- kept here for the new file's size, and never shown.
-    if ! out=$(bw create attachment --file "$src" --itemid "$id" --nointeraction 2>"$tmp/err"); then
+    if ! out=$(bw_as "$account" create attachment --file "$src" --itemid "$id" --nointeraction 2>"$tmp/err"); then
       err=$(<"$tmp/err")
       echo "bwu: could not upload ${srcs[i]}: ${err:-bw gave no reason}" >&2
       (( i + 1 == ${#srcs[@]} )) || echo "bwu: not uploaded either: ${srcs[*]:i+1}" >&2
@@ -516,7 +700,7 @@ if [[ $sub == put || $sub == add ]]; then
 
     err=""
     for old in ${olds[i]}; do
-      bw delete attachment "$old" --itemid "$id" --nointeraction >/dev/null 2>"$tmp/err" ||
+      bw_as "$account" delete attachment "$old" --itemid "$id" --nointeraction >/dev/null 2>"$tmp/err" ||
         err=$(<"$tmp/err")
     done
     if [[ -n $err ]]; then
@@ -543,11 +727,11 @@ fi
 if $file_mode; then
   # This item's files -- those matching the name, when there is one -- to
   # pick from, unless there is just the one. Tab marks several, ctrl-a all.
-  mine=$(awk -F'\t' -v id="$id" '$1 == id' <<<"$atts")
-  width=$(cut -f3 <<<"$mine" | awk '{ if (length > m) m = length } END { print (m > 4 ? m : 4) }')
+  mine=$(awk -F'\t' -v a="$account" -v id="$id" '$1 == a && $2 == id' <<<"$atts")
+  width=$(cut -f4 <<<"$mine" | awk '{ if (length > m) m = length } END { print (m > 4 ? m : 4) }')
   rc=0
   picked=$( { printf '\t%-*s\t%s\n' "$width" FILE SIZE
-              awk -F'\t' -v w="$width" '{ printf "%s\t%-" w "s\t%s\n", $2, $3, $4 }' <<<"$mine"; } |
+              awk -F'\t' -v w="$width" '{ printf "%s\t%-" w "s\t%s\n", $3, $4, $5 }' <<<"$mine"; } |
             fzf --multi --bind=ctrl-a:select-all,ctrl-d:deselect-all \
                 --delimiter=$'\t' --with-nth=2.. --nth=1 --tabstop=1 --header-lines=1 \
                 --header="files of $name -- Tab marks several, ctrl-a all" \
@@ -561,11 +745,11 @@ if $file_mode; then
   esac
   mapfile -t att_ids < <(cut -f1 <<<"$picked")
   n=${#att_ids[@]}
-  field() { awk -F'\t' -v a="$1" -v f="$2" '$2 == a { print $f }' <<<"$mine"; }
+  field() { awk -F'\t' -v a="$1" -v f="$2" '$3 == a { print $f }' <<<"$mine"; }
 
   if [[ $file_out == - ]]; then
     (( n == 1 )) || die "$n files cannot all go to stdout -- pick one, or give a directory"
-    bw get attachment "${att_ids[0]}" --itemid "$id" --raw || die "could not download $(field "${att_ids[0]}" 3)"
+    bw_as "$account" get attachment "${att_ids[0]}" --itemid "$id" --raw || die "could not download $(field "${att_ids[0]}" 4)"
     exit 0
   fi
   if (( n > 1 )) && [[ -n $file_out && ! -d $file_out ]]; then
@@ -576,7 +760,7 @@ if $file_mode; then
   # smuggle in -- here or in the directory given, or as the one name given.
   files=() sizes=() targets=()
   for att in "${att_ids[@]}"; do
-    file=$(field "$att" 3)
+    file=$(field "$att" 4)
     own=${file##*/}
     [[ -n $own && $own != . && $own != .. ]] || own=attachment
     if [[ -z $file_out ]]; then
@@ -587,7 +771,7 @@ if $file_mode; then
       target=$file_out
     fi
     files+=("$file")
-    sizes+=("$(field "$att" 4)")
+    sizes+=("$(field "$att" 5)")
     targets+=("$target")
   done
 
@@ -612,7 +796,7 @@ if $file_mode; then
     dir=$(dirname -- "${targets[i]}")
     tmp=$(umask 077 && mktemp "$dir/.bwu-get.XXXXXX") || die "cannot write in $dir"
     tmps+=("$tmp")
-    bw get attachment "${att_ids[i]}" --itemid "$id" --raw > "$tmp" 2>/dev/null ||
+    bw_as "$account" get attachment "${att_ids[i]}" --itemid "$id" --raw > "$tmp" 2>/dev/null ||
       die "could not download ${files[i]} -- is the server reachable? Nothing was saved"
   done
   for i in "${!att_ids[@]}"; do

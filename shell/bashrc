@@ -154,16 +154,18 @@ __cloud_complete_az()  { __cloud_complete azure; }
 complete -F __cloud_complete_aws aws-select
 complete -F __cloud_complete_az az-select
 
-# Bitwarden: bwu unlocks the vault in this terminal -- the master password the
-# first time, and after that a fingerprint, through sudo, for each terminal
+# Bitwarden: bwu unlocks every account in this terminal -- each master password
+# the first time, and after that a fingerprint, through sudo, for each terminal
 # (bin/bw-session). `bwu get` picks an item with fzf from an encrypted cache of
-# the vault and prints or copies its secret; `bwu put -f` replaces an item's
-# attached file and `bwu add -f` attaches new ones; `bwu update` syncs and
-# caches the vault anew (bin/bw-vault; bwu --help). The session key and the
-# cache's key are plain shell variables, never exported: these functions hand
-# them to bw and bw-vault for their run alone, so no other program run here
-# inherits them. `bw lock`, or `bwu lock`, locks the vault for every terminal
-# and deletes the cache.
+# every account's vault and prints or copies its secret; `bwu put -f` replaces
+# an item's attached file and `bwu add -f` attaches new ones; `bwu move` moves
+# an item, or a whole collection, to another account (bin/bw-move); `bwu
+# update` syncs and caches the vaults anew (bin/bw-vault; bwu --help); `bwu
+# login` adds an account. The session keys and the cache's key are a plain
+# shell variable, never exported: these functions hand it to bw-vault and
+# bw-move, and the one key to bw, for their run alone, so no other program run
+# here inherits them. `bwu lock` locks every account for every terminal, `bw
+# lock` the one in bw's own directory, and either deletes the cache.
 bwu() {
   local update=false sub
   if [[ ${1-} == --update ]]; then
@@ -173,61 +175,68 @@ bwu() {
   sub=${1-}
   case $sub in
     "")
-      if $update; then __bwu_vault update; else __bwu_unlock; fi ;;
-    get|put|add|update)
+      if $update; then __bwu_run bw-vault update; else __bwu_unlock; fi ;;
+    get|put|add|update|move)
       shift
       # Help needs no vault.
       if [[ " $* " == *" -h "* || " $* " == *" --help "* ]]; then
-        command bw-vault "$sub" --help
+        if [[ $sub == move ]]; then command bw-move --help; else command bw-vault "$sub" --help; fi
         return
       fi
       if $update && [[ $sub != update ]]; then
         set -- --update "$@"
       fi
-      __bwu_vault "$sub" "$@" ;;
+      if [[ $sub == move ]]; then __bwu_run bw-move "$@"; else __bwu_run bw-vault "$sub" "$@"; fi ;;
+    login)
+      shift
+      command bw-vault login "$@" || return
+      # The next bwu unlocks the new account too.
+      unset __bw_keys ;;
     lock)
-      bw lock ;;
+      command bw-vault lock
+      unset __bw_keys ;;
     -h|--help)
       command bw-vault --help ;;
     *)
-      echo "bwu: unknown command '$sub' -- bwu, bwu get, put, add, update or lock (bwu --help)" >&2
+      echo "bwu: unknown command '$sub' -- bwu, bwu get, put, add, move, update, login or lock (bwu --help)" >&2
       return 2 ;;
   esac
 }
 __bwu_unlock() {
-  local out
-  if [[ -n ${__bw_session-} ]] &&
-     BW_SESSION=$__bw_session command bw unlock --check >/dev/null 2>&1; then
+  local out line names=""
+  if [[ -n ${__bw_keys-} ]] && BW_KEYS=$__bw_keys command bw-vault check; then
     echo "Bitwarden: already unlocked in this terminal" >&2
     return 0
   fi
   out=$(command bw-session) || return 1
-  __bw_session=${out%%$'\n'*}
-  __bw_cache_key=""
-  [[ $out != *$'\n'* ]] || __bw_cache_key=${out#*$'\n'}
-  echo "Bitwarden: unlocked in this terminal" >&2
+  __bw_keys=$out
+  # The first line is the cache's key; each after it an account's name and key.
+  while IFS= read -r line; do
+    names+="${names:+, }${line%% *}"
+  done <<<"${out#*$'\n'}"
+  echo "Bitwarden: $names unlocked in this terminal" >&2
 }
-__bwu_vault() {
+__bwu_run() {
   local rc=0
-  [[ -n ${__bw_session-} ]] || __bwu_unlock || return
-  BW_SESSION=$__bw_session BW_CACHE_KEY=${__bw_cache_key-} command bw-vault "$@" || rc=$?
-  # 3: the session key stopped working -- the vault was locked, or unlocked
-  # somewhere else since. Unlock again, and try once more.
+  [[ -n ${__bw_keys-} ]] || __bwu_unlock || return
+  BW_KEYS=$__bw_keys command "$@" || rc=$?
+  # 3: a key stopped working -- an account was locked, or unlocked somewhere
+  # else since. Unlock again, and try once more.
   if (( rc == 3 )); then
-    unset __bw_session __bw_cache_key
+    unset __bw_keys
     __bwu_unlock || return
     rc=0
-    BW_SESSION=$__bw_session BW_CACHE_KEY=${__bw_cache_key-} command bw-vault "$@" || rc=$?
+    BW_KEYS=$__bw_keys command "$@" || rc=$?
   fi
   return "$rc"
 }
-# Tab for bwu: the commands, then each one's options, and after -f what goes
-# there -- the vault's file names for get -f's first name and put -f's second,
-# from the cache (bw-vault files; nothing until bwu has unlocked this
-# terminal), and files here for the rest: what put and add upload, and where
-# get saves.
+# Tab for bwu: the commands, then each one's options, the accounts' names
+# after -a, --from and --to, and after -f what goes there -- the vaults' file
+# names for get -f's first name and put -f's second, from the cache (bw-vault
+# files; nothing until bwu has unlocked this terminal), and files here for the
+# rest: what put and add upload, and where get saves.
 __bwu_complete() {
-  local cur=${COMP_WORDS[COMP_CWORD]} sub="" word name i after=-1 ended=false
+  local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]} sub="" word name i after=-1 ended=false
   COMPREPLY=()
   # The command, and how many names already follow -f: that count says which
   # of -f's names the word under the cursor is.
@@ -242,15 +251,21 @@ __bwu_complete() {
     fi
   done
   if [[ -z $sub ]]; then
-    mapfile -t COMPREPLY < <(compgen -W 'get put add update lock --update --help' -- "$cur")
+    mapfile -t COMPREPLY < <(compgen -W 'get put add move update login lock --update --help' -- "$cur")
     return
   fi
   if (( after < 0 )); then
+    case $prev in
+      -a|--account|--from|--to)
+        mapfile -t COMPREPLY < <(compgen -W "$(command bw-vault accounts 2>/dev/null)" -- "$cur")
+        return ;;
+    esac
     case $sub in
-      get) word='-f --file -u --username -p --password -c --copy --force --update --help' ;;
-      put) word='-f --file --update --help' ;;
-      add) word='-f --file --force --update --help' ;;
-      *)   return ;;
+      get)  word='-a --account -f --file -u --username -p --password -c --copy --force --update --help' ;;
+      put)  word='-a --account -f --file --update --help' ;;
+      add)  word='-a --account -f --file --force --update --help' ;;
+      move) word='--to --from --collection -y --yes --update --help' ;;
+      *)    return ;;
     esac
     mapfile -t COMPREPLY < <(compgen -W "$word" -- "$cur")
     return
@@ -259,23 +274,32 @@ __bwu_complete() {
     get:0|put:1)
       while IFS= read -r name; do
         [[ $name == "$cur"* ]] && COMPREPLY+=("$(printf '%q' "$name")")
-      done < <(BW_CACHE_KEY=${__bw_cache_key-} command bw-vault files 2>/dev/null) ;;
+      done < <(BW_KEYS=${__bw_keys-} command bw-vault files 2>/dev/null) ;;
     get:1|put:0|add:*)
       # Nothing in COMPREPLY, and readline completes the file names itself.
       compopt -o default ;;
   esac
 }
 complete -F __bwu_complete bwu
+# bw itself, unlocked as the account that lives in bw's own data directory
+# (lib/bw.sh), when this terminal has its key.
 bw() {
-  local rc=0
-  if [[ -n ${__bw_session-} ]]; then
-    BW_SESSION=$__bw_session command bw "$@" || rc=$?
+  local rc=0 name line key="" own=${XDG_CONFIG_HOME:-$HOME/.config}/"Bitwarden CLI"
+  local accounts=${XDG_CONFIG_HOME:-$HOME/.config}/omarchy-dotfiles/bw-accounts
+  if [[ -n ${__bw_keys-} && -z ${BITWARDENCLI_APPDATA_DIR-} ]]; then
+    while read -r name line; do
+      [[ ! $accounts/$name -ef $own ]] || key=$line
+    done <<<"${__bw_keys#*$'\n'}"
+  fi
+  if [[ -n $key ]]; then
+    BW_SESSION=$key command bw "$@" || rc=$?
   else
     command bw "$@" || rc=$?
   fi
-  # Both keys are worthless after either, and the cache goes with them.
+  # The account's key is worthless after either, and the cache goes with it;
+  # the next bwu fetches the others' keys again.
   if [[ ${1-} == lock || ${1-} == logout ]]; then
-    unset __bw_session __bw_cache_key
+    unset __bw_keys
     command bw-vault forget
   fi
   return "$rc"

@@ -235,10 +235,12 @@ LINKS=(
   "$HOME/.local/bin/aws-env-credentials|bin/aws-env-credentials"
   "$HOME/.local/bin/env-secrets|bin/env-secrets"
 
-  # Behind bwu, the shell function in shell/bashrc: the Bitwarden session key,
-  # and the vault's encrypted cache with the fzf picker of `bwu get`.
+  # Behind bwu, the shell function in shell/bashrc: the Bitwarden accounts'
+  # session keys, the vaults' encrypted cache with the fzf picker of `bwu
+  # get`, and `bwu move`. All three source lib/bw.sh.
   "$HOME/.local/bin/bw-session|bin/bw-session"
   "$HOME/.local/bin/bw-vault|bin/bw-vault"
+  "$HOME/.local/bin/bw-move|bin/bw-move"
 )
 
 # The pre-commit hook that keeps env.yaml out of the history and

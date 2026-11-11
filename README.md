@@ -260,40 +260,62 @@ the same file) rather than its default, bitwarden.com. bw only allows that
 while logged out, so a `bw` logged in to another server is reported -- `bw
 logout`, then run `install.sh` again -- and never logged out for you.
 
-`bwu` unlocks the vault in the terminal it is run in: the master password the
-first time, and in every terminal after that a fingerprint, or your password,
-for sudo. `bin/bw-session` keeps the session key `bw unlock` returns in a file
-only root can read -- never the master password -- and a `bw` shell function
-hands the key to bw alone, so nothing else run in that terminal inherits it.
-`bw lock` locks the vault for every terminal, and the next `bwu` asks for the
-master password again.
+`bwu` knows several Bitwarden accounts, and unlocks every one of them in the
+terminal it is run in: each master password the first time, and in every
+terminal after that a fingerprint, or your password, for sudo. bw itself holds
+one login per data directory, so each account is a directory of its own in
+`~/.config/omarchy-dotfiles/bw-accounts/`, named after the account
+(`lib/bw.sh`). `bwu login NAME EMAIL` adds one, on the server `install.sh`
+set; bw's own login, when it is that account, is linked rather than logged in
+to again. On this machine:
+
+```bash
+bwu login superhands alari@superhands.ee   # bw's own login, linked
+bwu login alari alari.ois.ao@gmail.com     # logs in: password, second step
+```
+
+`bin/bw-session` keeps the session keys `bw unlock` returns in a file only
+root can read -- never a master password -- and an account it cannot unlock,
+locked or not logged in, is passed over while the others are unlocked. The
+`bwu` functions hand the keys to bwu's scripts alone, and a `bw` shell
+function the key of the account in bw's own directory to bw, so nothing else
+run in that terminal inherits them. `bwu lock` locks every account for every
+terminal; `bw lock` the one in bw's own directory. The next `bwu` asks for the
+master passwords of the accounts locked.
 
 ```bash
 bwu get                 # pick with fzf; print the username and password
 bwu get github          # the same, the search started with "github"
+bwu get -a alari        # only that account's items (also put and add)
 bwu get -u   / -p       # the username alone / the password alone
 bwu get -c              # copy the password instead (-c -u: the username)
 bwu get -f [name [new]] # an attached file, saved -- or - for stdout
 bwu get --force -f ...  # the same, replacing a file that is there
 bwu put -f file [name]  # replace an item's attached file with this one
 bwu add -f file...      # attach files to an item; asks before overwriting
-bwu update              # sync with the server, and cache the vault anew
+bwu move --to alari     # pick an item; move it to the account alari
+bwu move --from superhands --to alari --collection
+                        # pick a folder or collection; move it whole
+bwu update              # sync with the server, and cache the vaults anew
 bwu --update get        # the same, then pick
-bwu lock                # lock the vault everywhere, and delete the cache
+bwu login NAME EMAIL    # add an account
+bwu lock                # lock every account everywhere, delete the cache
 ```
 
-`bwu get` picks from a cache of the vault, so the list is there at once and
-bw does not run. The cache holds every item, secrets included, encrypted with
-age to a key made new with every unlock and kept the way the session key is:
-in root's store, and unexported in the terminals unlocked with it. A cache from
-an earlier unlock cannot be read, and `bw lock` deletes it, so a lock still
-locks everything. Only when there is no cache it can read does `bwu get` sync
-with the server and write one; changes made elsewhere, in the browser or on
-the phone, show up after `bwu update`.
+`bwu get` picks from a cache of every account's vault, so the list is there
+at once and bw does not run. The cache holds every item, secrets included,
+encrypted with age to a key made new with every unlock and kept the way the
+session keys are: in root's store, and unexported in the terminals unlocked
+with it. A cache from an earlier unlock cannot be read, and a lock deletes it,
+so a lock still locks everything. Only when there is no cache it can read, or
+it lacks an account unlocked since, does `bwu get` sync with the server and
+write one; changes made elsewhere, in the browser or on the phone, show up
+after `bwu update`.
 
 The list shows every item: a login with its username and website, anything
-else by its name, and beside it the vault it is in -- `personal`, or the
-organisation's name -- with its folder, or an organisation item's collections.
+else by its name, and beside it the account and the vault it is in --
+`personal`, or the organisation's name -- with its folder, or an organisation
+item's collections.
 The search covers the name, username and website, so a note is found by its
 title and its text is never searched. A note prints its text, a card its
 number, expiry and code. A copy is marked sensitive for clipboard managers,
@@ -322,10 +344,33 @@ without asking, and with no terminal to ask in, `add` changes nothing.
 Bitwarden cannot change a file in place, so a replaced file is uploaded new
 first and the old one deleted after: a failure in between leaves both, never
 neither. Both sync first and write against the item as the server has it,
-then cache the vault anew.
+as the account the item is in, then cache the vaults anew.
 
-Tab completes the commands and their options, and after `-f` what goes there:
-the names of the vault's files -- for `get -f` and the name after `put -f`'s
+`bwu move` moves an item to another account -- `--to` it, `--from` the one it
+is in, or any other without it -- picked the way `bwu get` picks. With
+`--collection` it picks a folder or collection instead, and moves it whole:
+the ones nested in it, and every item in them. Bitwarden cannot move an item
+between accounts, so each is copied -- every field, the password history,
+passkeys and attached files -- and the copy read back from the server and
+compared with the original: every field, its place, and each file downloaded
+again and compared by name, size and SHA-256. Only an original whose copy is
+the same is deleted, into its account's trash, where Bitwarden keeps it for
+30 days; a copy that is not the same is deleted again, for good, and its
+original stays as it was. Ctrl-C before the originals go removes the copies
+made so far. An item keeps its folder, or its collections, by name: a
+collection in the other account's organisation -- picked, when it has several
+-- or a folder when it has none, made if it is not there. Once everything in
+a moved folder is across, the folders it leaves empty are deleted. Emptied
+collections stay: an organisation's item in the trash can be restored into
+its collections only while they are there, so they are left for you to delete
+in the web vault once the trash no longer matters.
+It asks before it starts; `-y` does not. Files pass through a directory only
+you can read, under `XDG_RUNTIME_DIR`, and are deleted as soon as each is
+done.
+
+Tab completes the commands and their options, the accounts' names after
+`-a`, `--from` and `--to`, and after `-f` what goes there: the names of the
+vaults' files -- for `get -f` and the name after `put -f`'s
 file -- from the cache, once `bwu` has unlocked the terminal, and files here
 for what `put` and `add` upload and where `get` saves.
 
