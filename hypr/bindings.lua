@@ -254,6 +254,31 @@ o.bind("SUPER + SHIFT + C", "Google Calendar",
 o.bind("SUPER + SHIFT + T", "Superhands Team",
   "omarchy-launch-or-focus-webapp 'chrome-team\\.superhands\\.ee__timesheet' 'https://team.superhands.ee/timesheet'")
 
+-- SUPER + E: the Superhands Team desktop app's action picker.
+--
+-- The app (superhands-team, from team.superhands.ee -> Apps; source in
+-- superspot's apps/team/desktop) has one global key that opens a picker of
+-- one-letter actions: S start, X stop, R resume, B back, 1-9 a pinned task.
+-- On Wayland an app cannot grab a key for the whole desktop, so the
+-- compositor binds it instead. `--picker` hands the press to the app that
+-- is already running, and pressed again while the picker is in front it
+-- puts the picker away. That makes this a toggle, as the app's own key is.
+--
+-- This takes the place of the app's default chord, Ctrl+Alt+Shift+Space,
+-- which its README suggests binding here. The app chose that chord only
+-- because shorter ones collide on other systems (on macOS). Its Settings
+-- still shows that chord, with a Hyprland line to copy; neither is needed
+-- with this bind.
+--
+-- No window rule: the picker is a fixed-size window, which Hyprland floats on
+-- its own, and the app centres it on the focused monitor itself.
+--
+-- No unbind: plain SUPER + E is free in stock Omarchy. E carries SUPER + CTRL
+-- ("Emojis"), SUPER + SHIFT ("Email") and SUPER + SHIFT + ALT ("New email"),
+-- but not SUPER alone, and nothing reaches E (code 26) through a
+-- keycode-spelled bind.
+o.bind("SUPER + E", "Superhands Team picker", "superhands-team --picker")
+
 -- SUPER + SHIFT + ALT + T: Monkeytype, T for type.
 --
 -- No unbind: the chord is free in stock Omarchy. T carries SUPER ("Toggle
