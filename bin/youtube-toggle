@@ -48,9 +48,10 @@ print=0
 # Shaped like peek-here's: the toast's body is Pango markup, and a video title
 # is free text that may well have a < or & in it.
 escape() {
-  local text=${1//&/&amp;}
-  text=${text//</&lt;}
-  printf '%s' "${text//>/&gt;}"
+  # Each replacement quoted: bare, bash 5.2 reads its & as the text matched.
+  local text=${1//&/"&amp;"}
+  text=${text//</"&lt;"}
+  printf '%s' "${text//>/"&gt;"}"
 }
 
 toast() { # <headline> <body>

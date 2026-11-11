@@ -31,9 +31,10 @@ tilde() { printf '%s' "${1/#"$HOME"/\~}"; }
 # paths, so a name with a < in it would be swallowed as an unclosed tag and
 # take the rest of the line with it.
 escape() {
-  local text=${1//&/&amp;}
-  text=${text//</&lt;}
-  printf '%s' "${text//>/&gt;}"
+  # Each replacement quoted: bare, bash 5.2 reads its & as the text matched.
+  local text=${1//&/"&amp;"}
+  text=${text//</"&lt;"}
+  printf '%s' "${text//>/"&gt;"}"
 }
 
 # omarchy-notification-send rather than notify-send, which its own source is
