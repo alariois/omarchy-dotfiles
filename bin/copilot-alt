@@ -22,21 +22,54 @@ one chord into a plain LEFTALT held for exactly as long as the key is:
 
 Everything else passes through untouched, in its original frames.
 
-No root: /dev/input/event* is readable through the `input` group and /dev/uinput
-carries a uaccess ACL for the logged-in user. No dependencies either -- evdev
-and uinput are a handful of ioctls, spelled out below, and a keyboard that stops
-working because a Python package changed is not a trade worth making.
+It runs as a system service, as root with every capability taken away -- see
+systemd/copilot-alt.service. It began as a user service, reading the keyboard
+through the `input` group, until Omarchy's migration 1787865477 took users out
+of that group. Rightly: membership lets anything running as you read every key
+you type, passwords included. The user service then could not open the keyboard
+and restarted every five seconds for weeks. Now nothing you run can read the
+keyboard, and this can. What runs is a root-owned copy in /usr/local/bin, put
+there by setup/install.sh, so nothing you can edit runs with that access.
+
+udev starts it when the internal keyboard appears (udev/70-copilot-alt.rules):
+at boot, and again whenever the kernel re-creates the device. A machine without
+that keyboard never starts it, and the unit skips a VM. A laptop keyboard
+without a Copilot key cannot be told apart, because every PS/2 keyboard
+advertises F23. This runs there too and never sees the chord.
+
+It stops in one of three ways, by exit status:
+
+    0   nothing to do: no keyboard at that path, or the keyboard went away.
+        udev starts it again when a keyboard appears.
+    78  EX_CONFIG: it cannot work as set up -- no permission, no /dev/uinput,
+        or something else holding the keyboard. A restart would not change
+        that, so the unit does not restart it.
+    any other status is a crash. The unit restarts it a few times, then gives
+        up and leaves it failed rather than loop.
+
+No dependencies -- evdev and uinput are a handful of ioctls, spelled out below,
+and a keyboard that stops working because a Python package changed is not a
+trade worth making.
 
 If this process dies the kernel drops the grab and the real keyboard comes
 straight back, Copilot key included. That is the intended failure mode: never a
-keyboard you cannot type on. `--trace` exercises the whole decision path without
-grabbing anything, which is the safe way to check a change.
+keyboard you cannot type on. A hang would be worse than a death: the grab would
+stay, with nothing reading the keyboard, so nothing could be typed. So it pings
+systemd's watchdog, and systemd kills it if the pings stop.
+
+`--trace` exercises the whole decision path without grabbing anything, which is
+the safe way to check a change. It needs root, and the service stopped, because
+a grabbed keyboard tells nobody else anything:
+
+    sudo systemctl stop copilot-alt && sudo copilot-alt --trace
 """
 
+import errno
 import fcntl
 import os
 import select
 import signal
+import socket
 import struct
 import sys
 import time
@@ -77,6 +110,10 @@ def EVIOCGBIT(ev, length):
     return _ior("E", 0x20 + ev, length)
 
 
+def EVIOCGKEY(length):
+    return _ior("E", 0x18, length)
+
+
 UI_DEV_CREATE = _io("U", 1)
 UI_DEV_DESTROY = _io("U", 2)
 UI_DEV_SETUP = _iow("U", 3, 92)  # sizeof(struct uinput_setup)
@@ -90,7 +127,15 @@ KEY_LEFTSHIFT, KEY_LEFTALT, KEY_LEFTMETA, KEY_F23 = 42, 56, 125, 193
 CHORD_MODS = (KEY_LEFTMETA, KEY_LEFTSHIFT)
 
 # The internal keyboard, by a path that survives renumbering of /dev/input.
+# udev/70-copilot-alt.rules matches the same device, by the ID_PATH this link
+# is named after.
 KEYBOARD = "/dev/input/by-path/platform-i8042-serio-0-event-kbd"
+
+# From <sysexits.h>; the docstring says what it means here.
+EX_CONFIG = 78
+
+# How long to wait, before grabbing, for keys already down to come up.
+RELEASE_WAIT = 2.0
 
 # How long a frame holding nothing but chord modifiers waits to see whether F23
 # follows it. The firmware sends all three together, but "together" is the
@@ -200,22 +245,96 @@ class Remap:
             self._emit(events)
 
 
+def notify(state):
+    """Tell systemd something: READY=1, STATUS=..., WATCHDOG=1 (sd_notify(3)).
+
+    Does nothing outside systemd, which is how --trace and a run by hand go.
+    """
+    path = os.environ.get("NOTIFY_SOCKET")
+    if not path:
+        return
+    if path.startswith("@"):  # an abstract socket
+        path = "\0" + path[1:]
+    with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+        sock.sendto(state.encode(), path)
+
+
+class Watchdog:
+    """systemd's watchdog, pinged at half its timeout when the unit sets one."""
+
+    def __init__(self):
+        usec = os.environ.get("WATCHDOG_USEC")
+        ours = os.environ.get("WATCHDOG_PID", str(os.getpid())) == str(os.getpid())
+        self.every = int(usec) / 2_000_000 if usec and ours else None
+        self.due = time.monotonic() if self.every else None  # when to ping next
+
+    def ping(self):
+        """Ping, if one is due."""
+        if self.due is not None and time.monotonic() >= self.due:
+            notify("WATCHDOG=1")
+            self.due = time.monotonic() + self.every
+
+
+def finish(why):
+    """Stop with nothing wrong. The unit does not restart a 0."""
+    print(f"copilot-alt: {why}", flush=True)
+    notify(f"READY=1\nSTATUS={why}")
+    sys.exit(0)
+
+
+def give_up(why):
+    """Stop for a reason no restart would change. The unit does not restart a 78."""
+    print(f"copilot-alt: {why}", file=sys.stderr, flush=True)
+    notify(f"STATUS={why}")
+    sys.exit(EX_CONFIG)
+
+
+def wait_for_release(fd):
+    """Wait until no key is down on the keyboard, for up to RELEASE_WAIT.
+
+    Grabbing mid-press strands the key. The compositor saw it go down on the
+    real keyboard, and its release now goes to the clone, which never saw the
+    press, so the kernel drops it as a no-op. The compositor keeps the key down,
+    and the focused window repeats it. At boot nothing is held, but a `systemctl
+    restart` is typed, and its Return can still be down when the grab comes.
+    """
+    keys = bytearray(KEY_CNT // 8)
+    deadline = time.monotonic() + RELEASE_WAIT
+    while True:
+        fcntl.ioctl(fd, EVIOCGKEY(len(keys)), keys)
+        if not any(keys) or time.monotonic() >= deadline:
+            return
+        time.sleep(0.01)
+
+
 def open_keyboard(path, grab=True):
-    fd = os.open(path, os.O_RDONLY)
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        finish(f"no keyboard at {path}, so nothing to remap")
+    except PermissionError:
+        give_up(
+            f"no permission to read {path}. It is meant to run as the system "
+            "service, which setup/install.sh installs"
+        )
     if grab:
+        wait_for_release(fd)
         try:
             fcntl.ioctl(fd, EVIOCGRAB, 1)
         except OSError as exc:
-            raise SystemExit(
-                f"copilot-alt: cannot grab {path}: {exc}\n"
-                "Another instance is probably already running."
+            give_up(
+                f"cannot grab {path}: {exc.strerror}. Something else holds it: "
+                "another copilot-alt, or a remapper such as keyd"
             )
     return fd
 
 
 def make_clone(fd, name):
     """A uinput device carrying the same keys as the real keyboard."""
-    ui = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
+    try:
+        ui = os.open("/dev/uinput", os.O_WRONLY | os.O_NONBLOCK)
+    except OSError as exc:
+        give_up(f"cannot open /dev/uinput: {exc.strerror}")
 
     for ev in (EV_SYN, EV_KEY, EV_MSC):
         fcntl.ioctl(ui, UI_SET_EVBIT, ev)
@@ -241,7 +360,8 @@ def make_clone(fd, name):
 
 def main():
     trace = "--trace" in sys.argv[1:]
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: sys.exit(0))
 
     fd = open_keyboard(KEYBOARD, grab=not trace)
     ui = None if trace else make_clone(fd, "copilot-alt keyboard")
@@ -256,16 +376,28 @@ def main():
             os.write(ui, blob + EVENT.pack(0, 0, EV_SYN, SYN_REPORT, 0))
 
     remap = Remap(emit)
+    watchdog = Watchdog()
     frame = []
+    if not trace:
+        print(f"copilot-alt: the Copilot key is Alt on {KEYBOARD}", flush=True)
+    notify("READY=1\nSTATUS=the Copilot key is Alt")
     try:
         while True:
-            timeout = None
-            if remap.deadline is not None:
-                timeout = max(0.0, remap.deadline - time.monotonic())
-            if not select.select([fd], [], [], timeout)[0]:
-                remap.release_held()
+            # Until a key comes, held-back modifiers are due, or a ping is.
+            waits = [t for t in (remap.deadline, watchdog.due) if t is not None]
+            timeout = max(0.0, min(waits) - time.monotonic()) if waits else None
+            ready = select.select([fd], [], [], timeout)[0]
+            watchdog.ping()
+            if not ready:
+                if remap.deadline is not None and time.monotonic() >= remap.deadline:
+                    remap.release_held()
                 continue
-            data = os.read(fd, EVENT.size * 64)
+            try:
+                data = os.read(fd, EVENT.size * 64)
+            except OSError as exc:
+                if exc.errno != errno.ENODEV:
+                    raise
+                finish(f"{KEYBOARD} went away")
             for offset in range(0, len(data) - EVENT.size + 1, EVENT.size):
                 _, _, etype, code, value = EVENT.unpack_from(data, offset)
                 if etype == EV_SYN:

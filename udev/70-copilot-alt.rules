@@ -1,0 +1,13 @@
+# Start copilot-alt.service when the internal keyboard appears: at every boot,
+# when udev replays the devices the kernel found, and again whenever the kernel
+# re-creates the device. That keyboard is the one on the i8042 controller,
+# matched by the ID_PATH that bin/copilot-alt's by-path link is named after.
+#
+# The systemd tag is what makes systemd track the device, and only a device it
+# tracks can want a unit. Not limited to "add": a "change" event that left the
+# tag off would take it away again.
+#
+# Numbered after 60-persistent-input.rules, which sets ID_PATH, and
+# 60-input-id.rules, which sets ID_INPUT_KEYBOARD. The remapper's own clone is
+# a virtual device with no ID_PATH, so it never matches.
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_PATH}=="platform-i8042-serio-0", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="systemd", ENV{SYSTEMD_WANTS}+="copilot-alt.service"

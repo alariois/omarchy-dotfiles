@@ -138,6 +138,28 @@ reported as a conflict and left alone. A download that is not the pinned file
 is a conflict too; one that fails warns, as a font's does. `doctor.sh`
 reports a missing binary, an older pin, and one that is neither.
 
+### `SYSTEM` — files root runs
+
+Everything above lives in `$HOME`, which suits everything but one: the Copilot
+key, which needs a process that reads the keyboard. Since Omarchy took users
+out of the `input` group (migration `1787865477`), a user cannot do that. Nor
+should one: whatever can read the keyboard can read every password typed on
+it. So `bin/copilot-alt` runs as a system service, sandboxed down to the two
+devices it needs, and its files go to `/usr/local/bin`, `/etc/systemd/system`
+and `/etc/udev/rules.d`.
+
+Those are root-owned copies, not links. A link would have root run a file the
+user can edit, and then anything running as the user could make root run
+whatever it liked. The price is that an edit reaches the machine only the next
+time `install.sh` is run by hand. Copying needs sudo, so the post-update hook
+only warns, and `doctor.sh` reports the copy `STALE` until then. After a copy,
+`install.sh` reloads systemd and udev and restarts the service. It also
+restarts a service that has failed, which `doctor.sh` reports as `BROKEN`.
+
+`RETIRED` is the other half of that move. It lists the links that ran the
+Copilot key as a user service, which `install.sh` stops and removes, but only
+while they still point into this repo.
+
 ### Keeping Hyprland in step
 
 Hyprland watches the files under `~/.config/hypr`, but our config is not there:
@@ -167,6 +189,9 @@ herdr/config.toml                         herdr's notification setup (hooked, `t
 claude/hooks.json                         when Claude Code dings (hooked, `claude` style)
 claude/ding                               the ding itself
 xkb/                                      custom xkb options behind it (linked)
+bin/copilot-alt                           the Copilot key as an Alt (copied, root-owned)
+systemd/copilot-alt.service               the system service that runs it (copied)
+udev/70-copilot-alt.rules                 what starts it when the keyboard appears (copied)
 nvim/plugins/*.lua                        added LazyVim plugin specs (linked)
 nvim-chad/                                standalone nvim config (linked wholesale)
 xcompose/XCompose                         compose-key expansions (linked)
@@ -587,7 +612,7 @@ just deleted.
 1. Put the configuration in a repo file (e.g. `hypr/looknfeel.lua`).
 2. Add one row to `setup/targets.sh` — to `HOOKS` if Omarchy owns the live
    file, to `LINKS` if it does not, to `BUILDS` if it needs compiling, to
-   `SEEDS` if it must stay off GitHub.
+   `SEEDS` if it must stay off GitHub, to `SYSTEM` if root runs or reads it.
 3. Run `setup/install.sh`.
 
 ## Notes on specific configs

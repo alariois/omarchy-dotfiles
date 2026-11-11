@@ -1357,7 +1357,7 @@ cmd_test() {
   else
     t_fail "install.sh on a fresh machine exited $status" "$(t_tail "$run_dir/install-1.log")"
   fi
-  local problems_re='^  (CONFLICT|FAILED|no pkg|no file|no conf|no font|no icon|replace|old ver|no env|no sync|plain|example) |MISSING payload'
+  local problems_re='^  (CONFLICT|FAILED|no pkg|no root|no file|no conf|no font|no icon|replace|old ver|no env|no sync|plain|example|kept) |MISSING payload'
   if grep -qE "$problems_re" "$run_dir/install-1.log"; then
     t_fail "install.sh reported problems" "$(grep -E "$problems_re" -A1 "$run_dir/install-1.log")"
   else
@@ -1395,7 +1395,7 @@ cmd_test() {
   # Safe to re-run is the whole contract: a second run must change nothing.
   guest_keyed "$age_key" "cd $repo && DOTFILES_ATTENDED=1 ./setup/install.sh" 2>&1 | tr -d '\r' >"$run_dir/install-2.log" || true
   local changes
-  changes=$(grep -E '^  (hooked|linked|seeded|built|added|removed|synced|set|release|font|icon|webapp|reloaded) |^Applied ' "$run_dir/install-2.log" || true)
+  changes=$(grep -E '^  (hooked|linked|seeded|built|added|removed|copied|restarted|synced|set|release|font|icon|webapp|reloaded) |^Applied ' "$run_dir/install-2.log" || true)
   if [[ -z $changes ]]; then
     t_ok "a second install.sh changes nothing"
   else

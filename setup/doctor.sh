@@ -8,6 +8,7 @@
 #   4. Which Omarchy-owned config files differ from the shipped stock defaults
 #      in ways this repo does NOT capture? Those are the drift -- either port
 #      them into the repo as a delta, or revert them.
+#   5. Are the root-owned SYSTEM copies current, and their services healthy?
 
 set -uo pipefail
 
@@ -134,6 +135,57 @@ else
       echo "  MISSING  $(tilde "$target")   -> run setup/install.sh"
     fi
   done
+fi
+
+echo
+echo "== Retired links =="
+retired_count=0
+[[ -n ${RETIRED+x} ]] && retired_count=${#RETIRED[@]}
+if (( retired_count == 0 )); then
+  echo "  none declared"
+else
+  for target in "${RETIRED[@]}"; do
+    [[ -n $target ]] || continue
+    if [[ ! -e $target && ! -L $target ]]; then
+      echo "  gone     $(tilde "$target")"
+    elif [[ -L $target && $(readlink "$target") == "$DOTFILES"/* ]]; then
+      echo "  STALE    $(tilde "$target")   -> retired; setup/install.sh removes it"
+    else
+      echo "  kept     $(tilde "$target")   -> retired, but not a link into this repo"
+    fi
+  done
+fi
+
+echo
+echo "== System files =="
+system_count=0
+[[ -n ${SYSTEM+x} ]] && system_count=${#SYSTEM[@]}
+if (( system_count == 0 )); then
+  echo "  none declared"
+else
+  for entry in "${SYSTEM[@]}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r target payload mode <<< "$entry"
+    if system_file_current "$target" "$payload" "$mode"; then
+      echo "  copied   $target  <-  $payload"
+    elif [[ -e $target || -L $target ]]; then
+      echo "  STALE    $target   -> not the root-owned copy of $payload; run setup/install.sh"
+    else
+      echo "  MISSING  $target   -> run setup/install.sh"
+    fi
+  done
+  # A healthy service is never between a crash and a restart, so that counts
+  # as broken along with failed. Skipped, stopped and idle are all fine: a VM,
+  # a keyboard that went away, a machine without one.
+  while IFS= read -r unit; do
+    state=$(system_service_state "$unit")
+    case ${state%%|*} in
+      failed | restarting)
+        echo "  BROKEN   $unit   -> ${state#*|}"
+        echo "           journalctl -b -u $unit says why; setup/install.sh restarts it" ;;
+      *) printf '  %-8s %s  ->  %s\n' "${state%%|*}" "$unit" "${state#*|}" ;;
+    esac
+  done < <(system_services)
 fi
 
 echo

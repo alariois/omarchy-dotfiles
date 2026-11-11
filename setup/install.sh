@@ -271,6 +271,128 @@ ensure_link() {
   repaired=$((repaired + 1))
 }
 
+# Take away the links RETIRED lists -- see there. A user unit among them is
+# stopped before its links go, and the user's systemd reloaded after, so the
+# unit is forgotten rather than left loaded with no file behind it.
+ensure_retired() {
+  local target unit
+  local -a units=()
+
+  for target in "${RETIRED[@]:-}"; do
+    [[ -n $target ]] || continue
+    if [[ ! -e $target && ! -L $target ]]; then
+      say "  ok       ${target/#"$HOME"/\~}  (retired, gone)"
+      continue
+    fi
+    # The link's own text, not where it resolves: ensure_link wrote "$abs", and
+    # a payload deleted since must still count as ours.
+    if [[ ! -L $target || $(readlink "$target") != "$DOTFILES"/* ]]; then
+      changed "  kept     ${target/#"$HOME"/\~}   -> retired, but not a link into this repo;"
+      changed "           remove it yourself if nothing else needs it"
+      warnings=$((warnings + 1))
+      continue
+    fi
+    if [[ $target == "$HOME/.config/systemd/user/"*.service ]]; then
+      unit=${target##*/}
+      if ! printf '%s\n' "${units[@]:-}" | grep -qxF "$unit"; then
+        units+=("$unit")
+        systemctl --user stop "$unit" >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -f -- "$target"
+    changed "  removed  ${target/#"$HOME"/\~}  (retired)"
+    repaired=$((repaired + 1))
+  done
+
+  if (( ${#units[@]} )); then
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+    systemctl --user reset-failed "${units[@]}" >/dev/null 2>&1 || true
+  fi
+}
+
+# Root-owned copies of the SYSTEM payloads -- see there. Needs sudo, so like
+# ensure_packages it depends on who is running us: unattended, whatever needs
+# doing stays a warning naming the run that would do it.
+ensure_system() {
+  local entry target payload mode unit state copied=0
+  local systemd_changed=false udev_changed=false
+  local -a stale=() units=() failed=() restart=()
+
+  for entry in "${SYSTEM[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r target payload mode <<< "$entry"
+    if [[ ! -f $DOTFILES/$payload ]]; then
+      echo "MISSING payload: $DOTFILES/$payload" >&2
+      return 1
+    fi
+    if system_file_current "$target" "$payload" "$mode"; then
+      say "  ok       $target"
+    else
+      stale+=("$entry")
+    fi
+  done
+
+  # A service that gave up -- five crashes, and its unit stops restarting it --
+  # is repaired by a restart, files changed or not.
+  mapfile -t units < <(system_services)
+  for unit in "${units[@]:-}"; do
+    [[ -n $unit ]] || continue
+    systemctl is-failed --quiet "$unit" 2>/dev/null && failed+=("$unit")
+  done
+
+  (( ${#stale[@]} + ${#failed[@]} )) || return 0
+
+  if ! $attended; then
+    for entry in "${stale[@]:-}"; do
+      [[ -n $entry ]] || continue
+      IFS='|' read -r target payload mode <<< "$entry"
+      changed "  no root  $target  ->  not the copy of $payload; run setup/install.sh in a terminal"
+      warnings=$((warnings + 1))
+    done
+    for unit in "${failed[@]:-}"; do
+      [[ -n $unit ]] || continue
+      changed "  no root  $unit  ->  failed; setup/install.sh in a terminal restarts it"
+      warnings=$((warnings + 1))
+    done
+    return 0
+  fi
+
+  for entry in "${stale[@]:-}"; do
+    [[ -n $entry ]] || continue
+    IFS='|' read -r target payload mode <<< "$entry"
+    if sudo install -D -T -m "$mode" -o root -g root "$DOTFILES/$payload" "$target"; then
+      changed "  copied   $target  <-  $payload"
+      repaired=$((repaired + 1))
+      copied=$((copied + 1))
+      [[ $target == /etc/systemd/* ]] && systemd_changed=true
+      [[ $target == /etc/udev/* ]] && udev_changed=true
+    else
+      changed "  FAILED   $target  <-  $payload"
+      conflicts=$((conflicts + 1))
+    fi
+  done
+
+  # No `udevadm trigger`: a new rule matters at the next event for the device
+  # -- every boot has one -- and the restart below covers this boot.
+  if $systemd_changed; then sudo systemctl daemon-reload; fi
+  if $udev_changed; then sudo udevadm control --reload; fi
+
+  # Any copy restarts every service, since each one's script is a file here.
+  if (( copied )); then restart=("${units[@]}"); else restart=("${failed[@]}"); fi
+  for unit in "${restart[@]:-}"; do
+    [[ -n $unit ]] || continue
+    sudo systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+    if sudo systemctl restart "$unit"; then
+      state=$(system_service_state "$unit")
+      changed "  restarted $unit  ->  ${state%%|*}: ${state#*|}"
+      repaired=$((repaired + 1))
+    else
+      changed "  FAILED   $unit did not start  ->  journalctl -b -u $unit"
+      conflicts=$((conflicts + 1))
+    fi
+  done
+}
+
 # Drop a template into place the first time and then leave it alone forever.
 # The point is the "leave it alone": the target holds machine-local content the
 # repo must not own, so an existing file is never compared or overwritten.
@@ -815,6 +937,11 @@ for entry in "${LINKS[@]:-}"; do
   ensure_link "$target" "$payload"
 done
 
+# Before System files: a retired user service may still hold what the system
+# one is about to start for -- the Copilot key's held the keyboard's grab.
+say "Retired links:"
+ensure_retired
+
 say "Builds:"
 for entry in "${BUILDS[@]:-}"; do
   [[ -n $entry ]] || continue
@@ -824,6 +951,10 @@ done
 
 say "Packages:"
 ensure_packages
+
+# After Packages, which puts python in place for copilot-alt.
+say "System files:"
+ensure_system
 
 say "Bitwarden:"
 ensure_bw_server

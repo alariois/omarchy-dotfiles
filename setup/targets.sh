@@ -129,25 +129,8 @@ LINKS=(
   # it paused even with others open.
   "$HOME/.local/bin/youtube-toggle|bin/youtube-toggle"
 
-  # The Copilot key as an Alt -- the one remapping that could not be done in
-  # the xkb block below. That key sends no keycode of its own: its firmware
-  # holds down LEFTMETA+LEFTSHIFT+F23 for as long as the key is, which is why
-  # Omarchy can bind it as `SUPER + SHIFT + code:201`. xkb rewrites keysyms one
-  # key at a time and cannot cancel the two modifiers riding along, so this one
-  # lives a level lower: bin/copilot-alt grabs the internal keyboard, re-emits
-  # it through uinput, and turns that chord into a plain held LEFTALT.
-  #
-  # Two links, because the second is what `systemctl --user enable` would have
-  # written. Declaring it here instead keeps "this service is on" in the repo
-  # rather than in machine state a reinstall would lose. A new machine still
-  # needs one `systemctl --user daemon-reload && systemctl --user start
-  # copilot-alt`; the link alone only decides what happens at next login.
-  #
-  # No PACKAGES entry: the script is stdlib Python and python is already listed
-  # there for msg-code's sake.
-  "$HOME/.local/bin/copilot-alt|bin/copilot-alt"
-  "$HOME/.config/systemd/user/copilot-alt.service|systemd/copilot-alt.service"
-  "$HOME/.config/systemd/user/default.target.wants/copilot-alt.service|systemd/copilot-alt.service"
+  # The Copilot key as an Alt is in SYSTEM below, not here: it is the one
+  # remapping that needs root.
 
   # Custom xkb options, selected by hypr/input.lua. libxkbcommon searches
   # ~/.config/xkb before the system tree, which is how these work without root.
@@ -264,6 +247,55 @@ LINKS=(
 if [[ -d $DOTFILES/.git ]]; then
   LINKS+=("$DOTFILES/.git/hooks/pre-commit|git-hooks/pre-commit")
 fi
+
+# SYSTEM -- files outside $HOME, for root to run or read. Copied, owned by
+# root, never linked: root must not run a file the user can edit, or anything
+# running as the user could edit its way to whatever that file is trusted with.
+#
+#   <target path>|<repo-relative file>|<mode>
+#
+# Copying needs sudo, so this lane depends on who runs install.sh, as PACKAGES
+# does. By hand it copies whatever differs from the repo. From the post-update
+# hook it only warns. An edit to one of these payloads therefore reaches the
+# machine only when install.sh is next run by hand, and doctor.sh reports the
+# copy STALE until then.
+#
+# After a copy, install.sh reloads what reads these files -- systemd for
+# units, udev for rules -- and restarts every service listed here, since its
+# script is a file here too. A listed service that has failed is restarted as
+# well, which is the repair for one that gave up.
+#
+# The Copilot key as an Alt, the one remapping that could not be done in xkb.
+# That key sends no keycode of its own: its firmware holds LEFTMETA+LEFTSHIFT+F23
+# down for as long as the key is, which is why Omarchy can bind it as
+# `SUPER + SHIFT + code:201`. xkb rewrites keysyms one key at a time and cannot
+# cancel the two modifiers riding along, so this lives a level lower:
+# bin/copilot-alt grabs the internal keyboard, re-emits it through uinput, and
+# turns the chord into a plain held LEFTALT. Grabbing a keyboard is what root is
+# needed for, as the unit explains. The udev rule is what starts the service, so
+# installing it is what turns the key on. No PACKAGES entry: the script is
+# stdlib Python, and python is listed there already, for msg-code.
+SYSTEM=(
+  "/usr/local/bin/copilot-alt|bin/copilot-alt|755"
+  "/etc/systemd/system/copilot-alt.service|systemd/copilot-alt.service|644"
+  "/etc/udev/rules.d/70-copilot-alt.rules|udev/70-copilot-alt.rules|644"
+)
+
+# RETIRED -- links an earlier LINKS made, which install.sh takes away again. A
+# link is removed only while it still points into this repo: anything else at
+# that path is not ours to delete, and is reported instead. A retired user
+# unit is stopped first, then forgotten by the user's systemd.
+#
+#   <target path>
+#
+# The Copilot key's user service, from before it moved to SYSTEM. These three
+# links ran it at every login -- where it could no longer open the keyboard,
+# and restarted every five seconds for weeks.
+RETIRED=(
+  "$HOME/.config/systemd/user/default.target.wants/copilot-alt.service"
+  "$HOME/.config/systemd/user/copilot-alt.service"
+  "$HOME/.local/bin/copilot-alt"
+)
 
 # SEEDS -- machine-local files this repo deliberately does not own. install.sh
 # copies the template in when the target is missing and never touches it again,

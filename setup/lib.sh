@@ -7,6 +7,7 @@
 #   2. Is the Hyprland config the live session is running the one in this repo?
 #   3. Is a toml hook block a current copy of its payload?
 #   4. Are Claude Code's hooks the ones claude/hooks.json declares?
+#   5. Is a SYSTEM file the root-owned copy of its payload?
 #
 # The first two cannot be answered from mtimes, which is what both used to do.
 # See the sections below.
@@ -377,4 +378,90 @@ webapp_icon_installed() {
     fi
   done
   return 1
+}
+
+# ── SYSTEM files ──────────────────────────────────────────────────────
+#
+# Shared so doctor.sh calls a copy STALE exactly when install.sh would replace
+# it. Current means a plain file -- not a link, which would lead back to
+# something the user can edit -- with the payload's bytes, owned by root, and
+# with the declared mode.
+system_file_current() {
+  local target=$1 payload=$2 mode=$3
+  [[ -f $target && ! -L $target ]] || return 1
+  cmp -s "$target" "$DOTFILES/$payload" || return 1
+  [[ $(stat -c '%a %U %G' "$target") == "$mode root root" ]]
+}
+
+# The services SYSTEM installs, by unit name, one per line.
+system_services() {
+  local entry target
+  for entry in "${SYSTEM[@]:-}"; do
+    [[ -n $entry ]] || continue
+    target=${entry%%|*}
+    [[ $target == /etc/systemd/system/*.service ]] && echo "${target##*/}"
+  done
+  return 0
+}
+
+# What a SYSTEM service is doing, as <state>|<detail>:
+#
+#   running     up, with its status line
+#   starting    not ready yet: copilot-alt waits for held keys to come up
+#   restarting  between a crash and its restart, never a healthy service
+#   failed      crashed five times, or cannot work as set up -- systemd's reason
+#   skipped     a condition of the unit does not hold: copilot-alt in a VM
+#   stopped     ran and exited cleanly, with its last status line
+#   idle        never started: nothing on this machine wanted it
+#   missing     not installed
+#
+# A service that has exited has no status line any more, so what it last said
+# comes from the journal instead -- which only root and the wheel and adm
+# groups can read; for anyone else there is just the exit.
+#
+# A skip is asked of systemd-analyze, which evaluates the unit's conditions
+# here and now. Not of ConditionResult, which reads "no" before any start was
+# tried, and whose timestamp a skipped `systemctl restart` leaves unset.
+system_service_state() {
+  local key value load="" active="" sub="" result="" status="" code="" started=""
+  while IFS='=' read -r key value; do
+    case $key in
+      LoadState) load=$value ;;
+      ActiveState) active=$value ;;
+      SubState) sub=$value ;;
+      Result) result=$value ;;
+      StatusText) status=$value ;;
+      ExecMainStatus) code=$value ;;
+      ExecMainStartTimestampMonotonic) started=$value ;;
+    esac
+  done < <(systemctl show "$1" -p LoadState -p ActiveState -p SubState -p Result \
+             -p StatusText -p ExecMainStatus -p ExecMainStartTimestampMonotonic 2>/dev/null)
+
+  if [[ $load != loaded ]]; then
+    echo "missing|not installed"
+  elif [[ $active == active || $active == reloading ]]; then
+    echo "running|${status:-up}"
+  elif [[ $sub == auto-restart ]]; then
+    echo "restarting|after a crash, exit status $code"
+  elif [[ $active == activating ]]; then
+    echo "starting|not ready yet"
+  elif [[ $active == failed ]]; then
+    echo "failed|$result, exit status $code$(system_service_said "$1" " -- ")"
+  elif ! systemd-analyze condition --unit="$1" >/dev/null 2>&1; then
+    echo "skipped|a condition of the unit does not hold on this machine"
+  elif [[ ${started:-0} != 0 ]]; then
+    echo "stopped|exited cleanly$(system_service_said "$1" " -- ")"
+  else
+    echo "idle|never started: nothing on this machine wanted it"
+  fi
+}
+
+# The last line a service's own process logged this boot, after <prefix>; or
+# nothing, when there is none or no permission to read it. Matched by
+# _SYSTEMD_UNIT, which is the process's own lines and not systemd's about it.
+system_service_said() {
+  local line
+  line=$(journalctl -b "_SYSTEMD_UNIT=$1" -n 1 -o cat --no-pager 2>/dev/null) || return 0
+  [[ -n $line ]] && printf '%s%s' "$2" "$line"
+  return 0
 }
