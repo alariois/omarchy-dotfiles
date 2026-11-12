@@ -1,89 +1,96 @@
-// Workspace indicators that know which monitor they are on.
+// Omarchy's omarchy.workspaces (as shipped in omarchy 4.5.0), plus one thing:
+// the marker for the workspace a monitor shows is drawn in the theme's accent
+// on the monitor that has the keyboard. Stock draws it in the bar's foreground
+// on every monitor alike, so with two screens both bars show the same white
+// square and neither says which one Super + 3 will act on.
 //
-// A clone of Omarchy's omarchy.workspaces (see setup/targets.sh for why a
-// clone rather than an edit in place). Stock renders one marker, on
-// Hyprland.focusedWorkspace -- a single global value -- so every bar on a
-// multi-monitor desk draws the identical row. The laptop bar then claims the
-// workspace that is focused on the *external* monitor is the current one,
-// while saying nothing about the workspace that laptop is actually showing.
+// Everything else is stock, kept verbatim so the next re-sync is a copy of the
+// packaged file plus the two lines marked ACCENT below:
+//   cp $OMARCHY_PATH/shell/plugins/bar/widgets/Workspaces.qml .
 //
-// A bar surface exists per monitor, so each instance can answer for its own
-// screen instead. Three orthogonal channels carry three independent facts:
+// This used to be a much larger rewrite. Stock then put its one marker on
+// Hyprland.focusedWorkspace, a single global value, so every bar drew the same
+// row, and the clone made each bar answer for its own screen. Omarchy 4.5 fixed
+// that itself, and gave each monitor its own block of ten workspaces (laptop
+// 1-10, the next monitor 11-20). The old clone only knew 1-10, so the external
+// monitor's bar lost its marker entirely. That is what the re-sync fixes.
 //
-//   shape    what is on screen        filled square = this monitor is showing it
-//                                     outline square = another monitor is
-//                                     digit = not on screen anywhere
-//   colour   where the keyboard is    accent = this monitor's workspace, and
-//                                     this monitor has focus
-//   opacity  which monitor owns it    full = this monitor's, faint = another
-//                                     monitor's, faintest = does not exist yet
-//
-// So a glance at any one bar says which workspaces live on that screen, which
-// one it is showing, which the other screens are showing, and which of them has
-// the keyboard. On a single monitor it reduces to stock, plus the accent:
-// nothing is foreign, so nothing is dimmed for ownership.
-//
-// Nothing here counts or names monitors, so a monitor plugged in later needs no
-// restart -- the bar host instantiates a surface per Quickshell.screens entry
-// and every lookup below is a scan of Hyprland's own live monitor list.
-// Verified against `hyprctl output create headless`: the new bar came up with
-// its own marker and the existing bars grew a second outline marker for it.
-//
-// Accent comes from Color.accent, which Commons/Color.qml loads from the
-// theme's colors.toml and rebinds on a theme switch, so this follows
-// `omarchy theme set` for free. Deliberately not Color.bar.active: that is
-// shell.toml's `active`, documented as the colour for "modules calling
-// attention to themselves" (recording, alerts, updates) and red in most
-// themes, which is the wrong thing to say about the workspace you are on.
+// Accent is Color.accent, which follows `omarchy theme set`. Deliberately not
+// Color.bar.active or WidgetButton's default (bar.urgent): those are for
+// widgets calling attention to themselves, red in most themes, and the wrong
+// thing to say about the workspace you are on.
 //
 // Editing note: this directory is a symlink into the dotfiles repo, and the
 // shell's plugin watcher does not see writes through it. Saving here does NOT
-// hot-reload, and `omarchy-shell shell rescanPlugins` is not enough either --
-// run `omarchy restart shell`.
+// hot-reload, and `omarchy-shell shell rescanPlugins` is not enough either.
+// Run `omarchy restart shell`.
 import QtQuick
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Hyprland
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
 BarWidget {
   id: root
-
-  // Left as the built-in id on purpose: omarchy-plugin-clone keeps it so the
-  // shell can route this widget's IPC through the manifest's `clonedFrom`.
   moduleName: "omarchy.workspaces"
 
-  // Nerd Font md-square_rounded and md-square_rounded_outline (U+F14FB and
-  // U+F14FC), as surrogate pairs. Consecutive codepoints in the same icon
-  // family, so the filled and outline markers share their metrics and sit on
-  // the same baseline. The filled one is what stock draws.
-  readonly property string markerFilled: "󱓻"
-  readonly property string markerOutline: "󱓼"
+  // Every monitor has workspaces 1-10 of its own, which Hyprland numbers in a
+  // block of ten per monitor: 1-10, 11-20, and so on (see
+  // default/hypr/monitor-workspaces.lua). Each bar shows its own monitor's block,
+  // numbered 1-10, and the one that monitor shows, whichever monitor has focus.
+  readonly property int slots: 10
 
-  // The ownership channel, in one place because it is the thing most worth
-  // tuning by eye. Turn foreignOpacity down for a quieter bar; it is the only
-  // number here that is a matter of taste rather than of meaning.
-  readonly property real ownOpacity: 1.0
-  readonly property real foreignOpacity: 0.45
-  readonly property real ownerlessOpacity: 0.28
+  readonly property var monitor: {
+    var window = root.QsWindow.window
+    var screen = window ? window.screen : null
+    return screen ? Hyprland.monitorFor(screen) : Hyprland.focusedMonitor
+  }
+  readonly property string monitorName: root.monitor ? root.monitor.name : ""
 
-  // The monitor this bar surface is on. QsWindow.window is the panel window
-  // the widget was instantiated into, and Hyprland.monitorFor maps its screen
-  // onto the compositor's own monitor object.
-  readonly property var barWindow: QsWindow.window
-  readonly property var monitor: barWindow && barWindow.screen ? Hyprland.monitorFor(barWindow.screen) : null
+  // Connector -> block, from the file Hyprland keeps them in.
+  property var blocks: ({})
 
-  // Fall back to the global focused workspace when the monitor cannot be
-  // resolved -- before Hyprland has reported its outputs, or on a screen it
-  // does not know about. That is exactly stock behaviour, which is the right
-  // thing to degrade to: a bar with no marker at all would look broken.
-  readonly property bool monitorKnown: monitor !== null && monitor.activeWorkspace !== null
-  readonly property int shownId: monitorKnown
-    ? monitor.activeWorkspace.id
-    : (Hyprland.focusedWorkspace !== null ? Hyprland.focusedWorkspace.id : -1)
-  readonly property bool monitorFocused: monitorKnown ? monitor.focused === true : true
-  readonly property string monitorName: monitorKnown ? String(monitor.name) : ""
+  function readBlocks(text) {
+    var next = {}
+    var lines = String(text || "").split("\n")
+    for (var i = 0; i < lines.length; i++) {
+      var fields = lines[i].split("\t")
+      if (fields.length >= 3 && fields[1] !== "") next[fields[1]] = parseInt(fields[0], 10)
+    }
+    root.blocks = next
+  }
+
+  FileView {
+    path: (Quickshell.env("XDG_STATE_HOME") || Quickshell.env("HOME") + "/.local/state") + "/omarchy/monitor-workspaces"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: root.readBlocks(text())
+    onLoadFailed: root.readBlocks("")
+  }
+
+  function blockOf(id) {
+    return Math.floor((id - 1) / root.slots)
+  }
+
+  function slotOf(id) {
+    return (id - 1) % root.slots + 1
+  }
+
+  function activeWorkspaceId() {
+    return root.monitor && root.monitor.activeWorkspace ? root.monitor.activeWorkspace.id : -1
+  }
+
+  // Until Hyprland has written the file, the workspace a monitor shows is in
+  // its own block.
+  readonly property int block: {
+    var block = root.blocks[root.monitorName]
+    if (block !== undefined) return block
+    var active = root.activeWorkspaceId()
+    return active > 0 ? root.blockOf(active) : 0
+  }
 
   function workspaceById(id) {
     var values = Hyprland.workspaces.values
@@ -94,38 +101,168 @@ BarWidget {
     return null
   }
 
+  // The first five of the monitor's own, and any of the rest that exist. After
+  // them come workspaces that are only visiting: those of a monitor that is
+  // unplugged, which had no room to join this one's.
   function workspaceIds() {
-    var ids = [1, 2, 3, 4, 5]
+    var base = root.block * root.slots
+    var ids = [base + 1, base + 2, base + 3, base + 4, base + 5]
+    var guests = []
     var values = Hyprland.workspaces.values
 
     for (var i = 0; i < values.length; i++) {
       var id = values[i].id
-      if (id > 0 && id <= 10 && ids.indexOf(id) === -1) ids.push(id)
+      if (id <= 0) continue
+      if (root.blockOf(id) === root.block) {
+        if (ids.indexOf(id) === -1) ids.push(id)
+      } else if (values[i].monitor && values[i].monitor.name === root.monitorName) {
+        guests.push(id)
+      }
     }
 
     ids.sort(function(left, right) { return left - right })
-    return ids
+    guests.sort(function(left, right) { return left - right })
+    return ids.concat(guests)
   }
 
-  // Is some monitor other than this one showing this workspace? Reading
-  // Hyprland.monitors and each activeWorkspace here is what registers the
-  // dependency, so the delegate bindings that call this re-evaluate when a
-  // workspace moves -- QML tracks property reads through function calls.
-  function shownElsewhere(id) {
-    if (id === root.shownId) return false
-
-    var monitors = Hyprland.monitors.values
-    for (var i = 0; i < monitors.length; i++) {
-      var active = monitors[i].activeWorkspace
-      if (active !== null && active.id === id) return true
-    }
-
-    return false
+  function dispatch(expression) {
+    if (root.bar) root.bar.run("hyprctl dispatch " + Util.shellQuote(expression))
   }
 
   function focusWorkspace(id) {
+    if (root.blockOf(id) === root.block) {
+      root.dispatch("o.workspaces.focus(" + root.slotOf(id) + ", \"" + root.monitorName + "\")")
+    } else {
+      root.dispatch("hl.dsp.focus({ workspace = \"" + id + "\" })")
+    }
+  }
+
+  // A wheel notch moves one entry along the row, and a touchpad adds up its
+  // smaller deltas until they make a notch's worth.
+  property real wheelAccumulator: 0
+
+  function scrollWorkspaces(delta) {
+    var wheel = Util.wheelSteps(root.wheelAccumulator, delta)
+    root.wheelAccumulator = wheel.remainder
+    if (wheel.steps === 0) return
+
+    // Holds at either end rather than wrapping, so a touchpad swipe that runs
+    // long stops on the last workspace.
+    var ids = root.workspaceIds()
+    var index = ids.indexOf(root.activeWorkspaceId())
+    if (index === -1) return
+    var target = ids[Util.clamp(index - wheel.steps, 0, ids.length - 1)]
+    if (target !== ids[index]) root.focusWorkspace(target)
+  }
+
+  // The workspace each monitor shows carries its layout: a square tiles, a
+  // circle scrolls, and a triangle floats. Clicking it cycles to the next one,
+  // as Super + L does.
+  property string activeMode: "dwindle"
+  property bool modeStale: false
+
+  function modeGlyph(mode) {
+    if (mode === "scrolling") return "󰝥"
+    if (mode === "floating") return "󰔶"
+    return "󱓻"
+  }
+
+  // A layout only changes through the layout commands, which ask for a refresh,
+  // or a config reload, so each workspace's mode is read once and cached rather
+  // than running the script on every workspace switch.
+  property var modeCache: ({})
+  property int modeGeneration: 0
+  property int modeProcWorkspace: -1
+  property int modeProcGeneration: 0
+
+  function showActiveMode() {
+    var mode = root.modeCache[root.activeWorkspaceId()]
+    if (mode !== undefined) root.activeMode = mode
+    else readMode()
+  }
+
+  function readMode() {
+    if (modeProc.running) {
+      root.modeStale = true
+      return
+    }
+    var id = root.activeWorkspaceId()
+    if (id === -1) return
+    root.modeProcWorkspace = id
+    root.modeProcGeneration = root.modeGeneration
+    modeProc.command = ["omarchy-hyprland-workspace-layout-current", String(id)]
+    modeProc.running = true
+  }
+
+  function refresh() {
+    root.modeCache = ({})
+    root.modeGeneration++
+    readMode()
+  }
+
+  // The layout commands act on the focused workspace, so a click on another
+  // monitor's bar focuses that monitor first.
+  function cycleLayout() {
     if (!root.bar) return
-    root.bar.run("hyprctl dispatch " + Util.shellQuote("hl.dsp.focus({ workspace = \"" + id + "\" })"))
+    var command = "omarchy-hyprland-workspace-layout-toggle"
+    if (root.monitor && !root.monitor.focused) {
+      command = "hyprctl dispatch " + Util.shellQuote("hl.dsp.focus({ monitor = \"" + root.monitorName + "\" })") + " >/dev/null && " + command
+    }
+    root.bar.run(command)
+  }
+
+  Component.onCompleted: refresh()
+  onMonitorChanged: root.showActiveMode()
+
+  Connections {
+    target: root.monitor
+    function onActiveWorkspaceChanged() { root.showActiveMode() }
+  }
+
+  Connections {
+    target: Hyprland
+    function onRawEvent(event) {
+      var name = event ? String(event.name) : ""
+      if (name === "configreloaded") root.refresh()
+      // Quickshell credits every workspace switch to the focused monitor, as
+      // the event doesn't say which one switched, and misses the workspace a
+      // monitor falls back to when its own is moved away. Moving workspaces
+      // between monitors switches the others, so ask Hyprland for the truth.
+      // A workspace that changes number is only learned by asking too. Every
+      // bar shares what Hyprland answers, so one asks after a plain switch.
+      var switched = name === "workspacev2" && root.monitor !== null && root.monitor.focused
+      if (switched || name === "moveworkspacev2" || name === "changeworkspaceid") {
+        Hyprland.refreshMonitors()
+        Hyprland.refreshWorkspaces()
+      }
+    }
+  }
+
+  Process {
+    id: modeProc
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var mode = text.trim()
+        // A read that started before a refresh may predate the change.
+        if (!mode || root.modeProcGeneration !== root.modeGeneration) return
+        root.modeCache[root.modeProcWorkspace] = mode
+        if (root.modeProcWorkspace === root.activeWorkspaceId()) root.activeMode = mode
+      }
+    }
+    onExited: {
+      if (!root.modeStale) return
+      root.modeStale = false
+      // Deferred: the process still reports running while it signals exit.
+      Qt.callLater(root.showActiveMode)
+    }
+  }
+
+  // Super + L and the default layout change the mode without a focus change,
+  // so they ask every bar to read it again.
+  ShellIpc {
+    target: "omarchy.workspaces"
+
+    function refresh(): void { root.broadcast("refresh") }
   }
 
   readonly property real trailingGap: root.vertical ? 0 : Style.spaceReal(1.5)
@@ -148,54 +285,30 @@ BarWidget {
         required property int modelData
 
         readonly property var workspace: root.workspaceById(modelData)
+        readonly property bool occupied: workspace !== null && workspace.toplevels.values.length > 0
+        readonly property bool shown: root.monitor !== null && root.monitor.activeWorkspace !== null && root.monitor.activeWorkspace.id === modelData
+        readonly property int slot: root.slotOf(modelData)
+        readonly property bool firstGuest: root.blockOf(modelData) !== root.block && index > 0 && root.blockOf(root.workspaceIds()[index - 1]) === root.block
+        required property int index
 
-        // Shown on this monitor, versus shown on one of the others. Mutually
-        // exclusive by shownElsewhere's first line.
-        readonly property bool shownHere: modelData === root.shownId
-        readonly property bool shownAway: root.shownElsewhere(modelData)
-
-        // Which monitor this workspace lives on. Hyprland binds a workspace to
-        // the output it was created on, and that is what decides where pressing
-        // the number takes you -- so it is worth saying out loud on every bar,
-        // not just on the one that owns it.
-        //
-        // A workspace with no owner is one that does not exist yet: the widget
-        // always draws 1-5 whether or not Hyprland has them, and Hyprland drops
-        // an empty workspace as soon as it stops being shown. Pressing one of
-        // those creates it on whichever monitor has focus, so it belongs to no
-        // screen in particular and is dimmed hardest.
-        readonly property var owner: workspace !== null ? workspace.monitor : null
-        readonly property bool owned: owner !== null
-        readonly property bool foreign: root.monitorName !== "" && owned && String(owner.name) !== root.monitorName
+        // A gap sets visiting workspaces apart from the monitor's own.
+        Layout.leftMargin: firstGuest && !root.vertical ? Style.space(6) : 0
+        Layout.topMargin: firstGuest && root.vertical ? Style.space(6) : 0
 
         bar: root.bar
-        text: shownHere ? root.markerFilled : (shownAway ? root.markerOutline : (modelData === 10 ? "0" : String(modelData)))
-
-        // WidgetButton paints activeColor when `active`, so the accent is only
-        // ever asked for on the one marker that earns it: this monitor's
-        // workspace, on the monitor holding focus. Everything else keeps the
-        // bar's own foreground, which is the grey it has always been.
-        active: shownHere && root.monitorFocused
-        activeColor: Color.accent
-
-        // Opacity is the ownership channel, and nothing else -- what is on
-        // screen is the shape's job. `shownHere` leads so this monitor's own
-        // marker is never dimmed, and so the fallback path (monitorName empty,
-        // nothing foreign) still lights the one marker it draws.
-        //
-        // Foreign is the brighter of the two faint steps on purpose. A
-        // workspace another screen is holding is more real than one that does
-        // not exist, and the other way round reads as though an empty slot
-        // mattered more than a screenful of windows.
-        opacity: shownHere
-          ? root.ownOpacity
-          : (foreign ? root.foreignOpacity : (owned ? root.ownOpacity : root.ownerlessOpacity))
-
+        text: shown ? root.modeGlyph(root.activeMode) : (slot === root.slots ? "0" : String(slot))
+        opacity: occupied || shown ? 1 : 0.5
+        active: shown && root.monitor.focused // ACCENT
+        activeColor: Color.accent // ACCENT
         horizontalMargin: 6
         verticalPadding: 6
         fixedWidth: root.vertical ? root.barSize : Style.space(20)
         fixedHeight: root.barSize
-        onPressed: function() { root.focusWorkspace(modelData) }
+        onPressed: function() {
+          if (shown) root.cycleLayout()
+          else root.focusWorkspace(modelData)
+        }
+        onWheelMoved: function(delta) { root.scrollWorkspaces(delta) }
       }
     }
   }

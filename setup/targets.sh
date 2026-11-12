@@ -203,12 +203,13 @@ LINKS=(
   # would flash a window and close it.
   "$HOME/.local/bin/leave-peek|bin/leave-peek"
 
-  # The workspace indicators in the bar, made monitor-aware. A clone of
-  # Omarchy's omarchy.workspaces, which is how the shell wants built-in widgets
-  # customised -- the packaged copy under $OMARCHY_PATH/shell/plugins is never
-  # to be edited, and a user plugin cannot shadow a built-in id
-  # (omarchy-plugin-catalog does `unique_by(.id)` over built-ins first, so the
-  # packaged one would win and ours be ignored). Hence the new id.
+  # The workspace indicators in the bar, with the focused monitor's marker in
+  # the theme accent. A clone of Omarchy's omarchy.workspaces, which is how the
+  # shell wants built-in widgets customised -- the packaged copy under
+  # $OMARCHY_PATH/shell/plugins is never to be edited, and a user plugin cannot
+  # shadow a built-in id (omarchy-plugin-catalog does `unique_by(.id)` over
+  # built-ins first, so the packaged one would win and ours be ignored). Hence
+  # the new id.
   #
   # ~/.config/omarchy/plugins is the user plugin dir and Omarchy writes nothing
   # into it, so the whole directory is safe to link. omarchy-plugin-catalog
