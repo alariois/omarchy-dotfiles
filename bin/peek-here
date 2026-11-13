@@ -18,11 +18,18 @@
 # Shaped like msg-otp's toast, and for the same reason -- there is no window to
 # put this in, and a keypress that appears to do nothing is worse than no
 # keypress.
+#
+# Over imv the toast leads with the image on screen instead, and that is what
+# invoking it copies: the path is the thing you were pointing at, as a
+# selected file is in Nautilus. The launch keys know nothing of images -- over
+# imv both still open where Omarchy's reader says, which is $HOME -- so the
+# toast goes on to say so rather than implying they would follow the image.
 
 set -uo pipefail
 
-# U+F07C, an open folder.
-GLYPH=""
+# U+F07C, an open folder; U+F03E, a picture, for the imv case.
+GLYPH=$'\uf07c'
+IMAGE_GLYPH=$'\uf03e'
 
 tilde() { printf '%s' "${1/#"$HOME"/\~}"; }
 
@@ -44,11 +51,15 @@ escape() {
 # parameter and can never become a flag.
 #
 # --exec rides along as the toast's default action: clicking it, or pressing
-# SUPER+ALT+comma ("Invoke last notification"), puts the path on the
-# clipboard and dismisses the toast. The shell runs that argv directly, with no
-# shell in between, so a directory with a space or a quote in it stays one
-# argument -- which is also why --exec has to come last and be written as
-# separate words rather than one quoted string.
+# SUPER+comma ("Dismiss, invoke, or focus last notification"), puts the path
+# on the clipboard and dismisses the toast. SUPER+comma invokes rather than
+# opening its keyboard picker because this toast has --exec and no buttons;
+# SUPER+ALT+comma, which invoked before Omarchy 4.5, now only dismisses.
+#
+# The shell runs that argv directly, with no shell in between, so a directory
+# with a space or a quote in it stays one argument -- which is also why --exec
+# has to come last and be written as separate words rather than one quoted
+# string.
 #
 # The clipboard gets the absolute path, not the ~-abbreviated one the toast
 # shows: the short form is only meaningful to a shell, and a path is worth
@@ -63,6 +74,39 @@ toast() { # <headline> <body> [urgency] [path to copy on invoke]
   omarchy-notification-send "${opts[@]}" "$1" "$2" ${action[@]+"${action[@]}"}
 }
 
+# The image on screen when the focused window is imv; nothing otherwise.
+#
+# Read from the window title, whose default -- the one in use: neither
+# ~/.config/imv/config nor Omarchy's sets title_text -- is
+#   imv - [1/3] [918x1034] [116%] /home/alari/Downloads/image (1).png [scale to fit]
+# imv writes the path out absolute even when launched on a relative one, so the
+# title alone answers it. The pattern pins the fixed parts at both ends and
+# gives the path everything between, greedily, so a name with brackets, a "%]"
+# or a double space in it comes through whole -- all three tried, along with
+# a literal $HOME and backticks. The trailing label is the scaling mode, one
+# of "actual size", "shrink to fit", "scale to fit" or "crop", hence spaces.
+#
+# The -f test is the backstop: a title_text set some day, an image piped in
+# on stdin, or anything else the pattern misreads names no file, and falls
+# through to the ordinary peek rather than offering a wrong path.
+#
+# imv-msg <pid> exec could ask imv for $imv_current_file outright, but the
+# command it runs writes nowhere imv-msg can read, so the answer would have to
+# come back through a temp file and a wait -- for the string the title
+# already carries.
+viewed_image() {
+  local active class title
+  local re='^imv - \[[0-9]+/[0-9]+\] \[[0-9]+x[0-9]+\] \[[0-9]+%\] (/.*) \[[a-z ]+\]$'
+  active=$(hyprctl activewindow -j 2>/dev/null) || return 1
+  class=$(jq -r '.class // empty' <<<"$active" 2>/dev/null) || return 1
+  [[ $class == imv ]] || return 1
+  title=$(jq -r '.title // empty' <<<"$active" 2>/dev/null) || return 1
+  [[ $title =~ $re && -f ${BASH_REMATCH[1]} ]] || return 1
+  printf '%s' "${BASH_REMATCH[1]}"
+}
+
+image=$(viewed_image) || image=""
+
 printed=$(term-here --print 2>/dev/null) || printed=""
 term_dir=${printed%%$'\t'*}
 rest=${printed#*$'\t'}
@@ -71,7 +115,7 @@ selected=${rest#*$'\t'}
 
 files_dir=$(files-here --print 2>/dev/null) || files_dir=""
 
-if [[ -z $term_dir && -z $files_dir ]]; then
+if [[ -z $image && -z $term_dir && -z $files_dir ]]; then
   toast "Nowhere" "Neither key could read the focused window" critical
   exit 1
 fi
@@ -87,7 +131,16 @@ body=""
 # term_line already starts with the space it puts in front of the path, which
 # is why there is none after "types".
 [[ -n $term_line ]] && body+="Terminal types$(escape "$term_line")"$'\n'
-if [[ $files_dir == "$term_dir" ]]; then
+if [[ -n $image ]]; then
+  # The headline is a file now, so "here" would point at the wrong thing:
+  # both directories get spelled out instead.
+  if [[ $files_dir == "$term_dir" ]]; then
+    body+="Terminal and Files open $(escape "$(tilde "$term_dir")")"
+  else
+    body+="Terminal opens $(escape "$(tilde "$term_dir")")"$'\n'
+    body+="Files opens $(escape "$(tilde "$files_dir")")"
+  fi
+elif [[ $files_dir == "$term_dir" ]]; then
   body+="Terminal and Files open here"
 else
   body+="Files opens $(escape "$(tilde "$files_dir")")"
@@ -95,8 +148,14 @@ fi
 
 # With files selected in Nautilus it is those that get copied, not the folder
 # they are in: the toast already names them under "Terminal types", and a file
-# is what you were pointing at. Several go one per line.
+# is what you were pointing at. Several go one per line. An image in imv is
+# the same idea and takes the same place.
 copy=$headline
 [[ -n $selected ]] && copy=$selected
+if [[ -n $image ]]; then
+  GLYPH=$IMAGE_GLYPH
+  headline=$image
+  copy=$image
+fi
 
 toast "$(escape "$(tilde "$headline")")" "$body" "" "$copy"

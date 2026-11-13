@@ -167,9 +167,10 @@ LINKS=(
   "$HOME/.local/bin/files-here|bin/files-here"
 
   # SUPER+I: the same question those two keys ask themselves, answered in a
-  # toast instead of a window. It resolves nothing of its own -- term-here and
-  # files-here each take --print -- so there is no third copy of the logic to
-  # drift from the two that matter.
+  # toast instead of a window. It resolves no directory of its own -- term-here
+  # and files-here each take --print -- so there is no third copy of the logic
+  # to drift from the two that matter. The one thing it reads itself is imv's
+  # image path, a question neither launch key asks.
   "$HOME/.local/bin/peek-here|bin/peek-here"
 
   # SUPER+SHIFT+I: the clipboard's image saved where SUPER+I points, under a

@@ -446,7 +446,8 @@ o.bind("SUPER + BACKSLASH", "Former workspace", hl.dsp.focus({ workspace = "prev
 -- reader makes of it -- and none of that is visible until a window appears.
 -- bin/peek-here asks both the same question they ask themselves and puts the
 -- answer in a toast, the shape SUPER+ALT+CTRL+M already uses for a keypress
--- with no window of its own.
+-- with no window of its own. Over imv it leads with the image's path instead,
+-- and invoking the toast copies that.
 --
 -- Unbound first for the usual reason (see the Gmail block): Omarchy 4.5 put
 -- "Switch input language" on SUPER + I, and "... back" on SUPER + SHIFT + I,
