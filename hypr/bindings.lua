@@ -131,6 +131,11 @@ o.bind("SUPER + ALT + CTRL + M", "Copy login code", "msg-otp")
 -- screen, so SUPER+ALT+L is what was left, and it is the exact parallel of
 -- the M row.
 --
+-- Omarchy 4.5 then took it too, for "Cycle workspace layout back" in
+-- default/hypr/bindings/tiling.lua -- unbound below for the usual reason (see
+-- the Gmail block). Nothing is lost: there are only three layouts, so SUPER+L
+-- forward reaches every one.
+--
 -- Sized to the table rather than to the screen. It is 83 columns wide and
 -- about twenty rows tall; msg-peek's 720 would nearly fill the laptop's 750
 -- logical pixels for the sake of a lot of empty space. leave-peek passes
@@ -149,6 +154,7 @@ o.window("^(leave-peek)$", {
   opacity = "1.0 1.0",
 })
 
+hl.unbind("SUPER + ALT + L")
 o.bind("SUPER + ALT + L", "When to leave",
   "setsid uwsm-app -- xdg-terminal-exec --app-id=leave-peek --title=Leave -e leave-peek")
 
@@ -185,11 +191,11 @@ o.bind("SUPER + SHIFT + S", "Slack", "slack-launch")
 -- SUPER + SHIFT + W: WhatsApp, in place of Omarchy's Omawrite.
 -- SUPER + SHIFT + Q: Messenger. Both open on workspace 5, next to Slack.
 --
--- W needs the unbind for the same reason as Gmail's and Slack's above:
+-- Both need the unbind for the same reason as Gmail's and Slack's above:
 -- Omarchy's o.bind() drops the hl.bind() handle, so there is no object to
 -- disable and binding over the key would leave both entries registered. Q
--- needs none -- stock Omarchy leaves SUPER + SHIFT + Q free (the calculator
--- is on SUPER + CTRL + Q).
+-- was free until Omarchy 4.5 moved the calculator onto it from SUPER + CTRL +
+-- Q; the calculator keeps XF86Calculator.
 --
 -- Matched on class rather than through `{ webapp = ..., focus = true }`. That
 -- sugar hands the *description* to omarchy-launch-or-focus-webapp, which tests
@@ -204,6 +210,7 @@ o.bind("SUPER + SHIFT + S", "Slack", "slack-launch")
 hl.unbind("SUPER + SHIFT + W")
 o.bind("SUPER + SHIFT + W", "WhatsApp",
   "omarchy-launch-or-focus-webapp 'chrome-web\\.whatsapp\\.com__' 'https://web.whatsapp.com/'")
+hl.unbind("SUPER + SHIFT + Q")
 o.bind("SUPER + SHIFT + Q", "Messenger",
   "omarchy-launch-or-focus-webapp 'chrome-www\\.facebook\\.com__messages' 'https://www.facebook.com/messages'")
 
@@ -237,10 +244,11 @@ o.bind("SUPER + SHIFT + C", "Google Calendar",
 
 -- SUPER + SHIFT + T: the Superhands Team timesheet, T for timesheet.
 --
--- No unbind: the chord is free in stock Omarchy. T carries SUPER, SUPER + CTRL
--- and SUPER + CTRL + ALT upstream, and SUPER + SHIFT + ALT is Monkeytype below,
--- but nothing sits on SUPER + SHIFT, and nothing reaches T (code 28) through a
--- keycode-spelled bind.
+-- Unbound first for the usual reason (see the Gmail block): Omarchy 4.5 put
+-- "Activity" (btop) on this chord in default/hypr/bindings/utilities.lua.
+-- Before that nothing sat on SUPER + SHIFT + T; T carries SUPER, SUPER + CTRL
+-- and SUPER + CTRL + ALT upstream, SUPER + SHIFT + ALT is Monkeytype below,
+-- and nothing reaches T (code 28) through a keycode-spelled bind.
 --
 -- Class-matched like Calendar above. The site titles its window "Superhands
 -- team", so a description match would also focus a browser tab left open on it.
@@ -251,6 +259,7 @@ o.bind("SUPER + SHIFT + C", "Google Calendar",
 --
 -- No workspace rule, for Calendar's reason: it is work, so it should open on
 -- whichever workspace you are working on.
+hl.unbind("SUPER + SHIFT + T")
 o.bind("SUPER + SHIFT + T", "Superhands Team",
   "omarchy-launch-or-focus-webapp 'chrome-team\\.superhands\\.ee__timesheet' 'https://team.superhands.ee/timesheet'")
 
@@ -439,10 +448,16 @@ o.bind("SUPER + BACKSLASH", "Former workspace", hl.dsp.focus({ workspace = "prev
 -- answer in a toast, the shape SUPER+ALT+CTRL+M already uses for a keypress
 -- with no window of its own.
 --
--- No unbind: SUPER + I is free in stock Omarchy. The only chord on the key is
--- SUPER + CTRL + I ("Toggle locking on idle"), which is unrelated, so "i for
--- info" carries no ambiguity. SUPER + U is the only wholly unbound letter left
--- if this key is ever wanted for something else.
+-- Unbound first for the usual reason (see the Gmail block): Omarchy 4.5 put
+-- "Switch input language" on SUPER + I, and "... back" on SUPER + SHIFT + I,
+-- in default/hypr/bindings/input-method.lua. Both cycle Fcitx input methods,
+-- and with one layout and no input method installed there is nothing to
+-- cycle -- `omarchy-input-method status` says so. If that ever changes, one
+-- side has to move to another key. Otherwise the only chord on I is SUPER +
+-- CTRL + I ("Toggle locking on idle"), which is unrelated, so "i for info"
+-- carries no ambiguity. SUPER + U is still the only wholly unbound letter if
+-- this key is ever wanted for something else.
+hl.unbind("SUPER + I")
 o.bind("SUPER + I", "Peek at target directory", "peek-here")
 
 -- SUPER + SHIFT + I: save the clipboard's image where SUPER + I points.
@@ -453,7 +468,8 @@ o.bind("SUPER + I", "Peek at target directory", "peek-here")
 -- save nothing. Once saved, the file's full path replaces the image on the
 -- clipboard. Shift on the peek's key because it acts on the peek's answer.
 --
--- No unbind: SUPER + SHIFT + I is free in stock Omarchy, as plain SUPER + I is.
+-- Unbound for the same reason as SUPER + I above.
+hl.unbind("SUPER + SHIFT + I")
 o.bind("SUPER + SHIFT + I", "Save clipboard image to target directory", "paste-here")
 
 -- SUPER + J: Omarchy's "Toggle window split", but only where there is a split.
